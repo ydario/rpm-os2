@@ -1,0 +1,148 @@
+# Per-platform rpm configuration file.
+
+#==============================================================================
+# ---- per-platform macros.
+#
+%_arch			@RPMCANONARCH@
+%_vendor		@RPMCANONVENDOR@
+%_os			@RPMCANONOS@
+%_gnu			@RPMRC_GNU@
+%_target_platform	%{_target_cpu}-%{_vendor}-%{_target_os}
+%optflags		@RPMRC_OPTFLAGS@
+
+%__isa_name		@ISANAME@
+%__isa_bits		@ISABITS@
+%__isa			%{__isa_name}-%{__isa_bits}
+
+#==============================================================================
+# ---- configure macros.
+#
+%_prefix		@prefix@
+%_exec_prefix		@exec_prefix@
+%_bindir		@bindir@
+%_sbindir		@sbindir@
+%_libexecdir		@libexecdir@
+%_datarootdir		@datarootdir@
+%_datadir		@datadir@
+%_sysconfdir		@sysconfdir@
+%_sharedstatedir	@sharedstatedir@
+%_localstatedir		@localstatedir@
+%_lib			@LIB@
+%_libdir		@exec_prefix@/@LIB@
+%_includedir		@includedir@
+%_oldincludedir		@oldincludedir@
+%_infodir		@infodir@
+%_mandir		@mandir@
+%_initddir		%{_sysconfdir}/rc.d/init.d
+# Deprecated misspelling, present for backwards compatibility.
+%_initrddir		%{_initddir}
+
+%_defaultdocdir		%{_datadir}/doc
+
+%_smp_mflags %([ -z "$RPM_BUILD_NCPUS" ] \\\
+	&& RPM_BUILD_NCPUS="`/usr/bin/getconf _NPROCESSORS_ONLN`"; \\\
+	[ "$RPM_BUILD_NCPUS" -gt 1 ] && echo "-j$RPM_BUILD_NCPUS")
+
+#==============================================================================
+# ---- Build policy macros.
+#
+#---------------------------------------------------------------------
+#	Expanded at end of %install scriptlet.
+#
+
+%__arch_install_post   @ARCH_INSTALL_POST@
+
+%__os_install_post    \
+    %{_rpmconfigdir}/brp-compress \
+    %{_rpmconfigdir}/brp-strip \
+    %{_rpmconfigdir}/brp-strip-static-archive \
+    %{_rpmconfigdir}/brp-strip-comment-note \
+%{nil}
+
+%__spec_install_post\
+    %{?__debug_package:%{__debug_install_post}}\
+    %{__arch_install_post}\
+    %{__os_install_post}\
+%{nil}
+
+@redhat@#---------------------------------------------------------------------
+@redhat@#	Expanded at end of %prep
+@redhat@#
+@redhat@%__id_u		@__ID_U@
+@redhat@%__chown_Rhf	@__CHOWN_RHF@
+@redhat@%__chgrp_Rhf	@__CHGRP_RHF@
+@redhat@%_fixperms	%{__chmod} -Rf @FIXPERMS@
+@redhat@#---------------------------------------------------------------------
+@redhat@#	Always use %defattr(-,root,root) in %files (added in rpm-4.0.4)
+@redhat@#
+@redhat@#%files(n:f:)	%%files%{?-f: -f %{-f*}}%{?-n: -n %{-n*}} %{?1}\
+@redhat@#%defattr(-,root,root,-)\
+@redhat@#%{nil}
+
+
+@apple@#---------------------------------------------------------------------
+@apple@#	Apple Darwin vendor specific macros
+@apple@#
+@apple@%_use_internal_dependency_generator     0
+@apple@%__so	dylib
+
+
+@mandrake@#---------------------------------------------------------------------
+@mandrake@#	Mandrake vendor specific macros
+@mandrake@# XXX Add a support e-mail address here, please.
+@mandrake@#
+@mandrake@# XXX These values, particularly vendor, need to be regularized, please.
+@mandrake@%_vendor		MandrakeSoft
+@mandrake@%_real_vendor		mandrake
+@mandrake@%_target_platform	%{_target_cpu}-%{_real_vendor}-%{_target_os}
+@mandrake@
+@mandrake@# XXX I'll make these the default linux values soon as I can.
+@mandrake@%_libexecdir		%{_libdir}
+@mandrake@%_localstatedir		%{_var}/lib
+@mandrake@
+@mandrake@# XXX A copy of brp-mandrake, please. I'd suggest break down by
+@mandrake@#     functionality rather than vendor <shrug>.
+@mandrake@%__os_install_post    \
+@mandrake@    %{_rpmconfigdir}/brp-mandrake \
+@mandrake@%{nil}
+@mandrake@
+@mandrake@# make
+@mandrake@%_make_bin make
+@mandrake@%make if [ -z "$NPROCS" -a -f /proc/stat ]; then NPROCS=`egrep -c ^cpu[0-9]+ /proc/stat || :`; fi \
+@mandrake@if [ -z "$NPROCS" -o "$NPROCS" -le "0" ]; then \
+@mandrake@  NPROCS=1 \
+@mandrake@fi \
+@mandrake@%{_make_bin} -j$NPROCS
+@mandrake@
+@mandrake@# Menu directories
+@mandrake@%_menudir %{_libdir}/menu
+@mandrake@%_iconsdir %{_datadir}/icons
+@mandrake@%_miconsdir %{_datadir}/icons/mini
+@mandrake@%_liconsdir %{_datadir}/icons/large
+@mandrake@
+@mandrake@# Update Menu
+@mandrake@%_update_menus_bin %{_bindir}/update-menus
+@mandrake@%update_menus if [ -x %{_update_menus_bin} ]; then %{_update_menus_bin} || true ; fi
+@mandrake@
+@mandrake@# Clean Menu
+@mandrake@%clean_menus if [ "$1" = "0" -a -x %{_update_menus_bin} ]; then %{_update_menus_bin} || true ; fi
+@mandrake@
+@mandrake@# Update Window Managers session.
+@mandrake@%_fndsession_bin %{_sbindir}/fndSession
+@mandrake@%make_session if [ -x %{_fndsession_bin} ]; then %{_fndsession_bin} || true ; fi
+@mandrake@
+@mandrake@#	Where install-info is located
+@mandrake@%__install_info		/sbin/install-info
+@mandrake@
+@mandrake@#	Macros to install info-files.
+@mandrake@%_install_info()	%{__install_info} %{_infodir}/%{1}%{_extension} --dir=%{_infodir}/dir\;
+@mandrake@
+@mandrake@#	Macros to remove info-files. (keep the "alone on its line ';'")
+@mandrake@%_remove_install_info() if [ "$1" = "0" ]; then %{__install_info} \\\
+@mandrake@ %{_infodir}/%{1}%{_extension} --dir=%{_infodir}/dir --remove ; fi\
+@mandrake@%{nil}
+@mandrake@
+@mandrake@# Games macros
+@mandrake@%_gamesdir	games
+@mandrake@%_gamesbindir   %{_prefix}/%{_gamesdir}
+@mandrake@%_gamesdatadir  %{_datadir}/%{_gamesdir}

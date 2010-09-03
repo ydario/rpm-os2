@@ -1,0 +1,129 @@
+#    rpmconflict.at: rpm file conflict tests
+
+AT_BANNER([RPM file conflicts])
+
+# ------------------------------
+# (Build and) install conflicting package (should fail)
+AT_SETUP([rpm -U to package with file conflict])
+AT_KEYWORDS([install])
+AT_CHECK([
+RPMDB_CLEAR
+rm -rf "${TOPDIR}"
+
+for p in "one" "two"; do
+    run rpmbuild --quiet -bb \
+        --define "pkg $p" \
+	--define "filedata $p" \
+          ${RPMDATA}/SPECS/conflicttest.spec
+done
+
+runroot rpm -U "${TOPDIR}"/RPMS/noarch/conflictone-1.0-1.noarch.rpm
+runroot rpm -U "${TOPDIR}"/RPMS/noarch/conflicttwo-1.0-1.noarch.rpm
+],
+[1],
+[ignore],
+[ignore])
+AT_CLEANUP
+
+# ------------------------------
+# Install conflicting packages in same transaction (should fail)
+AT_SETUP([rpm -U two packages with a conflicting file])
+AT_KEYWORDS([install])
+AT_CHECK([
+RPMDB_CLEAR
+
+runroot rpm -U \
+  "${TOPDIR}"/RPMS/noarch/conflictone-1.0-1.noarch.rpm \
+  "${TOPDIR}"/RPMS/noarch/conflicttwo-1.0-1.noarch.rpm
+],
+[2],
+[ignore],
+[ignore])
+AT_CLEANUP
+
+# ------------------------------
+# (Build and) install package with shareable file
+AT_SETUP([rpm -U package with shareable file])
+AT_KEYWORDS([install])
+AT_CHECK([
+RPMDB_CLEAR
+rm -rf "${TOPDIR}"
+
+for p in "one" "two"; do
+    run rpmbuild --quiet -bb \
+        --define "pkg $p" \
+	--define "filedata same_stuff" \
+          ${RPMDATA}/SPECS/conflicttest.spec
+done
+
+runroot rpm -U "${TOPDIR}"/RPMS/noarch/conflictone-1.0-1.noarch.rpm
+runroot rpm -U "${TOPDIR}"/RPMS/noarch/conflicttwo-1.0-1.noarch.rpm
+],
+[0],
+[ignore],
+[ignore])
+AT_CLEANUP
+
+# ------------------------------
+# Install packages with shareable file in same transaction
+AT_SETUP([rpm -U two packages with shareable file])
+AT_KEYWORDS([install])
+AT_CHECK([
+RPMDB_CLEAR
+
+runroot rpm -U \
+  "${TOPDIR}"/RPMS/noarch/conflictone-1.0-1.noarch.rpm \
+  "${TOPDIR}"/RPMS/noarch/conflicttwo-1.0-1.noarch.rpm
+],
+[0],
+[ignore],
+[ignore])
+AT_CLEANUP
+
+
+# ------------------------------
+# Replace directory with symlink, this is expected to fail
+AT_SETUP([rpm -U replacing directory with symlink])
+AT_KEYWORDS([install])
+AT_CHECK([
+RPMDB_CLEAR
+rm -rf "${TOPDIR}"
+rm -rf "${RPMTEST}"/usr/{share,lib}/symlinktest*
+
+run rpmbuild --quiet -bb \
+    --define "rel 1" --without symlink ${RPMDATA}/SPECS/symlinktest.spec
+run rpmbuild --quiet -bb \
+    --define "rel 2" --with symlink ${RPMDATA}/SPECS/symlinktest.spec
+
+runroot rpm -U "${TOPDIR}"/RPMS/noarch/symlinktest-1.0-1.noarch.rpm
+runroot rpm -U "${TOPDIR}"/RPMS/noarch/symlinktest-1.0-2.noarch.rpm
+],
+[1],
+[],
+[error: unpacking of archive failed on file /usr/share/symlinktest: cpio: rename failed - Is a directory
+])
+AT_CLEANUP
+
+# ------------------------------
+# Replace symlink with a directory - the upgrade succeeds but leaves an
+# orphan directory that the symlink now points to. Should verify the
+# result more carefully...
+AT_SETUP([rpm -U replacing symlink with directory])
+AT_KEYWORDS([install])
+AT_CHECK([
+RPMDB_CLEAR
+rm -rf "${TOPDIR}"
+rm -rf "${RPMTEST}"/usr/{share,lib}/symlinktest*
+
+run rpmbuild --quiet -bb \
+    --define "rel 1" --with symlink ${RPMDATA}/SPECS/symlinktest.spec
+run rpmbuild --quiet -bb \
+    --define "rel 2" --without symlink ${RPMDATA}/SPECS/symlinktest.spec
+
+runroot rpm -U "${TOPDIR}"/RPMS/noarch/symlinktest-1.0-1.noarch.rpm
+runroot rpm -U "${TOPDIR}"/RPMS/noarch/symlinktest-1.0-2.noarch.rpm
+],
+[0],
+[],
+[])
+AT_CLEANUP

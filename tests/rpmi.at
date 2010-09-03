@@ -1,0 +1,98 @@
+#    rpmi.at: test various aspects of rpm install
+#
+#    Copyright (C) 2007  Ralf Corsépius <corsepiu@fedoraproject.org>
+#
+#    This program is free software; you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation; either version 2 of the License, or
+#    (at your option) any later version.
+#
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#
+#    You should have received a copy of the GNU General Public License
+#    along with this program; if not, write to the Free Software
+#    Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+
+AT_BANNER([RPM install tests])
+
+# ------------------------------
+# Check if rpm -U *.src.rpm works
+AT_SETUP([rpm -U *.src.rpm])
+AT_KEYWORDS([install])
+AT_CHECK([
+rm -rf ${TOPDIR}
+
+run rpm \
+  -U "${abs_srcdir}"/data/SRPMS/hello-1.0-1.src.rpm
+],
+[0],
+[ignore],
+[ignore])
+AT_CLEANUP
+
+# ------------------------------
+# Check if rpm -i *.src.rpm works
+AT_SETUP([rpm -i *.src.rpm])
+AT_KEYWORDS([install])
+AT_CHECK([
+rm -rf ${TOPDIR}
+
+run rpm \
+  -i "${abs_srcdir}"/data/SRPMS/hello-1.0-1.src.rpm
+],
+[0],
+[ignore],
+[ignore])
+AT_CLEANUP
+
+# ------------------------------
+# Various error behavior tests
+#
+AT_SETUP([rpm -i <nonexistent file>])
+AT_KEYWORDS([install])
+AT_CHECK([
+run rpm \
+  -i no_such_file
+],
+[1],
+[ignore],
+[ignore])
+AT_CLEANUP
+
+# XXX hmm, --nomanifest seems broken atm...
+AT_SETUP([rpm -i --nomanifest <garbage text file>])
+AT_KEYWORDS([install])
+AT_CHECK([
+junk="${RPMTEST}/textfile"
+cat << EOF > "${junk}"
+no_such.file
+not_an.rpm
+EOF
+
+run rpm \
+  -Uvv --nomanifest "${junk}"
+],
+[1],
+[ignore],
+[ignore])
+AT_CLEANUP
+
+AT_SETUP([rpm -i <garbage text file])
+AT_KEYWORDS([install])
+AT_CHECK([
+junk="${RPMTEST}/not_an.rpm"
+cat << EOF > "${junk}"
+no_such.file
+not_an.rpm
+EOF
+
+run rpm \
+  -Uvv "${junk}"
+],
+[2],
+[ignore],
+[ignore])
+AT_CLEANUP

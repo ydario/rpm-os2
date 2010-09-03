@@ -1,0 +1,14 @@
+AT_TESTED([rpm rpmbuild rpmquery])
+
+m4_define([RPMDB_INIT],[[
+run rpm \
+  --root="${abs_builddir}"/testing \
+  --initdb
+]])
+
+m4_define([RPMDB_CLEAR],[[
+rm -rf "${abs_builddir}"/testing`run rpm --eval '%_dbpath'`/*
+]])
+
+
+AT_INIT
