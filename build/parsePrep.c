@@ -25,10 +25,12 @@ static rpmRC checkOwners(const char * urlfn)
 		urlfn, strerror(errno));
 	return RPMRC_FAIL;
     }
+#ifndef __EMX__
     if (!getUname(sb.st_uid) || !getGname(sb.st_gid)) {
 	rpmlog(RPMLOG_ERR, _("Bad owner/group: %s\n"), urlfn);
 	return RPMRC_FAIL;
     }
+#endif
 
     return RPMRC_OK;
 }

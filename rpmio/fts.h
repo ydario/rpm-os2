@@ -36,7 +36,9 @@
 #include <features.h>
 #else
 
+#ifndef __EMX__
 #   define __THROW
+#endif
 #ifdef  __cplusplus
 # define __BEGIN_DECLS  extern "C" {
 # define __END_DECLS    }

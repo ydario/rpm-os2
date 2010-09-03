@@ -221,7 +221,11 @@ static int buildForTarget(rpmts ts, const char * arg, BTA_t ba)
 	specFile = xstrdup(arg);
     }
 
-    if (*specFile != '/') {
+    if (*specFile != '/'
+#ifdef __EMX__
+	&& specFile[1] != ':'
+#endif
+	) {
 	char *cwd = rpmGetCwd();
 	char *s = NULL;
 	rasprintf(&s, "%s/%s", cwd, arg);

@@ -325,6 +325,7 @@ top_builddir = @top_builddir@
 top_srcdir = @top_srcdir@
 AM_CPPFLAGS = -I$(top_builddir) -I$(top_srcdir) \
 	-I$(top_builddir)/include/ @WITH_NSS_INCLUDE@ \
+	-I$(top_builddir)/include/nss \
 	@WITH_LUA_INCLUDE@ @WITH_POPT_INCLUDE@ -I$(top_srcdir)/misc \
 	@WITH_LIBELF_INCLUDE@ -DRPMCONFIGDIR="\"@RPMCONFIGDIR@\"" \
 	-DLOCALSTATEDIR="\"$(localstatedir)\"" $(am__append_1)
@@ -409,6 +410,9 @@ clean-usrlibLTLIBRARIES:
 	done
 librpmio.la: $(librpmio_la_OBJECTS) $(librpmio_la_DEPENDENCIES) 
 	$(librpmio_la_LINK) -rpath $(usrlibdir) $(librpmio_la_OBJECTS) $(librpmio_la_LIBADD) $(LIBS)
+	cp .libs/rpmio.a .libs/rpmio_s.a
+	dllar -g -nolxlite -Zomf -o .libs/rpmio .libs/rpmio.a -lbz2 -lz -lpopt -lurpo -lmmap -lpthread -lssp
+	cp .libs/rpmio.dll ..
 
 clean-checkPROGRAMS:
 	@list='$(check_PROGRAMS)'; test -n "$$list" || exit 0; \

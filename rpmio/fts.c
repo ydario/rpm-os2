@@ -50,6 +50,14 @@ static char sccsid[] = "@(#)fts.c	8.6 (Berkeley) 8/14/94";
 #   define _STAT_VER		0
 #   define __fxstat64(_stat_ver, _fd, _sbp)	fstat((_fd), (_sbp))
 #endif
+#if defined(__EMX__)
+# define        _INCLUDE_POSIX_SOURCE
+#   define __errno_location() 	(&errno)
+#   define dirfd(dirp)		-1
+#   define stat64		stat
+#   define _STAT_VER		0
+#   define __fxstat64(_stat_ver, _fd, _sbp)	fstat((_fd), (_sbp))
+#endif
 #if defined(sun)
 #   define __errno_location()	(&errno)
 #   define dirfd(dirp)		-1

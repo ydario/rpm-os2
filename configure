@@ -18546,7 +18546,7 @@ _ACEOF
 
 else
 
-  as_fn_error "missing required NSPR / NSS header" "$LINENO" 5
+  echo as_fn_error "missing required NSPR / NSS header" "$LINENO" 5
 
 fi
 
@@ -18594,7 +18594,7 @@ if test "x$ac_cv_lib_nss3_NSS_NoDB_Init" = x""yes; then :
 
 else
 
-  as_fn_error "missing required NSS library 'nss3'" "$LINENO" 5
+  echo as_fn_error "missing required NSS library 'nss3'" "$LINENO" 5
 
 fi
 
@@ -18615,7 +18615,7 @@ if test "${ac_cv_lib_magic_magic_open+set}" = set; then :
   $as_echo_n "(cached) " >&6
 else
   ac_check_lib_save_LIBS=$LIBS
-LIBS="-lmagic  $LIBS"
+LIBS="-lmagic -lz  $LIBS"
 cat confdefs.h - <<_ACEOF >conftest.$ac_ext
 /* end confdefs.h.  */
 

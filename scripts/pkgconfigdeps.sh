@@ -1,4 +1,8 @@
-#!/bin/bash
+#!/bin/sh
+
+# TODO fix this script to accept $2 instead of stdin
+# re-read file to stdin...
+exec 0<$2
 
 pkgconfig=/usr/bin/pkg-config
 test -x $pkgconfig || {

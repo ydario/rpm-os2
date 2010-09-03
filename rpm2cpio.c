@@ -19,6 +19,11 @@ int main(int argc, char *argv[])
     char * rpmio_flags = NULL;
     rpmRC rc;
     FD_t gzdi;
+
+#ifdef __EMX__
+    _fsetmode( stdin, "b");
+    _fsetmode( stdout, "b");
+#endif
     
     setprogname(argv[0]);	/* Retrofit glibc __progname */
     rpmReadConfigFiles(NULL, NULL);

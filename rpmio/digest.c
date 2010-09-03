@@ -2,6 +2,8 @@
  * \file rpmio/digest.c
  */
 
+#include <stdio.h>
+
 #include "system.h"
 
 #include "rpmio/digest.h"
@@ -13,7 +15,6 @@
 #else
 #define	DPRINTF(_a)
 #endif
-
 
 /**
  * MD5/SHA1 digest private data.
@@ -114,7 +115,7 @@ rpmDigestDup(DIGEST_CTX octx)
 {
     DIGEST_CTX nctx = NULL;
     if (octx) {
-	HASHContext *hctx = HASH_Clone(octx->hashctx);
+	HASHContext *hctx = NULL;//HASH_Clone(octx->hashctx);
 	if (hctx) {
 	    nctx = memcpy(xcalloc(1, sizeof(*nctx)), octx, sizeof(*nctx));
 	    nctx->hashctx = hctx;
@@ -157,7 +158,7 @@ static HASH_HashType getHashType(pgpHashAlgo hashalgo)
 size_t
 rpmDigestLength(pgpHashAlgo hashalgo)
 {
-    return HASH_ResultLen(getHashType(hashalgo));
+    return 0;//HASH_ResultLen(getHashType(hashalgo));
 }
 
 DIGEST_CTX
@@ -170,12 +171,12 @@ rpmDigestInit(pgpHashAlgo hashalgo, rpmDigestFlags flags)
     if (type == HASH_AlgNULL || rpmInitCrypto() < 0)
 	goto exit;
 
-    if ((hashctx = HASH_Create(type)) != NULL) {
+    if ((hashctx = (NULL /* HASH_Create(type)*/)) != NULL) {
 	ctx = xcalloc(1, sizeof(*ctx));
 	ctx->flags = flags;
 	ctx->algo = hashalgo;
 	ctx->hashctx = hashctx;
-    	HASH_Begin(ctx->hashctx);
+    	//HASH_Begin(ctx->hashctx);
     }
     
 DPRINTF((stderr, "*** Init(%x) ctx %p hashctx %p\n", flags, ctx, ctx->hashctx));
@@ -198,7 +199,7 @@ DPRINTF((stderr, "*** Update(%p,%p,%zd) hashctx %p \"%s\"\n", ctx, data, len, ct
    	if (len < partlen) {
    		partlen = len;
    	}
-	HASH_Update(ctx->hashctx, ptr, partlen);
+	//HASH_Update(ctx->hashctx, ptr, partlen);
 	ptr += partlen;
 	len -= partlen;
    }
@@ -213,12 +214,12 @@ rpmDigestFinal(DIGEST_CTX ctx, void ** datap, size_t *lenp, int asAscii)
 
     if (ctx == NULL)
 	return -1;
-    digestlen = HASH_ResultLenContext(ctx->hashctx);
+    digestlen = 0;//HASH_ResultLenContext(ctx->hashctx);
     digest = xmalloc(digestlen);
 
 DPRINTF((stderr, "*** Final(%p,%p,%p,%zd) hashctx %p digest %p\n", ctx, datap, lenp, asAscii, ctx->hashctx, digest));
 /* FIX: check rc */
-    HASH_End(ctx->hashctx, digest, (unsigned int *) &digestlen, digestlen);
+    //HASH_End(ctx->hashctx, digest, (unsigned int *) &digestlen, digestlen);
 
     /* Return final digest. */
     if (!asAscii) {
@@ -238,7 +239,7 @@ DPRINTF((stderr, "*** Final(%p,%p,%p,%zd) hashctx %p digest %p\n", ctx, datap, l
 	memset(digest, 0, digestlen);	/* In case it's sensitive */
 	free(digest);
     }
-    HASH_Destroy(ctx->hashctx);
+    //HASH_Destroy(ctx->hashctx);
     memset(ctx, 0, sizeof(*ctx));	/* In case it's sensitive */
     free(ctx);
     return 0;

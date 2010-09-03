@@ -831,10 +831,12 @@ static int expandRegular(FSM_t fsm)
 	(void) Fflush(fsm->wfd);
 	fdFiniDigest(fsm->wfd, fsm->digestalgo, &digest, NULL, asAscii);
 
+#ifndef __EMX__ // YD FIXME
 	if (digest == NULL) {
 	    rc = CPIOERR_DIGEST_MISMATCH;
 	    goto exit;
 	}
+#endif
 
 	if (fsm->digest != NULL) {
 	    size_t diglen = rpmDigestLength(fsm->digestalgo);
@@ -2071,6 +2073,11 @@ if (!(fsm->mapFlags & CPIO_ALL_HARDLINKS)) break;
 	if (rc < 0)	rc = CPIOERR_RENAME_FAILED;
 	break;
     case FSM_MKDIR:
+#ifdef __EMX__
+	if (strcmp(fsm->path, "/@unixroot")==0)
+	    rc = 0;
+        else
+#endif
 	rc = mkdir(fsm->path, (st->st_mode & 07777));
 	if (_fsm_debug && (stage & FSM_SYSCALL))
 	    rpmlog(RPMLOG_DEBUG, " %8s (%s, 0%04o) %s\n", cur,
@@ -2079,6 +2086,11 @@ if (!(fsm->mapFlags & CPIO_ALL_HARDLINKS)) break;
 	if (rc < 0)	rc = CPIOERR_MKDIR_FAILED;
 	break;
     case FSM_RMDIR:
+#ifdef __EMX__
+	if (strcmp(fsm->path, "/@unixroot")==0)
+	    rc = 0;
+        else
+#endif
 	rc = rmdir(fsm->path);
 	if (_fsm_debug && (stage & FSM_SYSCALL))
 	    rpmlog(RPMLOG_DEBUG, " %8s (%s) %s\n", cur,

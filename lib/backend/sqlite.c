@@ -103,9 +103,24 @@ static void enterChroot(dbiIndex dbi)
     int xx;
     rpmdb db = dbi->dbi_rpmdb;
 
-    if (rstreq(db->db_root, "/") || db->db_chrootDone || sqlInRoot)
+    if (rstreq(db->db_root, "/") 
+#ifdef __EMX__00
+	|| rstreq(db->db_root, "/@unixroot") 
+#endif
+	|| db->db_chrootDone || sqlInRoot)
        /* Nothing to do, was not already in chroot */
        return;
+
+#ifdef __EMX__
+    // if @unixroot, at least be sure to set current drive!
+    if (rstreq(db->db_root, "/@unixroot")) {
+if (_debug)
+fprintf(stderr,"cwd:%s\n", getcwd(NULL,0));
+       chdir("/@unixroot/");
+       /* Nothing to do, was not already in chroot */
+       return;
+    }
+#endif
 
 if (_debug)
 fprintf(stderr, "sql:chroot(%s)\n", db->db_root);
@@ -113,6 +128,7 @@ fprintf(stderr, "sql:chroot(%s)\n", db->db_root);
     sqlCwd = rpmGetCwd();
     xx = chdir("/");
     xx = chroot(db->db_root);
+if (_debug)
 assert(xx == 0);
     sqlInRoot=1;
 }

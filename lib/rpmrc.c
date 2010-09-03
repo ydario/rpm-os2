@@ -458,7 +458,7 @@ static rpmRC doReadRC(const char * urlfn)
 	s = se = next;
 
 	/* Find end-of-line. */
-	while (*se && *se != '\n') se++;
+	while (*se && *se != '\r' && *se != '\n') se++;
 	if (*se != '\0') *se++ = '\0';
 	next = se;
 

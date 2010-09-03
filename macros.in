@@ -366,7 +366,7 @@ package or when debugging this package.\
 # Returns list of unpackaged files, i.e. files in $RPM_BUILD_ROOT not packaged.
 #
 # Note: Disable (by commenting out) for legacy compatibility.
-%__check_files         %{_rpmconfigdir}/check-files %{buildroot}
+%__check_files         %{_rpmconfigdir}/check-files.os2 %{buildroot}
 
 #
 # Should unpackaged files in a build root terminate a build?
@@ -487,8 +487,8 @@ print (t)\
 %__perl_provides	%{_rpmconfigdir}/perl.prov
 %__perl_requires	%{_rpmconfigdir}/perl.req
 
-%__python_provides	%{_rpmconfigdir}/pythondeps.sh --provides
-%__python_requires	%{_rpmconfigdir}/pythondeps.sh --requires
+#%__python_provides	%{_rpmconfigdir}/pythondeps.sh --provides
+#%__python_requires	%{_rpmconfigdir}/pythondeps.sh --requires
 
 %__mono_provides        %{_rpmconfigdir}/mono-find-provides %{_builddir}/%{?buildsubdir} %{buildroot} %{_libdir}
 %__mono_requires        %{_rpmconfigdir}/mono-find-requires %{_builddir}/%{?buildsubdir} %{buildroot} %{_libdir}
@@ -660,8 +660,8 @@ print (t)\
 #
 # There are two macros so that --rebuilddb can convert db1 -> db3.
 #
-%_dbapi			3
-%_dbapi_rebuild		3
+%_dbapi			4
+%_dbapi_rebuild		4
 
 #==============================================================================
 # ---- GPG/PGP/PGP5 signature macros.
@@ -792,7 +792,7 @@ print (t)\
 #
 # Define per-arch and per-os defaults. Normally overridden by per-target macros.
 %__arch_install_post	%{nil}
-%__os_install_post	%{___build_post}
+%__os_install_post	%{_rpmconfigdir}/brp-strip.os2
 
 #==============================================================================
 # ---- Scriptlet template templates.
@@ -972,9 +972,9 @@ print (t)\
 %_sbindir		%{_exec_prefix}/sbin
 %_libexecdir		%{_exec_prefix}/libexec
 %_datadir		%{_prefix}/share
-%_sysconfdir		/etc
+%_sysconfdir		@sysconfdir@
 %_sharedstatedir	%{_prefix}/com
-%_localstatedir		%{_prefix}/var
+%_localstatedir		@localstatedir@
 %_lib			lib
 %_libdir		%{_exec_prefix}/%{_lib}
 %_includedir		%{_prefix}/include

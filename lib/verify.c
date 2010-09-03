@@ -476,7 +476,12 @@ int rpmcliVerify(rpmts ts, QVA_t qva, char * const * argv)
      */
     rpmtsOpenDB(ts, O_RDONLY);
     rpmdbOpenAll(rpmtsGetRdb(ts));
-    if (rootDir && !rstreq(rootDir, "/")) {
+    if (rootDir
+#ifdef __EMX__
+	 && strcmp( rootDir, "/@unixroot") != 0
+	 && strcmp( rootDir, "/@unixroot/") != 0
+#endif
+	 && !rstreq(rootDir, "/")) {
 	dirfd = open(".", O_RDONLY);
 	if (dirfd == -1 || chdir("/") == -1 || chroot(rootDir) == -1) {
 	    rpmlog(RPMLOG_ERR, _("Unable to change root directory: %m\n"));

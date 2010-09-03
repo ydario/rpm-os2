@@ -349,17 +349,17 @@ static SECItem *pgpMpiItem(PRArenaPool *arena, SECItem *item, const uint8_t *p)
     size_t nbytes = pgpMpiLen(p)-2;
 
     if (item == NULL) {
-    	if ((item=SECITEM_AllocItem(arena, item, nbytes)) == NULL)
+    	//if ((item=SECITEM_AllocItem(arena, item, nbytes)) == NULL)
     	    return item;
     } else {
     	if (arena != NULL)
-    	    item->data = PORT_ArenaGrow(arena, item->data, item->len, nbytes);
+    	    item->data = NULL;//PORT_ArenaGrow(arena, item->data, item->len, nbytes);
     	else
-    	    item->data = PORT_Realloc(item->data, nbytes);
+    	    item->data = NULL;//PORT_Realloc(item->data, nbytes);
     	
     	if (item->data == NULL) {
     	    if (arena == NULL)
-    		SECITEM_FreeItem(item, PR_TRUE);
+    		//SECITEM_FreeItem(item, PR_TRUE);
     	    return NULL;
     	}
     }
@@ -375,14 +375,14 @@ static SECKEYPublicKey *pgpNewPublicKey(KeyType type)
     PRArenaPool *arena;
     SECKEYPublicKey *key;
     
-    arena = PORT_NewArena(DER_DEFAULT_CHUNKSIZE);
+    arena = NULL;//PORT_NewArena(DER_DEFAULT_CHUNKSIZE);
     if (arena == NULL)
 	return NULL;
     
-    key = PORT_ArenaZAlloc(arena, sizeof(SECKEYPublicKey));
+    key = NULL;//PORT_ArenaZAlloc(arena, sizeof(SECKEYPublicKey));
     
     if (key == NULL) {
-	PORT_FreeArena(arena, PR_FALSE);
+	//PORT_FreeArena(arena, PR_FALSE);
 	return NULL;
     }
     
@@ -628,12 +628,12 @@ static int pgpPrtSigParams(pgpTag tag, uint8_t pubkey_algo, uint8_t sigtype,
 		case 1:		/* s */
 		    xx = pgpMpiSet(pgpSigDSA[i], DSA_SUBPRIME_LEN*8, dsaraw.data + DSA_SUBPRIME_LEN, p, pend);
 		    if (_dig->sigdata != NULL)
-		    	SECITEM_FreeItem(_dig->sigdata, PR_FALSE);
-		    else if ((_dig->sigdata=SECITEM_AllocItem(NULL, NULL, 0)) == NULL) {
-		        xx = 1;
-		        break;
-		    }
-		    if (DSAU_EncodeDerSig(_dig->sigdata, &dsaraw) != SECSuccess)
+		    	//SECITEM_FreeItem(_dig->sigdata, PR_FALSE);
+		    //else if ((_dig->sigdata=SECITEM_AllocItem(NULL, NULL, 0)) == NULL) {
+		    //    xx = 1;
+		    //    break;
+		    //}
+		    //if (DSAU_EncodeDerSig(_dig->sigdata, &dsaraw) != SECSuccess)
 		    	xx = 1;
 		    break;
 		default:
@@ -1260,12 +1260,12 @@ void pgpCleanDig(pgpDig dig)
 	memset(&dig->pubkey, 0, sizeof(dig->pubkey));
 
 	if (dig->keydata != NULL) {
-	    SECKEY_DestroyPublicKey(dig->keydata);
+	    //SECKEY_DestroyPublicKey(dig->keydata);
 	    dig->keydata = NULL;
 	}
 
 	if (dig->sigdata != NULL) {
-	    SECITEM_ZfreeItem(dig->sigdata, PR_TRUE);
+	    //SECITEM_ZfreeItem(dig->sigdata, PR_TRUE);
 	    dig->sigdata = NULL;
 	}
     }
@@ -1395,25 +1395,25 @@ rpmRC pgpVerifySig(pgpDig dig, DIGEST_CTX hashctx)
 
 	/* Zero-pad RSA signature to expected size if necessary */
 	if (sigp->pubkey_algo == PGPPUBKEYALGO_RSA) {
-	    size_t siglen = SECKEY_SignatureLen(dig->keydata);
+	    size_t siglen = 0;//SECKEY_SignatureLen(dig->keydata);
 	    if (siglen > sig->len) {
 		size_t pad = siglen - sig->len;
-		if ((sig = SECITEM_AllocItem(NULL, NULL, siglen)) == NULL) {
+		//if ((sig = SECITEM_AllocItem(NULL, NULL, siglen)) == NULL) {
 		    goto exit;
-		}
+		//}
 		memset(sig->data, 0, pad);
 		memcpy(sig->data+pad, dig->sigdata->data, dig->sigdata->len);
 	    }
 	}
 
 	/* XXX VFY_VerifyDigest() is deprecated in NSS 3.12 */ 
-	if (VFY_VerifyDigest(&digest, dig->keydata, sig,
-			     getSigAlg(sigp), NULL) == SECSuccess) {
-	    res = RPMRC_OK;
-	}
+	//if (VFY_VerifyDigest(&digest, dig->keydata, sig,
+	//		     getSigAlg(sigp), NULL) == SECSuccess) {
+	//    res = RPMRC_OK;
+	//}
 
 	if (sig != dig->sigdata) {
-	    SECITEM_ZfreeItem(sig, 1);
+	    //SECITEM_ZfreeItem(sig, 1);
 	}
     }
 
@@ -1620,11 +1620,11 @@ int rpmInitCrypto(void) {
 
     /* Initialize NSS if not already done */
     if (!_crypto_initialized) {
-	if (NSS_NoDB_Init(NULL) != SECSuccess) {
+	//if (NSS_NoDB_Init(NULL) != SECSuccess) {
 	    rc = -1;
-	} else {
-	    _crypto_initialized = 1;
-	}
+	//} else {
+	//    _crypto_initialized = 1;
+	//}
     }
 
     /* Register one post-fork handler per process */
@@ -1641,7 +1641,7 @@ int rpmFreeCrypto(void)
 {
     int rc = 0;
     if (_crypto_initialized) {
-	rc = (NSS_Shutdown() != SECSuccess);
+	//rc = (NSS_Shutdown() != SECSuccess);
     	_crypto_initialized = 0;
     }
     return rc;

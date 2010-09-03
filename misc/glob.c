@@ -941,6 +941,14 @@ __glob_pattern_p (const char *pattern, int quote)
 # ifdef _LIBC
 weak_alias (__glob_pattern_p, glob_pattern_p)
 # endif
+
+#ifdef __EMX__
+int glob_pattern_p (const char *pattern, int quote) { 
+  return __glob_pattern_p( pattern, quote);
+}
+
+#endif
+
 #endif
 
 

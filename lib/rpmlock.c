@@ -116,7 +116,7 @@ void *rpmtsAcquireLock(rpmts ts)
     rpmlock lock;
 
     if (!rootDir || rpmtsChrootDone(ts))
-	rootDir = "/";
+	rootDir = "/@unixroot";
     lock = rpmlock_new(rootDir);
     if (!lock) {
 	rpmlog(RPMLOG_ERR, 

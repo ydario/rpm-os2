@@ -455,6 +455,7 @@ rpmlibexecdir = $(prefix)/lib/rpm
 rpmconfigdir = $(prefix)/lib/rpm
 AM_CPPFLAGS = -I$(top_builddir) -I$(top_srcdir) \
 	-I$(top_builddir)/include/ @WITH_NSS_INCLUDE@ \
+	-I$(top_builddir)/include/nss \
 	@WITH_POPT_INCLUDE@ @WITH_SQLITE3_INCLUDE@ \
 	-I$(top_srcdir)/misc -DLOCALEDIR="\"$(localedir)\"" \
 	-DSYSCONFDIR="\"$(sysconfdir)\"" \
@@ -646,6 +647,9 @@ backend/sqlite.lo: backend/$(am__dirstamp) \
 	backend/$(DEPDIR)/$(am__dirstamp)
 librpm.la: $(librpm_la_OBJECTS) $(librpm_la_DEPENDENCIES) 
 	$(librpm_la_LINK) -rpath $(usrlibdir) $(librpm_la_OBJECTS) $(librpm_la_LIBADD) $(LIBS)
+	cp .libs/rpm.a .libs/rpm_s.a
+	dllar -g -nolxlite -Zomf -o .libs/rpm .libs/rpm.a -l../rpmio/.libs/rpmio.a -lsqlite3 -ldb -lbz2 -lz -lpopt -lurpo -lmmap -lpthread -lssp
+	cp .libs/rpm.dll ..
 
 clean-checkPROGRAMS:
 	@list='$(check_PROGRAMS)'; test -n "$$list" || exit 0; \

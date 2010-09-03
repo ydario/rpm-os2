@@ -490,7 +490,11 @@ int main(int argc, char *argv[])
 	    if (bigMode & MODES_FOR_ROOT)
 		break;
 	case URL_IS_UNKNOWN:
+#ifdef __EMX__
+	    if (rpmcliRootDir[0] != '/' && rpmcliRootDir[1] != ':')
+#else
 	    if (rpmcliRootDir[0] != '/')
+#endif
 		argerror(_("arguments to --root (-r) must begin with a /"));
 	    break;
 	}

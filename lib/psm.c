@@ -3,6 +3,10 @@
  * Package state machine to handle a package from a transaction set.
  */
 
+#ifdef __EMX__
+#include <process.h>
+#endif
+
 #include "system.h"
 
 #include <rpm/rpmlib.h>		/* rpmvercmp and others */
@@ -695,6 +699,10 @@ static rpmRC runScript(rpmpsm psm, Header h, rpmTag stag, ARGV_t * argvp,
 	xx = Fwrite(script, sizeof(script[0]), strlen(script), fd);
 	xx = Fclose(fd);
 
+#ifdef __EMX__
+	argvAdd(argvp, "-c");
+	argvAdd(argvp, fn);
+#else
 	{   const char * sn = fn;
 	    if (!rpmtsChrootDone(ts) && rootDir != NULL &&
 		!(rootDir[0] == '/' && rootDir[1] == '\0'))
@@ -703,6 +711,7 @@ static rpmRC runScript(rpmpsm psm, Header h, rpmTag stag, ARGV_t * argvp,
 	    }
 	    argvAdd(argvp, sn);
 	}
+#endif
 
 	if (arg1 >= 0) {
 	    argvAddNum(argvp, arg1);
@@ -712,6 +721,12 @@ static rpmRC runScript(rpmpsm psm, Header h, rpmTag stag, ARGV_t * argvp,
 	}
     }
 
+#ifdef __EMX__
+    //psm->sq.child = spawnvp(P_NOWAIT, argvp[0], *argvp);
+    psm->sq.child = spawnvp(P_NOWAIT, "sh.exe", *argvp);
+    psm->sq.reaped = waitpid(psm->sq.child, &psm->sq.status, 0);
+
+#else
     scriptFd = rpmtsScriptFd(ts);
     if (scriptFd != NULL) {
 	if (rpmIsVerbose()) {
@@ -744,6 +759,7 @@ static rpmRC runScript(rpmpsm psm, Header h, rpmTag stag, ARGV_t * argvp,
     }
 
     (void) psmWait(psm);
+#endif
 
     if (psm->sq.reaped < 0) {
 	rpmlog(RPMLOG_ERR, _("%s scriptlet failed, waitpid(%d) rc %d: %s\n"),
@@ -1529,6 +1545,10 @@ rpmRC rpmpsmStage(rpmpsm psm, pkgStage stage)
     {	const char * rootDir = rpmtsRootDir(ts);
 	/* Change root directory if requested and not already done. */
 	if (rootDir != NULL && !(rootDir[0] == '/' && rootDir[1] == '\0')
+#ifdef __EMX__
+	 && strcmp( rootDir, "/@unixroot") != 0
+	 && strcmp( rootDir, "/@unixroot/") != 0
+#endif
 	 && !rpmtsChrootDone(ts) && !psm->chrootDone)
 	{
 	    xx = chdir("/");
@@ -1546,7 +1566,12 @@ rpmRC rpmpsmStage(rpmpsm psm, pkgStage stage)
 	if (psm->chrootDone) {
 	    const char * rootDir = rpmtsRootDir(ts);
 	    const char * currDir = rpmtsCurrDir(ts);
-	    if (rootDir != NULL && !rstreq(rootDir, "/") && *rootDir == '/')
+	    if (rootDir != NULL
+#ifdef __EMX__
+	     && strcmp( rootDir, "/@unixroot") != 0
+	     && strcmp( rootDir, "/@unixroot/") != 0
+#endif
+	     && !rstreq(rootDir, "/") && *rootDir == '/')
 		rc = chroot(".");
 	    psm->chrootDone = 0;
 	    (void) rpmtsSetChrootDone(ts, 0);

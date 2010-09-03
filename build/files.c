@@ -2180,10 +2180,12 @@ int processSourceFiles(rpmSpec spec)
 	}
 	flp->langs = xstrdup("");
 	
+#ifndef __EMX__
 	if (! (flp->uname && flp->gname)) {
 	    rpmlog(RPMLOG_ERR, _("Bad owner/group: %s\n"), diskPath);
 	    fl.processingFailed = 1;
 	}
+#endif
 
 	isSpec = 0;
 	x++;

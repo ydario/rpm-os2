@@ -878,8 +878,8 @@ static void skipInstallFiles(const rpmts ts, rpmte p)
 
 #define HASHTYPE rpmStringSet
 #define HTKEYTYPE const char *
-#include "lib/rpmhash.H"
-#include "lib/rpmhash.C"
+#include "lib/rpmhashC.H"
+#include "lib/rpmhashC.C"
 
 /* Get a rpmdbMatchIterator containing all files in
  * the rpmdb that share the basename with one from
@@ -1305,7 +1305,12 @@ static int rpmtsPrepare(rpmts ts)
     int xx, rc = 0;
     uint64_t fileCount = countFiles(ts);
     const char * rootDir = rpmtsRootDir(ts);
-    int dochroot = (rootDir != NULL && !rstreq(rootDir, "/") && *rootDir == '/');
+    int dochroot = (rootDir != NULL
+#ifdef __EMX__
+	 && !rstreq(rootDir, "/@unixroot")
+	 && !rstreq(rootDir, "/@unixroot/")
+#endif
+	 && !rstreq(rootDir, "/") && *rootDir == '/');
 
     fingerPrintCache fpc = fpCacheCreate(fileCount/2 + 10001);
     rpmFpHash ht = rpmFpHashCreate(fileCount/2+1, fpHashFunction, fpEqual,

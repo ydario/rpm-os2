@@ -35,7 +35,7 @@ const char * baseName;	/*!< file base name */
 #define HASHTYPE rpmFpEntryHash
 #define HTKEYTYPE const char *
 #define HTDATATYPE const struct fprintCacheEntry_s *
-#include "lib/rpmhash.H"
+#include "lib/rpmhashC.H"
 
 /**
  * Finger print cache entry.
@@ -70,7 +70,7 @@ struct rpmffi_s {
 #define HASHTYPE rpmFpHash
 #define HTKEYTYPE const fingerPrint *
 #define HTDATATYPE struct rpmffi_s
-#include "lib/rpmhash.H"
+#include "lib/rpmhashC.H"
 
 /** */
 #define	FP_ENTRY_EQUAL(a, b) (((a)->dev == (b)->dev) && ((a)->ino == (b)->ino))

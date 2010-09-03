@@ -350,7 +350,8 @@ EXTRA_DIST = rpm/__init__.py rpm/transaction.py
 @PYTHON_TRUE@AM_CPPFLAGS = -I$(top_builddir) -I$(top_srcdir) \
 @PYTHON_TRUE@	-I$(top_builddir)/include/ -I$(top_srcdir)/python \
 @PYTHON_TRUE@	-I$(top_srcdir)/misc -I@WITH_PYTHON_INCLUDE@
-@PYTHON_TRUE@pkgpyexec_LTLIBRARIES = _rpmmodule.la _rpmbmodule.la
+@PYTHON_TRUE@#pkgpyexec_LTLIBRARIES = _rpmmodule.la _rpmbmodule.la
+@PYTHON_TRUE@pkgpyexec_LTLIBRARIES = _rpm.dll _rpmb.dll
 @PYTHON_TRUE@pkgpyexec_DATA = rpm/__init__.py rpm/transaction.py
 @PYTHON_TRUE@_rpmmodule_la_LDFLAGS = -module -avoid-version
 @PYTHON_TRUE@_rpmmodule_la_LIBADD = \
@@ -728,3 +729,18 @@ uninstall-am: uninstall-pkgpyexecDATA uninstall-pkgpyexecLTLIBRARIES
 # Tell versions [3.59,3.63) of GNU make to not export all variables.
 # Otherwise a system limit (for SysV at least) may be exceeded.
 .NOEXPORT:
+
+_rpmb.dll: _rpmbmodule.la
+	echo "LIBRARY _rpmb INITINSTANCE TERMINSTANCE" > _rpmb.def
+	echo "DATA MULTIPLE" >> _rpmb.def
+	echo "EXPORTS" >> _rpmb.def
+	cd .libs ; emxexp $(subst .lo,.o,$(_rpmbmodule_la_OBJECTS)) >> ../_rpmb.def
+	$(_rpmbmodule_la_LINK) -Zdll _rpmb.def $(am__rpmbmodule_la_rpath) $(_rpmbmodule_la_OBJECTS) $(_rpmbmodule_la_LIBADD) $(LIBS) -lssp
+
+_rpm.dll: _rpmmodule.la
+	echo "LIBRARY _rpm INITINSTANCE TERMINSTANCE" > _rpm.def
+	echo "DATA MULTIPLE" >> _rpm.def
+	echo "EXPORTS" >> _rpm.def
+	cd .libs ; emxexp $(subst .lo,.o,$(_rpmmodule_la_OBJECTS)) >> ../_rpm.def
+	$(_rpmmodule_la_LINK) -Zdll _rpm.def $(am__rpmmodule_la_rpath) $(_rpmmodule_la_OBJECTS) $(_rpmmodule_la_LIBADD) $(LIBS) -lssp
+

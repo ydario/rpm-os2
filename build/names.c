@@ -105,6 +105,9 @@ uid_t getUidS(const char *uname)
 
 const char *getGname(gid_t gid)
 {
+#ifdef __EMX__
+    struct group fake_gr = { "root", NULL, 0, NULL};
+#endif
     struct group *gr;
     int x;
 
@@ -117,9 +120,13 @@ const char *getGname(gid_t gid)
     /* XXX - This is the other hard coded limit */
     if (x == UGIDMAX)
 	rpmlog(RPMLOG_CRIT, _("getGname: too many gid's\n"));
-    
+
+#ifdef __EMX__
+    gr = &fake_gr;
+#else    
     if ((gr = getgrgid(gid)) == NULL)
 	return NULL;
+#endif
     gids[gid_used] = gid;
     gnames[gid_used] = xstrdup(gr->gr_name);
     return gnames[gid_used++];

@@ -4,6 +4,10 @@
  */
 
 #include "system.h"
+#ifdef __EMX__
+#include <process.h>
+#include <fcntl.h>
+#endif
 
 #include <rpm/rpmbuild.h>
 #include <rpm/rpmlog.h>
@@ -143,7 +147,7 @@ rpmRC doScript(rpmSpec spec, rpmBuildFlags what, const char *name, StringBuf sb,
 	goto exit;
     }
     
-    if (*rootDir == '\0') rootDir = "/";
+    if (*rootDir == '\0') rootDir = "/@unixroot";
 
     buildTemplate = rpmExpand(mTemplate, NULL);
     buildPost = rpmExpand(mPost, NULL);
@@ -170,7 +174,11 @@ rpmRC doScript(rpmSpec spec, rpmBuildFlags what, const char *name, StringBuf sb,
     
 if (_build_debug)
 fprintf(stderr, "*** rootDir %s buildDir %s\n", rootDir, buildDir);
-    if (buildDir && buildDir[0] != '/') {
+    if (buildDir && buildDir[0] != '/'
+#ifdef __EMX__
+	 && buildDir[1] != ':'
+#endif
+	) {
 	rc = RPMRC_FAIL;
 	goto exit;
     }
@@ -179,6 +187,13 @@ fprintf(stderr, "*** rootDir %s buildDir %s\n", rootDir, buildDir);
     (void) poptParseArgvString(buildCmd, &argc, &argv);
 
     rpmlog(RPMLOG_NOTICE, _("Executing(%s): %s\n"), name, buildCmd);
+#ifdef __EMX__
+    child = spawnvp(P_NOWAIT, argv[0], (char *const *)argv);
+    if (child == -1)
+	// waitpid will fail too!
+	rpmlog(RPMLOG_ERR, _("Exec of %s failed (%s): %s\n"),
+		scriptName, name, strerror(errno));
+#else
     if (!(child = fork())) {
 
 	errno = 0;
@@ -189,6 +204,7 @@ fprintf(stderr, "*** rootDir %s buildDir %s\n", rootDir, buildDir);
 
 	_exit(127); /* exit 127 for compatibility with bash(1) */
     }
+#endif
 
     pid = waitpid(child, &status, 0);
 

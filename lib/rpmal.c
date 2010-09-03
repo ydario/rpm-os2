@@ -62,8 +62,8 @@ struct fileIndexEntry_s {
 #define HASHTYPE rpmalProvidesHash
 #define HTKEYTYPE const char *
 #define HTDATATYPE struct availableIndexEntry_s
-#include "lib/rpmhash.H"
-#include "lib/rpmhash.C"
+#include "lib/rpmhashC.H"
+#include "lib/rpmhashC.C"
 
 #undef HASHTYPE
 #undef HTKEYTYPE
@@ -71,8 +71,8 @@ struct fileIndexEntry_s {
 #define HASHTYPE rpmalFileHash
 #define HTKEYTYPE struct fileNameEntry_s
 #define HTDATATYPE struct fileIndexEntry_s
-#include "lib/rpmhash.H"
-#include "lib/rpmhash.C"
+#include "lib/rpmhashC.H"
+#include "lib/rpmhashC.C"
 
 
 

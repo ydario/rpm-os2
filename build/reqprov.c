@@ -50,6 +50,7 @@ int addReqProv(rpmSpec spec, Header h, rpmTag tagN,
     rpmTag flagtag = 0;
     rpmTag indextag = 0;
     rpmsenseFlags extra = RPMSENSE_ANY;
+    char N2[_MAX_PATH];
     
     if (Flags & RPMSENSE_PROVIDES) {
 	nametag = RPMTAG_PROVIDENAME;
@@ -94,8 +95,16 @@ int addReqProv(rpmSpec spec, Header h, rpmTag tagN,
 	EVR = "";
     
     /* Avoid adding duplicate dependencies. */
-    if (isNewDep(h, nametag, N, EVR, Flags, indextag, index)) {
-	headerPutString(h, nametag, N);
+    strcpy( N2, "");
+#ifdef __EMX__
+	// YD need to add @unixroot remapping
+	if (!strncmp( N, "/bin", 4) || !strncmp( N, "/usr/bin", 8)) {
+	    strcpy( N2, "/@unixroot");
+	}
+#endif
+    strcat( N2, N);
+    if (isNewDep(h, nametag, N2, EVR, Flags, indextag, index)) {
+	headerPutString(h, nametag, N2);
 	headerPutString(h, versiontag, EVR);
 	headerPutUint32(h, flagtag, &Flags, 1);
 	if (indextag) {

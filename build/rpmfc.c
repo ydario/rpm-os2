@@ -1,5 +1,10 @@
 #include "system.h"
 
+#ifdef __EMX__
+#include <process.h>
+#include <stdlib.h>
+#endif
+
 #include <signal.h>
 #include <magic.h>
 
@@ -94,7 +99,14 @@ static StringBuf getOutputFrom(const char * dir, ARGV_t argv,
     void *oldhandler;
     StringBuf readBuff;
     int done;
+#ifdef __EMX__
+    int i, fd, nbw, nbr;
+	FILE* in;
+	char tmpfile[_MAX_PATH];
+	char buffer[32*1024];
+#endif
 
+#ifndef __EMX__
     /* FIX: cast? */
     oldhandler = signal(SIGPIPE, SIG_IGN);
 
@@ -144,6 +156,89 @@ static StringBuf getOutputFrom(const char * dir, ARGV_t argv,
     (void) fcntl(fromProg[0], F_SETFL, O_NONBLOCK);
     (void) fcntl(toProg[1], F_SETFL, O_NONBLOCK);
     
+#else
+
+	if (dir && chdir(dir)) {
+	    rpmlog(RPMLOG_ERR, _("Couldn't chdir to %s: %s\n"),
+		    dir, strerror(errno));
+	    _exit(EXIT_FAILURE);
+	}
+
+	// write data to file
+	strcpy( tmpfile, "check-files-XXXXXX");
+	if (mktemp( tmpfile) == NULL) {
+		rpmlog(RPMLOG_ERR, _("Couldn't get temp file: %s\n"),
+			strerror(errno));
+		return NULL;
+	}
+	fd = open( tmpfile, O_CREAT|O_TRUNC|O_BINARY|O_WRONLY);
+	if (fd == -1) {
+		unlink(tmpfile);
+		rpmlog(RPMLOG_ERR, _("Couldn't open temp file: %s\n"),
+			strerror(errno));
+		return NULL;
+	}
+	nbw = write( fd, writePtr,writeBytesLeft); 
+	if (nbw != writeBytesLeft) {
+		close(fd);
+		unlink(tmpfile);
+		rpmlog(RPMLOG_ERR, _("Couldn't write temp file: %s\n"),
+			strerror(errno));
+		return NULL;
+	}
+	close(fd);
+	
+	// create command line, popen does 
+	// not directly execute shell scripts :-(
+	// TODO rewrite check-files.sh in rexx
+	strcpy( buffer, "sh -c \"");
+	strcat( buffer, argv[0]);
+	// popen requires backslash!
+	//for( i=0; i<strlen(buffer); i++)
+	//	if (buffer[i] == '/')
+	//		buffer[i] = '\\';
+
+	i = 1;
+	while( argv[i] != NULL) {
+		strcat( buffer, " ");
+		strcat( buffer, argv[i++]); 
+	}
+	// add temp file
+	strcat( buffer, " ");
+	strcat( buffer, tmpfile); 
+	strcat( buffer, "\"");
+	if (0)
+	    fprintf( stderr,"command line: '%s'\n", buffer);
+
+	// execute child and read input pipe
+	in = popen( buffer, "r");
+	if (in == NULL) {
+		unlink(tmpfile);
+		rpmlog(RPMLOG_ERR, _("Couldn't popen: %s\n"),
+			strerror(errno));
+		return NULL;
+	}
+	
+	readBuff = newStringBuf();
+
+	/* Read any data from prog */
+	{   char buf[BUFSIZ+1];
+	    while (!feof(in)) {
+			nbr = fread(buf, 1, sizeof(buf)-1, in);
+			buf[nbr] = '\0';
+			if (0)
+			    fprintf( stderr,"read '%s'\n",buf);
+			appendStringBuf(readBuff, buf);
+	    }
+	}
+	fclose(in);
+
+	// delete temporary
+	unlink(tmpfile);
+
+#endif // __EMX__
+
+#ifndef __EMX__
     readBuff = newStringBuf();
 
     do {
@@ -225,6 +320,8 @@ top:
 	rpmlog(RPMLOG_ERR, _("failed to write all data to %s\n"), argv[0]);
 	return NULL;
     }
+#endif // __EMX__
+
     return readBuff;
 }
 
@@ -714,8 +811,17 @@ static int rpmfcSCRIPT(rpmfc fc)
 	se++;
 
 	if (is_executable) {
+	    char s2[_MAX_PATH];
 	    /* Add to package requires. */
-	    ds = rpmdsSingle(RPMTAG_REQUIRENAME, s, "", RPMSENSE_FIND_REQUIRES);
+	    strcpy( s2, "");
+#ifdef __EMX__
+		// YD need to add @unixroot remapping
+		if (!strncmp( s, "/bin", 4) || !strncmp( s, "/usr/bin", 8)) {
+		    strcpy( s2, "/@unixroot");
+		}
+#endif
+	    strcat( s2, s);
+	    ds = rpmdsSingle(RPMTAG_REQUIRENAME, s2, "", RPMSENSE_FIND_REQUIRES);
 	    xx = rpmdsMerge(&fc->requires, ds);
 
 	    /* Add to file requires. */

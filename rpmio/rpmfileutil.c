@@ -291,6 +291,11 @@ int rpmioMkpath(const char * path, mode_t mode, uid_t uid, gid_t gid)
 	rstrcat(&d,"/");
     }
     de = d;
+#ifdef __EMX__
+    // YD cannot create /@unixroot dir, skip it
+    if (strncmp( de, "/@unixroot", 10) == 0)
+	de=strchr(de+1,'/');
+#endif
     for (;(de=strchr(de+1,'/'));) {
 	struct stat st;
 	*de = '\0';
@@ -377,6 +382,10 @@ int rpmFileIsCompressed(const char * file, rpmCompressedMagic * compressed)
 /* @todo "../sbin/./../bin/" not correct. */
 char *rpmCleanPath(char * path)
 {
+#ifdef __EMX__
+    #define AT_UNIXROOT "/@unixroot"
+    const int AT_UNIXROOT_LEN = strlen(AT_UNIXROOT);
+#endif
     const char *s;
     char *se, *t, *te;
     int begin = 1;
@@ -386,6 +395,25 @@ char *rpmCleanPath(char * path)
 
 /*fprintf(stderr, "*** RCP %s ->\n", path); */
     s = t = te = path;
+
+#ifdef __EMX__
+    // clean '//X:/...' or '/X:/...'
+    if (s[3] == ':')
+	s++;
+    if (s[2] == ':')
+	s++;
+    // clean '/@unixroot//@unixroot/...'
+    if (strncmp( s, AT_UNIXROOT "/" AT_UNIXROOT, AT_UNIXROOT_LEN*2) == 0)
+       s += (AT_UNIXROOT_LEN);
+    // clean '/@unixroot/@unixroot/...'
+    if (strncmp( s, AT_UNIXROOT AT_UNIXROOT, AT_UNIXROOT_LEN*2) == 0)
+       s += (AT_UNIXROOT_LEN);
+    // clean '/@unixroot/X:/...'
+    if (strncmp( s, AT_UNIXROOT, AT_UNIXROOT_LEN) == 0
+        && s[AT_UNIXROOT_LEN+2] == ':')
+       s += (AT_UNIXROOT_LEN+1);
+#endif
+
     while (*s != '\0') {
 /*fprintf(stderr, "*** got \"%.*s\"\trest \"%s\"\n", (t-path), path, s); */
 	switch(*s) {
@@ -452,6 +480,11 @@ char *rpmCleanPath(char * path)
 		continue;
 	    }
 	    break;
+#ifdef __EMX__
+	case '\\':
+	    *t = '/';
+	    break;
+#endif
 	default:
 	    begin = 0;
 	    break;
@@ -560,12 +593,25 @@ int rpmGlob(const char * patterns, int * argcPtr, ARGV_t * argvPtr)
     size_t maxb, nb;
     int i, j;
     int rc;
+#ifdef __EMX__
+    char* _patterns, *_p;
+#endif
 
     if (home != NULL && strlen(home) > 0) 
 	gflags |= GLOB_TILDE;
 
+#ifdef __EMX__
+    // hack to convert \\ into / but only for paths (X:\aa\bb\cc)
+    _patterns = _p = strdup(patterns);
+    if (_patterns[1]==':' && _patterns[2]=='\\')
+        do { if (*_p=='\\') *_p='/';} while(*_p++);
+    /* Can't use argvSplit() here, it doesn't handle whitespace etc escapes */
+    rc = poptParseArgvString(_patterns, &ac, &av);
+    free(_patterns);
+#else
     /* Can't use argvSplit() here, it doesn't handle whitespace etc escapes */
     rc = poptParseArgvString(patterns, &ac, &av);
+#endif
     if (rc)
 	return rc;
 

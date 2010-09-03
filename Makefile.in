@@ -262,7 +262,7 @@ LDFLAGS = @LDFLAGS@
 LIBICONV = @LIBICONV@
 LIBINTL = @LIBINTL@
 LIBOBJS = @LIBOBJS@
-LIBS = @LIBS@
+LIBS = misc/libmisc.la -lmagic @LIBS@
 LIBTOOL = @LIBTOOL@
 LIPO = @LIPO@
 LN_S = @LN_S@
@@ -749,6 +749,11 @@ javadeps$(EXEEXT): $(javadeps_OBJECTS) $(javadeps_DEPENDENCIES)
 rpm$(EXEEXT): $(rpm_OBJECTS) $(rpm_DEPENDENCIES) 
 	@rm -f rpm$(EXEEXT)
 	$(LINK) $(rpm_OBJECTS) $(rpm_LDADD) $(LIBS)
+	# YD link rpm_s statically, so we can use it for bootstrap
+	$(CC) $(LDFLAGS) -o rpm_s.exe $(rpm_OBJECTS) \
+		build/.libs/rpmbuild_s.a lib/.libs/rpm_s.a rpmio/.libs/rpmio_s.a \
+		-lsqlite3_s -lz -lbz2 -ldb -lpopt -lmagic -lurpo -lmmap -lpthread -lssp
+
 rpm2cpio$(EXEEXT): $(rpm2cpio_OBJECTS) $(rpm2cpio_DEPENDENCIES) 
 	@rm -f rpm2cpio$(EXEEXT)
 	$(LINK) $(rpm2cpio_OBJECTS) $(rpm2cpio_LDADD) $(LIBS)
@@ -1551,7 +1556,7 @@ install-exec-hook:
 
 install-data-local:
 	@case "@host_os@" in \
-	solaris*|linux*|darwin*) \
+	solaris*|linux*|darwin*|os2*) \
 	   DESTDIR="$(DESTDIR)" pkglibdir="$(rpmconfigdir)" $(SHELL) $(top_srcdir)/installplatform rpmrc macros platform ;; \
 	esac
 	@$(MKDIR_P) $(DESTDIR)$(localstatedir)/tmp

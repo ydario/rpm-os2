@@ -718,7 +718,11 @@ static int unblockSignals(sigset_t * oldMask)
     return sigprocmask(SIG_SETMASK, oldMask, NULL);
 }
 
+#ifdef __EMX__
+#define	_DB_ROOT	"/@unixroot"
+#else
 #define	_DB_ROOT	"/"
+#endif
 #define	_DB_HOME	"%{_dbpath}"
 #define _DB_FULLPATH	NULL
 #define	_DB_FLAGS	0
