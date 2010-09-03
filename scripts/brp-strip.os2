@@ -1,0 +1,13 @@
+#!/bin/sh
+# If using normal root, avoid changing anything.
+if [ -z "$RPM_BUILD_ROOT" -o "$RPM_BUILD_ROOT" = "/" ]; then
+	exit 0
+fi
+
+# Strip OS/2 binaries
+for f in `find $RPM_BUILD_ROOT -type f -name "*.exe"`; do
+	lxlite /ml1 /mf2 /ydd /yxd /b- "$f" ;
+done
+for f in `find $RPM_BUILD_ROOT -type f -name "*.dll"`; do
+	lxlite /ml1 /mf2 /ydd /yxd /b- "$f" ;
+done
