@@ -19,6 +19,7 @@
 # include "system.h"
 
 /* Find the first occurrence of C in S or the final NUL byte.  */
+#ifndef __KLIBC__
 static inline char *
 __strchrnul (const char *s, int c)
 {
@@ -153,6 +154,7 @@ __strchrnul (const char *s, int c)
   /* This should never happen.  */
   return NULL;
 }
+#endif // __KLIBC__
 
 /* For platform which support the ISO C amendement 1 functionality we
    support user defined character classes.  */
