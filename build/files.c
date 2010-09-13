@@ -885,13 +885,13 @@ static rpmRC parseForSimple(rpmSpec spec, Package pkg, char * buf,
     res = RPMRC_OK;
 
     t = buf;
-    while ((s = strtokWithQuotes(t, " \t\n")) != NULL) {
+    while ((s = strtokWithQuotes(t, " \t\r\n")) != NULL) {
     	VFA_t *vfa;
 	t = NULL;
 	if (rstreq(s, "%docdir")) {
-	    s = strtokWithQuotes(NULL, " \t\n");
+	    s = strtokWithQuotes(NULL, " \t\r\n");
 	
-	    if (s == NULL || strtokWithQuotes(NULL, " \t\n")) {
+	    if (s == NULL || strtokWithQuotes(NULL, " \t\r\n")) {
 		rpmlog(RPMLOG_ERR, _("Only one arg for %%docdir\n"));
 		res = RPMRC_FAIL;
 	    } else {
