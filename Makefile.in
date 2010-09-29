@@ -752,7 +752,7 @@ rpm$(EXEEXT): $(rpm_OBJECTS) $(rpm_DEPENDENCIES)
 	# YD link exe also statically, so we can use it for bootstrap/debug
 	$(CC) $(LDFLAGS) -o rpm_s.exe $(rpm_OBJECTS) \
 		build/.libs/rpmbuild_s.a lib/.libs/rpm_s.a rpmio/.libs/rpmio_s.a \
-		-lsqlite3_s -lz -lbz2 -ldb -lpopt -lmagic -lurpo -lmmap -lpthread -lssp
+		-lsqlite3_s -lz -lbz2 -ldb -lpopt -lmagic -lurpo -lmmap_s -lpthread_s -lssp
 
 rpm2cpio$(EXEEXT): $(rpm2cpio_OBJECTS) $(rpm2cpio_DEPENDENCIES) 
 	@rm -f rpm2cpio$(EXEEXT)
