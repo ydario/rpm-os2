@@ -1194,6 +1194,13 @@ done \
 %__urlhelper_proxyopts   %{?_httpproxy:--proxy %{_httpproxy}%{?_httpport::%{_httpport}}}%{!?_httpproxy:%{nil}}
 %_urlhelper             %{__urlhelpercmd} %{?__urlhelper_localopts} %{?__urlhelper_proxyopts} %{__urlhelperopts}
 
+#------------------------------------------------------------------------
+# handle file unlocking, options:
+#   0 - automatic handling (default)
+#   1 - use config.sys driver only
+#   2 - do nothing, report error
+#
+%_os2_unlock_mode       0
 
 # \endverbatim
 #*/

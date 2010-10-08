@@ -20,6 +20,13 @@
 
 #include "debug.h"
 
+#ifdef __KLIBC__
+#define INCL_DOS
+#define INCL_DOSERRORS
+#include <os2.h>
+#include <rpm/rpmmacro.h>
+#endif
+
 #define	_FSM_DEBUG	0
 int _fsm_debug = _FSM_DEBUG;
 
@@ -96,6 +103,64 @@ static rpmte fsmGetTe(const FSM_t fsm)
 static const char * fileStageString(fileStage a);
 static const char * fileActionString(rpmFileAction a);
 static int fsmStage(FSM_t fsm, fileStage stage);
+
+#ifdef __KLIBC__
+/**
+ */
+int renameEx( const char *old_name, const char *new_name)
+{
+  APIRET rc;
+  char* expandOptionMacro;
+  int expandOption;
+  CHAR OldName[_MAX_PATH], NewName[_MAX_PATH];
+
+  // check expand macro value
+  expandOptionMacro = rpmExpand( "%{_os2_unlock_mode}", NULL);
+  if (expandOptionMacro == NULL)
+    expandOptionMacro = "0";
+  expandOption = atoi( expandOptionMacro);
+  
+  // exit now?
+  if (expandOption == 2) {
+    errno = EACCES;
+    return -1;
+  }
+
+  // get native paths
+  if (_realrealpath( old_name, OldName, sizeof( OldName)) == NULL) {
+    // failed for some reason, report failure
+    errno = EACCES;
+    return -1;
+  }
+  if (_realrealpath( new_name, NewName, sizeof( NewName)) == NULL) {
+    // failed for some reason, report failure
+    errno = EACCES;
+    return -1;
+  }
+
+  // 
+  if (expandOption != 1) {
+
+    // try replacing the module first
+    rc = DosReplaceModule( (PCSZ)NewName, (PCSZ)OldName, NULL);
+    if (rc == NO_ERROR) {
+      // delete temp file
+      rc = unlink( OldName);
+      // replacing done, reset error
+      errno = 0;
+      return 0;
+    }
+    // call failed, either it is not an executable or it is no longer locked...
+    // TODO try rename again?
+    // use config.sys fallback
+  }
+
+  // failure
+  errno = EACCES;
+  return -1;
+
+}
+#endif // __KLIBC__
 
 /** \ingroup payload
  * Build path to file from file info, ornamented with subdir and suffix.
@@ -2054,6 +2119,10 @@ if (!(fsm->mapFlags & CPIO_ALL_HARDLINKS)) break;
 	if (fsm->mapFlags & CPIO_SBIT_CHECK)
 	    removeSBITS(fsm->path);
 	rc = rename(fsm->opath, fsm->path);
+#ifdef __KLIBC__
+	if (rc)
+	  rc = renameEx(fsm->opath, fsm->path);
+#endif
 #if defined(ETXTBSY) && defined(__HPUX__)
 	if (rc && errno == ETXTBSY) {
 	    char *path = NULL;
