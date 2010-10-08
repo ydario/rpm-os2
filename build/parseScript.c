@@ -83,7 +83,7 @@ int parseScript(rpmSpec spec, int parsePart)
     const char **argv = NULL;
     poptContext optCon = NULL;
     const char *name = NULL;
-    const char *prog = "/bin/sh";
+    const char *prog = "/@unixroot/bin/sh";
     const char *file = NULL;
     struct poptOption optionsTable[] = {
 	{ NULL, 'p', POPT_ARG_STRING, &prog, 'p',	NULL, NULL},

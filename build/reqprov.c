@@ -96,7 +96,7 @@ int addReqProv(rpmSpec spec, Header h, rpmTag tagN,
     
     /* Avoid adding duplicate dependencies. */
     strcpy( N2, "");
-#ifdef __EMX__
+#ifdef __EMX__00
 	// YD need to add @unixroot remapping
 	if (!strncmp( N, "/bin", 4) || !strncmp( N, "/usr/bin", 8)) {
 	    strcpy( N2, "/@unixroot");
