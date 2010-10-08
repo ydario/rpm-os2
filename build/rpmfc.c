@@ -814,9 +814,10 @@ static int rpmfcSCRIPT(rpmfc fc)
 	    char s2[_MAX_PATH];
 	    /* Add to package requires. */
 	    strcpy( s2, "");
-#ifdef __EMX__00
+#ifdef __KLIBC__
 		// YD need to add @unixroot remapping
-		if (!strncmp( s, "/bin", 4) || !strncmp( s, "/usr/bin", 8)) {
+		if (!strncmp( s, "/bin", 4) || !strncmp( s, "/usr/bin", 8)
+			|| !strncmp( s, "/usr/local/bin", 14)) {
 		    strcpy( s2, "/@unixroot");
 		}
 #endif
