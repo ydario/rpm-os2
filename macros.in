@@ -1202,5 +1202,13 @@ done \
 #
 %_os2_unlock_mode       0
 
+#------------------------------------------------------------------------
+# Macros to handle creation/deletion of WPS objects
+%wps_object_create /@unixroot/usr/lib/rpm/wps-object.exe %{name} /create $
+
+%wps_object_delete /@unixroot/usr/lib/rpm/wps-object.exe %{name} /delete $
+
+%wps_object_delete_all /@unixroot/usr/lib/rpm/wps-object.exe %{name} /deleteall
+
 # \endverbatim
 #*/
