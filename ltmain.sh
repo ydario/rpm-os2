@@ -2028,9 +2028,9 @@ func_mode_install ()
 	    relink_command=`$ECHO "X$relink_command" | $Xsed -e "s%@inst_prefix_dir@%%"`
 	  fi
 
-	  func_warning "relinking \`$file'"
-	  func_show_eval "$relink_command" \
-	    'func_fatal_error "error: relink \`$file'\'' with the above command before installing it"'
+	  func_warning "relinking \`$file' (disabled)"
+	  #func_show_eval "$relink_command" \
+	  #  'func_fatal_error "error: relink \`$file'\'' with the above command before installing it"'
 	fi
 
 	# See the names of the shared library.

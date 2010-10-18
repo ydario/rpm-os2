@@ -11820,7 +11820,8 @@ os2*)
   need_lib_prefix=no
   library_names_spec='$libname${shared_ext} $libname.a'
   dynamic_linker='OS/2 ld.exe'
-  shlibpath_var=LIBPATH
+  # LIBPATH is readonly and some scripts want to change it
+  shlibpath_var=LIBPATH0
   ;;
 
 osf3* | osf4* | osf5*)
@@ -15276,7 +15277,7 @@ os2*)
   need_lib_prefix=no
   library_names_spec='$libname${shared_ext} $libname.a'
   dynamic_linker='OS/2 ld.exe'
-  shlibpath_var=LIBPATH
+  shlibpath_var=LIBPATH0
   ;;
 
 osf3* | osf4* | osf5*)
