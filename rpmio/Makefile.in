@@ -411,7 +411,7 @@ clean-usrlibLTLIBRARIES:
 librpmio.la: $(librpmio_la_OBJECTS) $(librpmio_la_DEPENDENCIES) 
 	$(librpmio_la_LINK) -rpath $(usrlibdir) $(librpmio_la_OBJECTS) $(librpmio_la_LIBADD) $(LIBS)
 	cp .libs/rpmio.a .libs/rpmio_s.a
-	dllar -g -nolxlite -Zomf -o .libs/rpmio .libs/rpmio.a -lbz2 -lz -lpopt -lurpo -lmmap -lpthread -lssp
+	dllar -g -nolxlite -Zomf -o .libs/rpmio .libs/rpmio.a -lbz2 -lz -lpopt $(LIBS) -lssp
 	cp .libs/rpmio.dll ..
 
 clean-checkPROGRAMS:

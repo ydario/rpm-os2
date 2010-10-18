@@ -648,7 +648,7 @@ backend/sqlite.lo: backend/$(am__dirstamp) \
 librpm.la: $(librpm_la_OBJECTS) $(librpm_la_DEPENDENCIES) 
 	$(librpm_la_LINK) -rpath $(usrlibdir) $(librpm_la_OBJECTS) $(librpm_la_LIBADD) $(LIBS)
 	cp .libs/rpm.a .libs/rpm_s.a
-	dllar -g -nolxlite -Zomf -o .libs/rpm .libs/rpm.a -l../rpmio/.libs/rpmio.a -lsqlite3 -ldb -lbz2 -lz -lpopt -lurpo -lmmap -lpthread -lssp
+	dllar -g -nolxlite -Zomf -o .libs/rpm .libs/rpm.a -l../rpmio/.libs/rpmio.a -lsqlite3 -ldb -lbz2 -lz -lpopt $(LIBS) -lssp
 	cp .libs/rpm.dll ..
 
 clean-checkPROGRAMS:
