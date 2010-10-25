@@ -30,6 +30,7 @@ enum FCOLOR_e {
     RPMFC_ELFMIPSN32		= (1 <<  2),
 #define	RPMFC_ELF	(RPMFC_ELF32|RPMFC_ELF64|RPMFC_ELFMIPSN32)
 	/* (1 << 3) leaks into package headers, reserved */
+    RPMFC_OS2			= (1 <<  5),
 
 	/* bits 4-6 unused */
     RPMFC_OCAML			= (1 <<  7),
