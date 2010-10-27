@@ -13,6 +13,11 @@
 #define __power_pc() 0
 #endif
 
+#ifdef __KLIBC__
+#define INCL_DOS
+#include <os2.h>
+#endif
+
 #include <rpm/rpmlib.h>			/* RPM_MACTABLE*, Rc-prototypes */
 #include <rpm/rpmmacro.h>
 #include <rpm/rpmfileutil.h>
@@ -1175,6 +1180,21 @@ static void defaultMachine(const char ** arch,
 				   tables[RPM_MACHTABLE_INSTOS].canonsLength);
 	if (canon)
 	    rstrlcpy(un.sysname, canon->short_name, sizeof(un.sysname));
+	  
+#ifdef __KLIBC__
+	{
+		char macro[64];
+		ULONG   aulDrive;
+		DosQuerySysInfo(QSV_BOOT_DRIVE, QSV_BOOT_DRIVE, (PVOID)&aulDrive, sizeof(ULONG));
+		sprintf( macro, "_os2_boot_drive %c:", '@'+aulDrive);
+		rpmDefineMacro(NULL, macro, -1);
+		if (getenv("UNIXROOT")) {
+			sprintf( macro, "_os2_unixroot_drive %s", getenv("UNIXROOT"));
+			rpmDefineMacro(NULL, macro, -1);
+		}
+	}
+#endif
+
 	gotDefaults = 1;
 	break;
     }

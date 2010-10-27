@@ -1210,5 +1210,12 @@ done \
 
 %wps_object_delete_all /@unixroot/usr/lib/rpm/wps-object.exe %{name} /deleteall
 
+#------------------------------------------------------------------------
+# OS/2 macros to handle config.sys changes (using cube script)
+%os2_boot_drive			%{_os2_boot_drive}
+%os2_unixroot_drive		%{_os2_unixroot_drive}
+%os2_config_sys			%{os2_boot_drive}\\config.sys
+%cube cube.exe
+
 # \endverbatim
 #*/

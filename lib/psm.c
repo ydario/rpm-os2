@@ -655,6 +655,10 @@ static rpmRC runScript(rpmpsm psm, Header h, rpmTag stag, ARGV_t * argvp,
     int warn_only = 0;
     char *sname = NULL; 
     struct rpmtd_s prefixes;
+#ifdef __KLIBC__
+	char* shell;
+	char fn_native[_MAX_PATH];
+#endif
 
     assert(argvp != NULL);
     if (*argvp == NULL && script == NULL)
@@ -699,10 +703,30 @@ static rpmRC runScript(rpmpsm psm, Header h, rpmTag stag, ARGV_t * argvp,
 	xx = Fwrite(script, sizeof(script[0]), strlen(script), fd);
 	xx = Fclose(fd);
 
-#ifdef __EMX__
-	argvAdd(argvp, "-c");
-	argvAdd(argvp, fn);
+#ifdef __KLIBC__
+	{
+
+		// if script is a .cmd or .exe, execute it directly instead of using sh
+		char* token = strtok( script, " ");
+		strlwr( token);
+
+		// get native paths
+		_realrealpath( fn, fn_native, sizeof( fn_native));
+		if (strstr( token, ".cmd") || strstr( token, ".exe")) {
+			shell = "cmd.exe";
+			argvAdd(argvp, "/c");
+			// cmd recognizes only .cmd files as scripts :-(
+			strcat( fn_native, ".cmd");
+			rename( fn, fn_native);
+		} else {
+			shell = "sh.exe";
+			argvAdd(argvp, "-c");
+		}
+		argvAdd(argvp, fn_native);
+	}
+
 #else
+
 	{   const char * sn = fn;
 	    if (!rpmtsChrootDone(ts) && rootDir != NULL &&
 		!(rootDir[0] == '/' && rootDir[1] == '\0'))
@@ -721,10 +745,10 @@ static rpmRC runScript(rpmpsm psm, Header h, rpmTag stag, ARGV_t * argvp,
 	}
     }
 
-#ifdef __EMX__
-    //psm->sq.child = spawnvp(P_NOWAIT, argvp[0], *argvp);
-    psm->sq.child = spawnvp(P_NOWAIT, "sh.exe", *argvp);
-    psm->sq.reaped = waitpid(psm->sq.child, &psm->sq.status, 0);
+#ifdef __KLIBC__
+
+	psm->sq.child = spawnvp(P_NOWAIT, shell, *argvp);
+	psm->sq.reaped = waitpid(psm->sq.child, &psm->sq.status, 0);
 
 #else
     scriptFd = rpmtsScriptFd(ts);
@@ -797,6 +821,10 @@ exit:
 	xx = Fclose(out);	/* XXX dup'd STDOUT_FILENO */
 
     if (script) {
+#ifdef __KLIBC__
+	if (!rpmIsDebug())
+	    xx = unlink(fn_native);
+#endif
 	if (!rpmIsDebug())
 	    xx = unlink(fn);
 	fn = _free(fn);
