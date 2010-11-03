@@ -33,6 +33,9 @@ void freeNames(void)
 
 const char *getUname(uid_t uid)
 {
+#ifdef __KLIBC__
+    return getenv("USER");
+#else
     struct passwd *pw;
     int x;
 
@@ -51,6 +54,7 @@ const char *getUname(uid_t uid)
     uids[uid_used] = uid;
     unames[uid_used] = xstrdup(pw->pw_name);
     return unames[uid_used++];
+#endif
 }
 
 const char *getUnameS(const char *uname)
