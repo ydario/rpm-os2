@@ -421,7 +421,15 @@ int rpmInstall(rpmts ts, struct rpmInstallArguments_s * ia, ARGV_t fileArgv)
 	char * fn;
 
 	fn = rpmEscapeSpaces(*eiu->fnp);
+	// check if it is a full path
+	if (fn[0] != '/' && fn[1] != ':') {
+	    char _fullpath[_MAX_PATH];
+	    // convert to full path because chroot() changes default dir.
+	    _realrealpath( fn, _fullpath, sizeof( _fullpath));
+	    rc = rpmGlob(_fullpath, &ac, &av);
+	} else {
 	rc = rpmGlob(fn, &ac, &av);
+	}
 	fn = _free(fn);
 	if (rc || ac == 0) {
 	    rpmlog(RPMLOG_ERR, _("File not found by glob: %s\n"), *eiu->fnp);
