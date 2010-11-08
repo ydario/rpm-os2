@@ -1318,7 +1318,8 @@ done \
 %os2_boot_drive			%{_os2_boot_drive}
 %os2_unixroot_drive		%{_os2_unixroot_drive}
 %os2_config_sys			%{os2_boot_drive}\\config.sys
-%cube @cube.exe
+%cube() 			cmd /c '%UNIXROOT%\\usr\\bin\\cube.exe %{*}'\
+%{nil}
 
 # \endverbatim
 #*/
