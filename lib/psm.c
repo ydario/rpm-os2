@@ -656,7 +656,7 @@ static rpmRC runScript(rpmpsm psm, Header h, rpmTag stag, ARGV_t * argvp,
     char *sname = NULL; 
     struct rpmtd_s prefixes;
 #ifdef __KLIBC__
-	char* shell;
+	char* shell = "sh.exe";
 	char fn_native[_MAX_PATH];
 #endif
 
@@ -747,8 +747,13 @@ static rpmRC runScript(rpmpsm psm, Header h, rpmTag stag, ARGV_t * argvp,
 
 #ifdef __KLIBC__
 
+    if (script) {
 	psm->sq.child = spawnvp(P_NOWAIT, shell, *argvp);
 	psm->sq.reaped = waitpid(psm->sq.child, &psm->sq.status, 0);
+    } else {
+	psm->sq.child = 0;
+	psm->sq.reaped = 0;
+    }
 
 #else
     scriptFd = rpmtsScriptFd(ts);
