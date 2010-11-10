@@ -2823,6 +2823,7 @@ int rpmdbAdd(rpmdb db, int iid, Header h,
 		data.data = headerUnload(h);
 		data.size = headerSizeof(h, HEADER_MAGIC_NO);
 
+#ifndef __KLIBC__
 		/* Check header digest/signature on blob export. */
 		if (hdrchk && ts) {
 		    char * msg = NULL;
@@ -2835,6 +2836,7 @@ int rpmdbAdd(rpmdb db, int iid, Header h,
 				hdrNum, (msg ? msg : "\n"));
 		    msg = _free(msg);
 		}
+#endif
 
 		if (data.data != NULL && rpmrc != RPMRC_FAIL) {
 		    xx = dbiPut(dbi, dbcursor, &key, &data, DB_KEYLAST);
