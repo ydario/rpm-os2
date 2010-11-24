@@ -2116,6 +2116,9 @@ if (!(fsm->mapFlags & CPIO_ALL_HARDLINKS)) break;
     case FSM_RENAME:
 	if (fsm->mapFlags & CPIO_SBIT_CHECK)
 	    removeSBITS(fsm->path);
+#ifdef __KLIBC__ // rename fails if destination is read-only
+	rc = chmod(fsm->path, S_IREAD|S_IWRITE);
+#endif
 	rc = rename(fsm->opath, fsm->path);
 #ifdef __KLIBC__
 	if (rc)
