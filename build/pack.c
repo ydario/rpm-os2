@@ -476,8 +476,8 @@ rpmRC writeRPM(Header *hdrp, unsigned char ** pkgidp, const char *fileName,
 	sizetag = RPMSIGTAG_LONGSIZE;
 	payloadtag = RPMSIGTAG_LONGARCHIVESIZE;
     }
-//    (void) rpmAddSignature(sig, sigtarget, sizetag, passPhrase);
-//    (void) rpmAddSignature(sig, sigtarget, RPMSIGTAG_MD5, passPhrase);
+    (void) rpmAddSignature(sig, sigtarget, sizetag, passPhrase);
+    (void) rpmAddSignature(sig, sigtarget, RPMSIGTAG_MD5, passPhrase);
 
     if ((sigtag = rpmLookupSignatureType(RPMLOOKUPSIG_QUERY)) > 0) {
 	rpmlog(RPMLOG_NOTICE, _("Generating signature: %d\n"), sigtag);

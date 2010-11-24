@@ -720,7 +720,6 @@ static rpmRC runScript(rpmpsm psm, Header h, rpmTag stag, ARGV_t * argvp,
 			rename( fn, fn_native);
 		} else {
 			shell = "sh.exe";
-			argvAdd(argvp, "-c");
 		}
 		argvAdd(argvp, fn_native);
 	}

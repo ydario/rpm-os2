@@ -262,7 +262,7 @@ LDFLAGS = @LDFLAGS@
 LIBICONV = @LIBICONV@
 LIBINTL = @LIBINTL@
 LIBOBJS = @LIBOBJS@
-LIBS = misc/libmisc.la -lmagic @LIBS@
+LIBS = @LIBS@
 LIBTOOL = @LIBTOOL@
 LIPO = @LIPO@
 LN_S = @LN_S@
@@ -752,6 +752,7 @@ rpm$(EXEEXT): $(rpm_OBJECTS) $(rpm_DEPENDENCIES)
 	# YD link exe also statically, so we can use it for bootstrap/debug
 	$(CC) $(LDFLAGS) -o rpm_s.exe $(rpm_OBJECTS) \
 		build/.libs/rpmbuild_s.a lib/.libs/rpm_s.a rpmio/.libs/rpmio_s.a \
+		-lnss3 -llzma \
 		-lsqlite3_s -lz -lbz2 -ldb -lpopt -lmagic -lintl_s -lurpo -lmmap_s -lpthread_s -lssp
 
 rpm2cpio$(EXEEXT): $(rpm2cpio_OBJECTS) $(rpm2cpio_DEPENDENCIES) 
@@ -763,6 +764,7 @@ rpmbuild$(EXEEXT): $(rpmbuild_OBJECTS) $(rpmbuild_DEPENDENCIES)
 	# YD link exe also statically, so we can use it for bootstrap/debug
 	$(CC) $(LDFLAGS) -o rpmbuild_s.exe $(rpmbuild_OBJECTS) \
 		build/.libs/rpmbuild_s.a lib/.libs/rpm_s.a rpmio/.libs/rpmio_s.a \
+		-lnss3 -llzma \
 		-lsqlite3_s -lz -lbz2 -ldb -lpopt -lmagic -lintl_s -lurpo -lmmap -lpthread -lssp
 
 tools/rpmdeps.$(OBJEXT): tools/$(am__dirstamp) \

@@ -896,12 +896,10 @@ static int expandRegular(FSM_t fsm)
 	(void) Fflush(fsm->wfd);
 	fdFiniDigest(fsm->wfd, fsm->digestalgo, &digest, NULL, asAscii);
 
-#ifndef __EMX__ // YD FIXME
 	if (digest == NULL) {
 	    rc = CPIOERR_DIGEST_MISMATCH;
 	    goto exit;
 	}
-#endif
 
 	if (fsm->digest != NULL) {
 	    size_t diglen = rpmDigestLength(fsm->digestalgo);

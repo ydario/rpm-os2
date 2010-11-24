@@ -455,7 +455,6 @@ rpmlibexecdir = $(prefix)/lib/rpm
 rpmconfigdir = $(prefix)/lib/rpm
 AM_CPPFLAGS = -I$(top_builddir) -I$(top_srcdir) \
 	-I$(top_builddir)/include/ @WITH_NSS_INCLUDE@ \
-	-I$(top_builddir)/include/nss \
 	@WITH_POPT_INCLUDE@ @WITH_SQLITE3_INCLUDE@ \
 	-I$(top_srcdir)/misc -DLOCALEDIR="\"$(localedir)\"" \
 	-DSYSCONFDIR="\"$(sysconfdir)\"" \
