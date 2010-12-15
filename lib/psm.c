@@ -713,7 +713,7 @@ static rpmRC runScript(rpmpsm psm, Header h, rpmTag stag, ARGV_t * argvp,
 
 		// get native paths
 		_realrealpath( fn, fn_native, sizeof( fn_native));
-		if (strncmp( token, "/*", 2)) {
+		if (!strncmp( token, "/*", 2)) {
 			shell = "cmd.exe";
 			argvAdd(argvp, "/c");
 			// cmd recognizes only .cmd files as scripts :-(
