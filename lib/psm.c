@@ -706,8 +706,10 @@ static rpmRC runScript(rpmpsm psm, Header h, rpmTag stag, ARGV_t * argvp,
 #ifdef __KLIBC__
 	{
 
+		// strtok writes to buffer, this corrupts rpm header data
+		char* _script = strdup( script);
 		// if script is a .cmd or .exe, execute it directly instead of using sh
-		char* token = strtok( script, " ");
+		char* token = strtok( _script, " ");
 		strlwr( token);
 
 		// get native paths
@@ -722,6 +724,7 @@ static rpmRC runScript(rpmpsm psm, Header h, rpmTag stag, ARGV_t * argvp,
 			shell = "sh.exe";
 		}
 		argvAdd(argvp, fn_native);
+		free(_script);
 	}
 
 #else
