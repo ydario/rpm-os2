@@ -723,7 +723,6 @@ static rpmRC runScript(rpmpsm psm, Header h, rpmTag stag, ARGV_t * argvp,
 			shell = "sh.exe";
 		}
 		argvAdd(argvp, fn_native);
-		free(_script);
 	}
 
 #else
