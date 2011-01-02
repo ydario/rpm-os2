@@ -2,11 +2,7 @@
 #define H_RPMDB_INTERNAL
 
 #include <assert.h>
-#ifdef __KLIBC__
-#include <berkeleydb/db.h>
-#else
 #include <db.h>
-#endif
 
 #include <rpm/rpmsw.h>
 #include <rpm/rpmtypes.h>
