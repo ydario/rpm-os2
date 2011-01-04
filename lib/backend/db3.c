@@ -512,6 +512,12 @@ static int db3open(rpmdb rpmdb, rpmTag rpmtag, dbiIndex * dbip)
     if ( dbi->dbi_mode & O_EXCL) oflags |= DB_EXCL;
 #endif
 
+#ifdef __KLIBC__
+    oflags |= DB_PRIVATE;
+    dbi->dbi_eflags |= DB_PRIVATE;
+    dbi->dbi_oeflags |= DB_PRIVATE;
+#endif
+
     /*
      * Map open mode flags onto configured database/environment flags.
      */
