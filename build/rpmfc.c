@@ -941,13 +941,14 @@ static int rpmfcOS2(rpmfc fc)
 	j = getc(in);
 	if (j > 0) {
 	    char *ptr;
-	    name = (char *) malloc(j + 1);
+	    name = (char *) malloc(j + 1 + 4);
 	    if (name) {
 		ptr = name;
 		for (; j > 0; j--, i++)
 		    *ptr++ = getc(in);
 		*ptr = 0;
 		strlwr( name);
+		strcat( name, ".dll");
 		// printf("%s\n", name);
 		/* Add to package dependencies. */
 		ds = rpmdsSingle(RPMTAG_REQUIRENAME,
@@ -967,8 +968,11 @@ static int rpmfcOS2(rpmfc fc)
     strlwr( fname);
     strlwr( ext);
     if (strcmp( ext, ".dll") == 0) {
+	char fullname[_MAX_PATH];
+	strcpy( fullname, fname);
+	strcat( fullname, ext);
 	/* Add to package dependencies. */
-	ds = rpmdsSingle(RPMTAG_PROVIDENAME, fname, "", RPMSENSE_FIND_PROVIDES);
+	ds = rpmdsSingle(RPMTAG_PROVIDENAME, fullname, "", RPMSENSE_FIND_PROVIDES);
 	xx = rpmdsMerge(&fc->provides, ds);
 	/* Add to file dependencies. */
 	rpmfcAddFileDep(&fc->ddict, fc->ix, ds);
