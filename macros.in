@@ -1211,7 +1211,7 @@ done \
 # %wps_object_delete OBJECTID
 # %wps_object_delete_all
 #
-# And one double begin-end macro:
+# And a pair of begin-end macros:
 #
 # %wps_object_create_begin
 # OBJECTID:SPECIFICATION
@@ -1241,10 +1241,10 @@ done \
 #
 #   OBJECTID:SPECIFICATION
 #
-# The double begin-end macro serves for the same purpose but doesn't requre
+# The pair of begin-end macrs serves for the same purpose but doesn't require
 # an external file (see below for an example).
 #
-# This indirect FILE or begin-end form is preferred and even required if one
+# The indirect FILE or begin-end form is preferred and even required if one
 # of the object parameters contains a double forward slash (e.g. 'http://foo')
 # because otherwise the Classic REXX interpreter will treat it as a start of
 # the comment block and fail.
@@ -1300,7 +1300,7 @@ done \
 %wps_object_create_batch(n:) /@unixroot/usr/lib/rpm/wps-object.exe /create %{!-n:%{name}}%{-n:%{-n*}} %{*}\
 %{nil}
 
-%wps_object_delete(n:) /@unixroot/usr/lib/rpm/wps-object.exe /create %{!-n:%{name}}%{-n:%{-n*}} "%{*}"\
+%wps_object_delete(n:) /@unixroot/usr/lib/rpm/wps-object.exe /delete %{!-n:%{name}}%{-n:%{-n*}} "%{*}"\
 %{nil}
 
 %wps_object_delete_all(n:) /@unixroot/usr/lib/rpm/wps-object.exe /deleteall %{!-n:%{name}}%{-n:%{-n*}}\
@@ -1311,6 +1311,29 @@ done \
 
 %wps_object_create_end EOF\
 ###
+
+#------------------------------------------------------------------------
+# Macros to check for conflicts with installed WarpIn packages.
+#
+# %warpin_conflicts_begin
+# Vendor\Application\ConflictingPackage1
+# Vendor\Application\ConflictingPackage2
+# ...
+# %warpin_conflicts_end
+#
+# This pair of begin-end macros takes a list of WarpIn package IDs in between
+# and aborts the current scriptlet if any of these packages is installed.
+# A message containing the name and the version of the detected conflicting
+# package, if any, is printed to the console. This pair of macros is intended
+# to be used in %pre sections of .spec files so that it is able to abort the
+# installation if there are conflicts.
+#
+
+%warpin_conflicts_begin \{ /@unixroot/usr/lib/rpm/warpin-conflicts.cmd <<'EOF'\
+%{nil}
+
+%warpin_conflicts_end EOF\
+\} || exit $?
 
 #------------------------------------------------------------------------
 # OS/2 macros to handle config.sys changes (using cube script)
