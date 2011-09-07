@@ -324,7 +324,7 @@ rpmconfig_SCRIPTS = \
 	brp-compress brp-python-bytecompile brp-java-gcjcompile \
 	brp-strip brp-strip-comment-note \
 	brp-strip-shared brp-strip-static-archive \
-	brp-strip.os2 check-files.os2 wps-object.cmd warpin-conflicts.cmd \
+	brp-strip.os2 check-files.os2 wps-object.exe warpin-conflicts.exe \
 	check-files check-prereqs \
 	check-buildroot check-rpaths check-rpaths-worker \
 	find-lang.sh \
@@ -590,6 +590,12 @@ macros.php: $(srcdir)/macros.php.in
 macros.python: $(srcdir)/macros.python.in
 	@cat \
 	  < $(srcdir)/macros.python.in > macros.python
+
+wps-object.exe: wps-object.cmd
+	rexx2vio wps-object.cmd
+
+warpin-conflicts.exe: warpin-conflicts.cmd
+	rexx2vio warpin-conflicts.cmd
 
 # Tell versions [3.59,3.63) of GNU make to not export all variables.
 # Otherwise a system limit (for SysV at least) may be exceeded.
