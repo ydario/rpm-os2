@@ -1329,7 +1329,7 @@ done \
 # installation if there are conflicts.
 #
 
-%warpin_conflicts_begin \{ /@unixroot/usr/lib/rpm/warpin-conflicts.cmd <<'EOF'\
+%warpin_conflicts_begin \{ /@unixroot/usr/lib/rpm/warpin-conflicts.exe <<'EOF'\
 %{nil}
 
 %warpin_conflicts_end EOF\
