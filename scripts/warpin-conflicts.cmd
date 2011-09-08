@@ -11,12 +11,24 @@
  * and its version to the standard output. Prints nothing otherwise.
  *
  * Author: Dmitriy Kuminov
+ *
+ * Version: 1.1 - 2011-09-08
+ *   - Skip incomplete IDs (they will not match anything).
+ *   - If the argment is given, treat as ID, print version (if any) and exit.
  * Version: 1.0 - 2011-09-06
+ *   - Initial.
  */
 
 trace off
 numeric digits 12
 '@echo off'
+
+/*------------------------------------------------------------------------------
+ globals
+------------------------------------------------------------------------------*/
+
+/* all globals to be exposed in procedures */
+Globals = 'G. Opt. Static.'
 
 /*------------------------------------------------------------------------------
  startup + main + termination
@@ -27,6 +39,8 @@ if (RxFuncQuery('SysLoadFuncs')) then do
     call RxFuncAdd 'SysLoadFuncs', 'RexxUtil', 'SysLoadFuncs'
     call SysLoadFuncs
 end
+
+parse arg G.Args
 
 return Main()
 
@@ -40,12 +54,21 @@ return Main()
  * @param aArgs Comand line arguments.
  * @return      0 on success, error code on failure.
  */
-Main: procedure
+Main: procedure expose (Globals)
+
+    if (G.Args \== '') then do
+        ver = GetPkgVersion(G.Args)
+        if (ver \== '') then do
+            say ver
+            exit 1
+        end
+        exit 0
+    end
 
     i = 0
     do forever
         id = linein()
-        if (id == '') then do
+        if (strip(id) == '') then do
             if (stream('STDIN', 'S') \== 'READY') then leave
             iterate
         end
@@ -74,11 +97,13 @@ Main: procedure
  * Returns the version for the given package ID or '' if this package
  * is not installed.
  *
- * @param aPkgId    Package ID.
+ * @param aPkgId    Package ID (vendor\application\package).
  * @return          Package version or ''.
  */
 GetPkgVersion: procedure
     parse arg aPkgId
+    parse var aPkgId v1'\'a1'\'p1
+    if (v1 == '' | a1 == '' | p1 == '') then return ''
     WarpInDir = strip(SysIni('USER', 'WarpIN', 'Path'), 'T', '0'x)
     if (WarpInDir \== '') then do
         rc = SysFileTree(WarpInDir'\DATBAS_?.INI', 'inis', 'FO')
@@ -88,9 +113,9 @@ GetPkgVersion: procedure
                 if (rc == '') then do
                     do j = 1 to apps.0
                         apps.j = strip(apps.j, 'T', '0'x)
-                        if (left(apps.j, length(aPkgId)) == aPkgId) then do
+                        parse var apps.j v2'\'a2'\'p2'\'ver
+                        if (v1 == v2 & a1 == a2 & p1 == p2) then do
                             /* found the app */
-                            ver = right(apps.j, length(apps.j) - length(aPkgId) - 1)
                             ver = translate(ver, '.', '\')
                             return ver
                         end
