@@ -552,6 +552,7 @@ static const struct rpmfcTokens_s const rpmfcTokens[] = {
 #ifdef __KLIBC__
   { "32-bit DLL",		RPMFC_OS2|RPMFC_INCLUDE },
   { "32-bit OS/2",		RPMFC_OS2|RPMFC_INCLUDE },
+  { "32-bit PM",		RPMFC_OS2|RPMFC_INCLUDE },
 #endif
   { "ELF 32-bit",		RPMFC_ELF32|RPMFC_INCLUDE },
   { "ELF 64-bit",		RPMFC_ELF64|RPMFC_INCLUDE },
