@@ -106,6 +106,38 @@ static int fsmStage(FSM_t fsm, fileStage stage);
 
 #ifdef __KLIBC__
 /**
+*/
+int unlockEx( const char *old_name)
+{
+  APIRET rc;
+  char* expandOptionMacro;
+  int expandOption;
+  CHAR OldName[_MAX_PATH];
+
+  // check expand macro value
+  expandOptionMacro = rpmExpand( "%{_os2_unlock_mode}", NULL);
+  if (expandOptionMacro == NULL)
+    expandOptionMacro = "0";
+  expandOption = atoi( expandOptionMacro);
+  
+  // exit now?
+  if (expandOption != 0) {
+    return 0;
+  }
+
+  // get native paths
+  if (_realrealpath( old_name, OldName, sizeof( OldName)) == NULL) {
+    // failed for some reason, report failure
+    errno = EACCES;
+    return -1;
+  }
+
+  // unlock file
+  rc = DosReplaceModule( (PCSZ)OldName, NULL, NULL);
+  return rc;
+}
+
+/**
  */
 int renameEx( const char *old_name, const char *new_name)
 {
@@ -2106,6 +2138,12 @@ if (!(fsm->mapFlags & CPIO_ALL_HARDLINKS)) break;
     case FSM_UNLINK:
 	if (fsm->mapFlags & CPIO_SBIT_CHECK)
 	    removeSBITS(fsm->path);
+#ifdef __KLIBC__
+	// rename fails if destination is read-only
+	rc = chmod(fsm->path, S_IREAD|S_IWRITE);
+	// try unlocking
+	rc = unlockEx(fsm->path);
+#endif
 	rc = unlink(fsm->path);
 	if (_fsm_debug && (stage & FSM_SYSCALL))
 	    rpmlog(RPMLOG_DEBUG, " %8s (%s) %s\n", cur,
