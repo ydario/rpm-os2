@@ -149,7 +149,7 @@
 %_builddir		%{_topdir}/BUILD
 
 #	The interpreter used for build scriptlets.
-%_buildshell		/@unixroot/bin/sh
+%_buildshell		/@unixroot/usr/bin/sh
 
 #	The path to the bzip2 executable (legacy, use %{__bzip2} instead).
 %_bzip2bin		%{__bzip2}
@@ -799,7 +799,7 @@ print (t)\
 #	Global defaults used for building scriptlet templates.
 #
 
-%___build_shell		%{?_buildshell:%{_buildshell}}%{!?_buildshell:/bin/sh}
+%___build_shell		%{?_buildshell:%{_buildshell}}%{!?_buildshell:/@unixroot/usr/bin/sh}
 %___build_args		-e
 %___build_cmd		%{?_sudo:%{_sudo} }%{?_remsh:%{_remsh} %{_remhost} }%{?_remsudo:%{_remsudo} }%{?_remchroot:%{_remchroot} %{_remroot} }%{___build_shell} %{___build_args}
 %___build_pre	\

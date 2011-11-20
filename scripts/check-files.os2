@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/usr/bin/sh
 #
 # Gets file list on standard input and RPM_BUILD_ROOT as first parameter
 # and searches for omitted files (not counting directories).

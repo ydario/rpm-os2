@@ -583,7 +583,7 @@ int main(int argc, char *argv[])
 	    (void) close(p[1]);
 	    (void) dup2(p[0], STDIN_FILENO);
 	    (void) close(p[0]);
-	    (void) execl("/bin/sh", "/bin/sh", "-c", rpmcliPipeOutput, NULL);
+	    (void) execl("/@unixroot/usr/bin/sh", "/@unixroot/usr/bin/sh", "-c", rpmcliPipeOutput, NULL);
 	    fprintf(stderr, _("exec failed\n"));
 	}
 

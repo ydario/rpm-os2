@@ -674,7 +674,7 @@ static rpmRC runScript(rpmpsm psm, Header h, rpmTag stag, ARGV_t * argvp,
     rpmlog(RPMLOG_DEBUG, "%s: %s scriptlet start\n", psm->stepName, sname);
 
     if (argvCount(*argvp) == 0) {
-	argvAdd(argvp, "/@unixroot/bin/sh");
+	argvAdd(argvp, "/@unixroot/usr/bin/sh");
     }
 
     /* Try new style prefixes first, then old. Otherwise there are none.. */
