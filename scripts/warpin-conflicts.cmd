@@ -12,6 +12,9 @@
  *
  * Author: Dmitriy Kuminov
  *
+ * Version: 1.2 - 2012-02-08
+ *   - Use WIC -p to get the Package version. This should solve infamous random
+ *     errors when accessing the INI file directly from REXX.
  * Version: 1.1 - 2011-09-08
  *   - Skip incomplete IDs (they will not match anything).
  *   - If the argment is given, treat as ID, print version (if any) and exit.
@@ -56,6 +59,7 @@ return Main()
  */
 Main: procedure expose (Globals)
 
+    G.Args = strip(G.Args)
     if (G.Args \== '') then do
         ver = GetPkgVersion(G.Args)
         if (ver \== '') then do
@@ -104,8 +108,52 @@ GetPkgVersion: procedure
     parse arg aPkgId
     parse var aPkgId v1'\'a1'\'p1
     if (v1 == '' | a1 == '' | p1 == '') then return ''
+    ver = ''
     WarpInDir = strip(SysIni('USER', 'WarpIN', 'Path'), 'T', '0'x)
     if (WarpInDir \== '') then do
+        /* first, check if we have WIC that supports -p (1.0.16+) */
+        wic_ver = ''
+        wic_exe = stream(WarpInDir'\WIC.EXE', 'C', 'QUERY EXISTS')
+        if (wic_exe \== '') then do
+            temp_dir = value('TMP',, 'OS2ENVIRONMENT')
+            if (temp_dir = '') then temp_dir = value('TEMP',, 'OS2ENVIRONMENT')
+            temp_file = SysTempFileName(temp_dir'\wic?????.tmp')
+            call SysSetExtLibPath WarpInDir';%BEGINLIBPATH%', 'B'
+            address 'cmd' wic_exe '-h 2>nul 1>'temp_file
+            if (rc == 0) then do
+                str = linein(temp_file)
+                call lineout temp_file
+                parse var str 'wic V'wic_ver .
+                if (wic_ver >= '1.0.16') then do
+                    address 'cmd' wic_exe '-p "'aPkgId'" 2>nul 1>'temp_file
+                    if (rc == 0) then do
+                        str = linein(temp_file)
+                        call lineout temp_file
+                        parse var str v2'\'a2'\'p2'\'v2'='ver
+                    end
+                    else if (rc == -1 /* not found */) then rc = 0
+                end
+                else wic_ver = ''
+            end
+            call SysFileDelete temp_file
+            if (wic_ver \= '' & rc == 0) then return ver
+            if (rc == 5636) then do
+                say; say 'ERROR:'; say
+                say 'Failed to query the WarpIn database because the WarpIn application'
+                say 'is already running.'; say
+                say 'Please close the WarpIn application and try again.'; say
+                exit 5
+            end
+            else if (rc \= 0) then do
+                say; say 'ERROR:'; say
+                say 'Failed to access the WarpIn database. Executing the program'; say
+                say '  'wic_exe; say
+                say 'failed with exit code 'rc'. Please make sure that the WarpIn'
+                say 'application is installed correctly and try again.'; say
+                exit 5
+            end
+        end
+        /* sad, but we failed with WIC and have to use the old unsatable method... */
         rc = SysFileTree(WarpInDir'\DATBAS_?.INI', 'inis', 'FO')
         if (rc == 0) then do
             do i = 1 to inis.0
