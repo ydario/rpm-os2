@@ -1,4 +1,4 @@
-#!/usr/bin/perl -Tw
+#!/@unixroot/usr/bin/perl -Tw
 #
 # perldeps.pl -- Analyze dependencies of Perl packages
 #

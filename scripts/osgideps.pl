@@ -1,4 +1,4 @@
-#!/usr/bin/perl
+#!/@unixroot/usr/bin/perl
 #
 # osgideps.pl -- Analyze dependencies of OSGi bundles.
 #

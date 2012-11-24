@@ -1,4 +1,4 @@
-#!/usr/bin/perl
+#!/@unixroot/usr/bin/perl
 
 # a web interface to 'cvs rdiff'.  This script makes it easy to query
 # the tags which are created by the build script.

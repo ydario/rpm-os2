@@ -1,4 +1,4 @@
-#!/usr/bin/perl
+#!/@unixroot/usr/bin/perl
 
 # tcl.req - a simple makedepends like script for tcl.
 
