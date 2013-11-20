@@ -6,8 +6,8 @@ fi
 
 # Strip OS/2 binaries
 for f in `find $RPM_BUILD_ROOT -type f -name "*.exe"`; do
-	lxlite /ml1 /mf2 /ydd /yxd /b- "$f" ;
+	lxlite /ml1 /mf2 /ydd /yxd /b- /od:*.dbg "$f" ;
 done
 for f in `find $RPM_BUILD_ROOT -type f -name "*.dll"`; do
-	lxlite /ml1 /mf2 /ydd /yxd /b- "$f" ;
+	lxlite /ml1 /mf2 /ydd /yxd /b- /od:*.dbg "$f" ;
 done
