@@ -5,23 +5,19 @@
 #include "system.h"
 
 #include <rpm/rpmtypes.h>
-#include <rpm/rpmlib.h>		/* rpmGetFilesystem*() */
+#include <rpm/rpmlib.h>
 #include <rpm/rpmmacro.h>	/* XXX for %_i18ndomains */
 #include <rpm/rpmfi.h>
 #include <rpm/rpmstring.h>
 #include <rpm/rpmlog.h>
+#include "lib/misc.h"		/* tag function proto */
 
 #include "debug.h"
 
 struct headerTagFunc_s {
     rpmTag tag;		/*!< Tag of extension. */
-    void *func;		/*!< Pointer to formatter function. */	
+    headerTagTagFunction func;	/*!< Pointer to formatter function. */	
 };
-
-/* forward declarations */
-static const struct headerTagFunc_s rpmHeaderTagExtensions[];
-
-void *rpmHeaderTagFunc(rpmTag tag);
 
 /** \ingroup rpmfi
  * Retrieve file names from header.
@@ -37,39 +33,54 @@ void *rpmHeaderTagFunc(rpmTag tag);
  * 
  * @param h		header
  * @param tagN		RPMTAG_BASENAMES | PMTAG_ORIGBASENAMES
- * @retval *fnp		array of file names
- * @retval *fcp		number of files
+ * @param withstate	take file state into account?
+ * @retval td		tag data container
+ * @return		1 on success
  */
-static void rpmfiBuildFNames(Header h, rpmTag tagN,
-	const char *** fnp, rpm_count_t * fcp)
+static int fnTag(Header h, rpmTag tagN, int withstate, rpmtd td)
 {
-    const char **baseNames, **dirNames, **fileNames;
+    const char **baseNames, **dirNames;
+    const char *fileStates = NULL;
     uint32_t *dirIndexes;
-    rpm_count_t count;
-    size_t size;
-    rpmTag dirNameTag = 0;
-    rpmTag dirIndexesTag = 0;
-    char * t;
-    int i;
-    struct rpmtd_s bnames, dnames, dixs;
+    rpm_count_t count, retcount, dncount;
+    size_t size = 0;
+    rpmTag dirNameTag = RPMTAG_DIRNAMES;
+    rpmTag dirIndexesTag = RPMTAG_DIRINDEXES;
+    int i, j;
+    int rc = 0; /* assume failure */
+    struct rpmtd_s bnames, dnames, dixs, fstates;
 
-    if (tagN == RPMTAG_BASENAMES) {
-	dirNameTag = RPMTAG_DIRNAMES;
-	dirIndexesTag = RPMTAG_DIRINDEXES;
-    } else if (tagN == RPMTAG_ORIGBASENAMES) {
+    if (tagN == RPMTAG_ORIGBASENAMES) {
 	dirNameTag = RPMTAG_ORIGDIRNAMES;
 	dirIndexesTag = RPMTAG_ORIGDIRINDEXES;
     }
 
     if (!headerGet(h, tagN, &bnames, HEADERGET_MINMEM)) {
-	*fnp = NULL;
-	*fcp = 0;
-	return;		/* no file list */
+	return 0;		/* no file list */
     }
+
     (void) headerGet(h, dirNameTag, &dnames, HEADERGET_MINMEM);
     (void) headerGet(h, dirIndexesTag, &dixs, HEADERGET_MINMEM);
 
-    count = rpmtdCount(&bnames);
+    retcount = count = rpmtdCount(&bnames);
+    dncount = rpmtdCount(&dnames);
+
+    /* Basic sanity checking for our interrelated tags  */
+    if (rpmtdCount(&dixs) != count || dncount < 1 || dncount > count)
+	td->flags |= RPMTD_INVALID;
+
+    if (withstate) {
+	/* no recorded states means no installed files */
+	if (!headerGet(h, RPMTAG_FILESTATES, &fstates, HEADERGET_MINMEM))
+	    goto exit;
+	if (rpmtdCount(&fstates) != count)
+	    td->flags |= RPMTD_INVALID;
+	fileStates = fstates.data;
+    }
+
+    if (td->flags & RPMTD_INVALID)
+	goto exit;
+
     baseNames = bnames.data;
     dirNames = dnames.data;
     dirIndexes = dixs.data;
@@ -79,23 +90,46 @@ static void rpmfiBuildFNames(Header h, rpmTag tagN,
      * block, until those assumptions are removed we need to jump through
      * a few hoops here and precalculate sizes etc
      */
-    size = sizeof(*fileNames) * count;
-    for (i = 0; i < count; i++)
-	size += strlen(baseNames[i]) + strlen(dirNames[dirIndexes[i]]) + 1;
-
-    fileNames = xmalloc(size);
-    t = ((char *) fileNames) + (sizeof(*fileNames) * count);
     for (i = 0; i < count; i++) {
-	fileNames[i] = t;
-	t = stpcpy( stpcpy(t, dirNames[dirIndexes[i]]), baseNames[i]);
-	*t++ = '\0';
+	if (fileStates && !RPMFILE_IS_INSTALLED(fileStates[i])) {
+	    retcount--;
+	    continue;
+	}
+	/* Sanity check  directory indexes are within bounds */
+	if (dirIndexes[i] >= dncount) {
+	    td->flags |= RPMTD_INVALID;
+	    break;
+	}
+	size += strlen(baseNames[i]) + strlen(dirNames[dirIndexes[i]]) + 1;
     }
+
+    if (!(td->flags & RPMTD_INVALID)) {
+	char **fileNames = xmalloc(size + (sizeof(*fileNames) * retcount));
+	char *t = ((char *) fileNames) + (sizeof(*fileNames) * retcount);
+	for (i = 0, j = 0; i < count; i++) {
+	    if (fileStates && !RPMFILE_IS_INSTALLED(fileStates[i]))
+		continue;
+	    fileNames[j++] = t;
+	    t = stpcpy( stpcpy(t, dirNames[dirIndexes[i]]), baseNames[i]);
+	    *t++ = '\0';
+	}
+
+	td->data = fileNames;
+	td->count = retcount;
+	td->type = RPM_STRING_ARRAY_TYPE;
+	td->flags |= RPMTD_ALLOCED;
+	rc = 1;
+    }
+
+exit:
     rpmtdFreeData(&bnames);
     rpmtdFreeData(&dnames);
     rpmtdFreeData(&dixs);
+    /* only safe if the headerGet() on file states was actually called */
+    if (fileStates)
+	rpmtdFreeData(&fstates);
 
-    *fnp = fileNames;
-    *fcp = count;
+    return rc;
 }
 
 static int filedepTag(Header h, rpmTag tagN, rpmtd td, headerGetFlags hgflags)
@@ -152,98 +186,9 @@ static int filedepTag(Header h, rpmTag tagN, rpmtd td, headerGetFlags hgflags)
     rc = 1;
 
 exit:
-    fi = rpmfiFree(fi);
-    ds = rpmdsFree(ds);
+    rpmfiFree(fi);
+    rpmdsFree(ds);
     return rc;
-}
-
-/**
- * Retrieve mounted file system paths.
- * @param h		header
- * @retval td		tag data container
- * @return		1 on success
- */
-static int fsnamesTag(Header h, rpmtd td, headerGetFlags hgflags)
-{
-    const char ** list;
-
-    if (rpmGetFilesystemList(&list, &(td->count)))
-	return 0;
-
-    td->type = RPM_STRING_ARRAY_TYPE;
-    td->data = list;
-
-    return 1; 
-}
-
-/**
- * Retrieve install prefixes.
- * @param h		header
- * @retval td		tag data container
- * @return		1 on success
- */
-static int instprefixTag(Header h, rpmtd td, headerGetFlags hgflags)
-{
-    struct rpmtd_s prefixes;
-    int flags = HEADERGET_MINMEM;
-
-    if (headerGet(h, RPMTAG_INSTALLPREFIX, td, flags)) {
-	return 1;
-    } else if (headerGet(h, RPMTAG_INSTPREFIXES, &prefixes, flags)) {
-	/* only return the first prefix of the array */
-	td->type = RPM_STRING_TYPE;
-	td->data = xstrdup(rpmtdGetString(&prefixes));
-	td->flags = RPMTD_ALLOCED;
-	rpmtdFreeData(&prefixes);
-	return 1;
-    }
-
-    return 0;
-}
-
-/**
- * Retrieve mounted file system space.
- * @param h		header
- * @retval td		tag data container
- * @return		1 on success
- */
-static int fssizesTag(Header h, rpmtd td, headerGetFlags hgflags)
-{
-    struct rpmtd_s fsizes, fnames;
-    const char ** filenames = NULL;
-    rpm_loff_t * filesizes = NULL;
-    rpm_loff_t * usages = NULL;
-    rpm_count_t numFiles = 0;
-
-    if (headerGet(h, RPMTAG_LONGFILESIZES, &fsizes, HEADERGET_EXT)) {
-	filesizes = fsizes.data;
-	headerGet(h, RPMTAG_FILENAMES, &fnames, HEADERGET_EXT);
-	filenames = fnames.data;
-	numFiles = rpmtdCount(&fnames);
-    }
-	
-    if (rpmGetFilesystemList(NULL, &(td->count)))
-	return 0;
-
-    td->type = RPM_INT64_TYPE;
-    td->flags = RPMTD_ALLOCED;
-
-    if (filenames == NULL) {
-	usages = xcalloc((td->count), sizeof(usages));
-	td->data = usages;
-
-	return 1;
-    }
-
-    if (rpmGetFilesystemUsage(filenames, filesizes, numFiles, &usages, 0))	
-	return 0;
-
-    td->data = usages;
-
-    rpmtdFreeData(&fnames);
-    rpmtdFreeData(&fsizes);
-
-    return 1;
 }
 
 /**
@@ -370,6 +315,16 @@ static int triggertypeTag(Header h, rpmtd td, headerGetFlags hgflags)
 }
 
 /**
+ * Retrieve installed file paths.
+ * @param h		header
+ * @retval td		tag data container
+ * @return		1 on success
+ */
+static int instfilenamesTag(Header h, rpmtd td, headerGetFlags hgflags)
+{
+    return fnTag(h, RPMTAG_BASENAMES, 1, td);
+}
+/**
  * Retrieve file paths.
  * @param h		header
  * @retval td		tag data container
@@ -377,13 +332,7 @@ static int triggertypeTag(Header h, rpmtd td, headerGetFlags hgflags)
  */
 static int filenamesTag(Header h, rpmtd td, headerGetFlags hgflags)
 {
-    rpmfiBuildFNames(h, RPMTAG_BASENAMES, 
-		     (const char ***) &(td->data), &(td->count));
-    if (td->data) {
-	td->type = RPM_STRING_ARRAY_TYPE;
-	td->flags = RPMTD_ALLOCED;
-    }
-    return (td->data != NULL); 
+    return fnTag(h, RPMTAG_BASENAMES, 0, td);
 }
 
 /**
@@ -394,16 +343,50 @@ static int filenamesTag(Header h, rpmtd td, headerGetFlags hgflags)
  */
 static int origfilenamesTag(Header h, rpmtd td, headerGetFlags hgflags)
 {
-    rpmfiBuildFNames(h, RPMTAG_ORIGBASENAMES, 
-		     (const char ***) &(td->data), &(td->count));
-    if (td->data) {
-	td->type = RPM_STRING_ARRAY_TYPE;
-	td->flags = RPMTD_ALLOCED;
-    }
-    return (td->data != NULL); 
+    return fnTag(h, RPMTAG_ORIGBASENAMES, 0, td);
 }
+
+/*
+ * Attempt to generate libmagic-style file class if missing from header:
+ * we can easily generate this for symlinks and other special types.
+ * Always return malloced strings to simplify life in fileclassTag().
+ */
+static char *makeFClass(rpmfi fi)
+{
+    char *fclass = NULL;
+    const char *hc = rpmfiFClass(fi);
+
+    if (hc != NULL && hc[0] != '\0') {
+	fclass = xstrdup(hc);
+    } else {
+	switch (rpmfiFMode(fi) & S_IFMT) {
+	case S_IFBLK:
+	    fclass = xstrdup("block special");
+	    break;
+	case S_IFCHR:
+	    fclass = xstrdup("character special");
+	    break;
+	case S_IFDIR:
+	    fclass = xstrdup("directory");
+	    break;
+	case S_IFIFO:
+	    fclass = xstrdup("fifo (named pipe)");
+	    break;
+	case S_IFSOCK:
+	    fclass = xstrdup("socket");
+	    break;
+	case S_IFLNK:
+	    fclass = rstrscat(NULL, "symbolic link to `",
+			      rpmfiFLink(fi), "'", NULL);
+	    break;
+	}
+    }
+
+    return (fclass != NULL) ? fclass : xstrdup("");
+}
+
 /**
- * Retrieve file classes.
+ * Retrieve/generate file classes.
  * @param h		header
  * @retval td		tag data container
  * @return		1 on success
@@ -411,31 +394,25 @@ static int origfilenamesTag(Header h, rpmtd td, headerGetFlags hgflags)
 static int fileclassTag(Header h, rpmtd td, headerGetFlags hgflags)
 {
     rpmfi fi = rpmfiNew(NULL, h, RPMTAG_BASENAMES, RPMFI_NOHEADER);
-    char **fclasses;
-    int ix, numfiles;
-    int rc = 0;
+    int numfiles = rpmfiFC(fi);
 
-    numfiles = rpmfiFC(fi);
-    if (numfiles <= 0) {
-	goto exit;
+    if (numfiles > 0) {
+	char **fclasses = xmalloc(numfiles * sizeof(*fclasses));
+	int ix;
+
+	rpmfiInit(fi, 0);
+	while ((ix = rpmfiNext(fi)) >= 0) {
+	    fclasses[ix] = makeFClass(fi);
+	}
+
+	td->data = fclasses;
+	td->count = numfiles;
+	td->flags = RPMTD_ALLOCED | RPMTD_PTR_ALLOCED;
+	td->type = RPM_STRING_ARRAY_TYPE;
     }
 
-    fclasses = xmalloc(numfiles * sizeof(*fclasses));
-    rpmfiInit(fi, 0);
-    while ((ix = rpmfiNext(fi)) >= 0) {
-	const char *fclass = rpmfiFClass(fi);
-	fclasses[ix] = xstrdup(fclass ? fclass : "");
-    }
-
-    td->data = fclasses;
-    td->count = numfiles;
-    td->flags = RPMTD_ALLOCED | RPMTD_PTR_ALLOCED;
-    td->type = RPM_STRING_ARRAY_TYPE;
-    rc = 1;
-
-exit:
-    fi = rpmfiFree(fi);
-    return rc; 
+    rpmfiFree(fi);
+    return (numfiles > 0); 
 }
 
 /**
@@ -478,8 +455,9 @@ static const char * const _macro_i18ndomains = "%{?_i18ndomains}";
  */
 static int i18nTag(Header h, rpmTag tag, rpmtd td, headerGetFlags hgflags)
 {
-    char * dstring = rpmExpand(_macro_i18ndomains, NULL);
     int rc;
+#if defined(ENABLE_NLS)
+    char * dstring = rpmExpand(_macro_i18ndomains, NULL);
 
     td->type = RPM_STRING_TYPE;
     td->data = NULL;
@@ -497,9 +475,7 @@ static int i18nTag(Header h, rpmTag tag, rpmtd td, headerGetFlags hgflags)
 	/* change to en_US for msgkey -> msgid resolution */
 	langval = getenv(language);
 	(void) setenv(language, "en_US", 1);
-#if defined(ENABLE_NLS)
         ++_nl_msg_cat_cntr;
-#endif
 
 	msgid = NULL;
 	for (domain = dstring; domain != NULL; domain = de) {
@@ -514,9 +490,7 @@ static int i18nTag(Header h, rpmTag tag, rpmtd td, headerGetFlags hgflags)
 	    (void) setenv(language, langval, 1);
 	else
 	    unsetenv(language);
-#if defined(ENABLE_NLS)
         ++_nl_msg_cat_cntr;
-#endif
 
 	if (domain && msgid) {
 	    td->data = dgettext(domain, msgid);
@@ -530,7 +504,8 @@ static int i18nTag(Header h, rpmTag tag, rpmtd td, headerGetFlags hgflags)
 	    return 1;
     }
 
-    dstring = _free(dstring);
+    free(dstring);
+#endif
 
     rc = headerGet(h, tag, td, HEADERGET_ALLOC);
     return rc;
@@ -662,13 +637,14 @@ static int headercolorTag(Header h, rpmtd td, headerGetFlags hgflags)
     return numberTag(td, hcolor);
 }
 
-typedef enum nevraFlags_e {
+enum nevraFlags_e {
     NEVRA_NAME		= (1 << 0),
     NEVRA_EPOCH		= (1 << 1),
     NEVRA_VERSION	= (1 << 2),
     NEVRA_RELEASE	= (1 << 3),
     NEVRA_ARCH		= (1 << 4)
-} nevraFlags;
+};
+typedef rpmFlags nevraFlags;
 
 static int getNEVRA(Header h, rpmtd td, nevraFlags flags)
 {
@@ -759,18 +735,66 @@ static int epochnumTag(Header h, rpmtd td, headerGetFlags hgflags)
     return 1;
 }
 
-void *rpmHeaderTagFunc(rpmTag tag)
+static int depnevrsTag(Header h, rpmtd td, headerGetFlags hgflags,
+			rpmTagVal tag)
 {
-    const struct headerTagFunc_s * ext;
-    void *func = NULL;
+    rpmds ds = rpmdsNew(h, tag, 0);
+    int ndeps = rpmdsCount(ds);
 
-    for (ext = rpmHeaderTagExtensions; ext->func != NULL; ext++) {
-	if (ext->tag == tag) {
-	    func = ext->func;
-	    break;
+    if (ndeps > 0) {
+	char **deps = xmalloc(sizeof(*deps) * ndeps);
+	int i;
+	while ((i = rpmdsNext(ds)) >= 0) {
+	    deps[i] = rpmdsNewDNEVR(NULL, ds);
 	}
+	td->data = deps;
+	td->type = RPM_STRING_ARRAY_TYPE;
+	td->count = ndeps;
+	td->flags |= (RPMTD_ALLOCED | RPMTD_PTR_ALLOCED);
     }
-    return func;
+    rpmdsFree(ds);
+    return (ndeps > 0);
+}
+
+static int requirenevrsTag(Header h, rpmtd td, headerGetFlags hgflags)
+{
+    return depnevrsTag(h, td, hgflags, RPMTAG_REQUIRENAME);
+}
+
+static int providenevrsTag(Header h, rpmtd td, headerGetFlags hgflags)
+{
+    return depnevrsTag(h, td, hgflags, RPMTAG_PROVIDENAME);
+}
+
+static int obsoletenevrsTag(Header h, rpmtd td, headerGetFlags hgflags)
+{
+    return depnevrsTag(h, td, hgflags, RPMTAG_OBSOLETENAME);
+}
+
+static int conflictnevrsTag(Header h, rpmtd td, headerGetFlags hgflags)
+{
+    return depnevrsTag(h, td, hgflags, RPMTAG_CONFLICTNAME);
+}
+
+static int filenlinksTag(Header h, rpmtd td, headerGetFlags hgflags)
+{
+    rpmfi fi = rpmfiNew(NULL, h, RPMTAG_BASENAMES, RPMFI_NOHEADER);
+    rpm_count_t fc = rpmfiFC(fi);
+
+    if (fc > 0) {
+	uint32_t *nlinks = xmalloc(fc * sizeof(*nlinks));
+	int ix;
+	while ((ix = rpmfiNext(fi)) >= 0) {
+	    nlinks[ix] = rpmfiFNlink(fi);
+	}
+	td->data = nlinks;
+	td->type = RPM_INT32_TYPE;
+	td->count = fc;
+	td->flags = RPMTD_ALLOCED;
+    }
+
+    rpmfiFree(fi);
+    return (fc > 0);
 }
 
 static const struct headerTagFunc_s rpmHeaderTagExtensions[] = {
@@ -782,9 +806,6 @@ static const struct headerTagFunc_s rpmHeaderTagExtensions[] = {
     { RPMTAG_ORIGFILENAMES,	origfilenamesTag },
     { RPMTAG_FILEPROVIDE,	fileprovideTag },
     { RPMTAG_FILEREQUIRE,	filerequireTag },
-    { RPMTAG_FSNAMES,		fsnamesTag },
-    { RPMTAG_FSSIZES,		fssizesTag },
-    { RPMTAG_INSTALLPREFIX,	instprefixTag },
     { RPMTAG_TRIGGERCONDS,	triggercondsTag },
     { RPMTAG_TRIGGERTYPE,	triggertypeTag },
     { RPMTAG_LONGFILESIZES,	longfilesizesTag },
@@ -800,6 +821,26 @@ static const struct headerTagFunc_s rpmHeaderTagExtensions[] = {
     { RPMTAG_HEADERCOLOR,	headercolorTag },
     { RPMTAG_VERBOSE,		verboseTag },
     { RPMTAG_EPOCHNUM,		epochnumTag },
+    { RPMTAG_INSTFILENAMES,	instfilenamesTag },
+    { RPMTAG_REQUIRENEVRS,	requirenevrsTag },
+    { RPMTAG_PROVIDENEVRS,	providenevrsTag },
+    { RPMTAG_OBSOLETENEVRS,	obsoletenevrsTag },
+    { RPMTAG_CONFLICTNEVRS,	conflictnevrsTag },
+    { RPMTAG_FILENLINKS,	filenlinksTag },
     { 0, 			NULL }
 };
+
+headerTagTagFunction rpmHeaderTagFunc(rpmTagVal tag)
+{
+    const struct headerTagFunc_s * ext;
+    headerTagTagFunction func = NULL;
+
+    for (ext = rpmHeaderTagExtensions; ext->func != NULL; ext++) {
+	if (ext->tag == tag) {
+	    func = ext->func;
+	    break;
+	}
+    }
+    return func;
+}
 

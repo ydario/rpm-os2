@@ -9,9 +9,15 @@ BuildArch:	noarch
 %{?reqs:Requires: %{reqs}}
 %{?provs:Provides: %{provs}}
 %{?cfls:Conflicts: %{cfls}}
+%{?obs:Obsoletes: %{obs}}
 
 %description
 %{summary}
 
+%install
+mkdir -p %{buildroot}/opt/
+echo FOO > %{buildroot}/opt/bar
+
 %files
 %defattr(-,root,root,-)
+/opt/bar

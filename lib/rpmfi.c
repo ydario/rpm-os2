@@ -15,95 +15,20 @@
 #include "lib/rpmfi_internal.h"
 #include "lib/rpmte_internal.h"	/* relocations */
 #include "lib/cpio.h"	/* XXX CPIO_FOO */
-#include "lib/fsm.h"	/* XXX newFSM() */
 
 #include "debug.h"
 
-/*
- * Simple and stupid string "cache."
- * Store each unique string just once, retrieve by index value. 
- * For data where number of unique names is typically very low,
- * the dumb linear lookup appears to be fast enough and hash table seems
- * like an overkill.
- */
-struct strcache_s {
-    char **uniq;
-    scidx_t num;
-};
-
-static struct strcache_s _ugcache = { NULL, 0 };
-static strcache ugcache = &_ugcache;
-static struct strcache_s _langcache = { NULL, 0 };
-static strcache langcache = &_langcache;
-
-static scidx_t strcachePut(strcache cache, const char *str)
+static rpmfi rpmfiUnlink(rpmfi fi)
 {
-    int found = 0;
-    scidx_t ret;
-
-    for (scidx_t i = 0; i < cache->num; i++) {
-	if (rstreq(str, cache->uniq[i])) {
-	    ret = i;
-	    found = 1;
-	    break;
-	}
-    }
-    if (!found) {
-	/* blow up on index wraparound */
-	assert((scidx_t)(cache->num + 1) > cache->num);
-	cache->uniq = xrealloc(cache->uniq, 
-				sizeof(cache->uniq) * (cache->num+1));
-	cache->uniq[cache->num] = xstrdup(str);
-	ret = cache->num;
-	cache->num++;
-    }
-    return ret;
-}
-
-static const char *strcacheGet(strcache cache, scidx_t idx)
-{
-    const char *name = NULL;
-    if (idx >= 0 && idx < cache->num && cache->uniq != NULL)
-	name = cache->uniq[idx];
-    return name;
-}
-    
-static strcache strcacheNew(void)
-{
-    strcache cache = xcalloc(1, sizeof(*cache));
-    return cache;
-}
-
-static strcache strcacheFree(strcache cache)
-{
-    if (cache != NULL) {
-	for (scidx_t i = 0; i < cache->num; i++) {
-	    free(cache->uniq[i]);
-	}
-	cache->uniq = _free(cache->uniq);
-	free(cache);
-    }
-    return NULL;
-} 
-
-
-int _rpmfi_debug = 0;
-
-rpmfi rpmfiUnlink(rpmfi fi, const char * msg)
-{
-    if (fi == NULL) return NULL;
-if (_rpmfi_debug && msg != NULL)
-fprintf(stderr, "--> fi %p -- %d %s\n", fi, fi->nrefs, msg);
-    fi->nrefs--;
+    if (fi)
+	fi->nrefs--;
     return NULL;
 }
 
-rpmfi rpmfiLink(rpmfi fi, const char * msg)
+rpmfi rpmfiLink(rpmfi fi)
 {
-    if (fi == NULL) return NULL;
-    fi->nrefs++;
-if (_rpmfi_debug && msg != NULL)
-fprintf(stderr, "--> fi %p ++ %d %s\n", fi, fi->nrefs, msg);
+    if (fi)
+	fi->nrefs++;
     return fi;
 }
 
@@ -166,13 +91,33 @@ int rpmfiDIIndex(rpmfi fi, int dx)
     return j;
 }
 
+rpmsid rpmfiBNIdIndex(rpmfi fi, int ix)
+{
+    rpmsid id = 0;
+    if (fi != NULL && ix >= 0 && ix < fi->fc) {
+	if (fi->bnid != NULL)
+	    id = fi->bnid[ix];
+    }
+    return id;
+}
+
+rpmsid rpmfiDNIdIndex(rpmfi fi, int jx)
+{
+    rpmsid id = 0;
+    if (fi != NULL && jx >= 0 && jx < fi->fc) {
+	if (fi->dnid != NULL)
+	    id = fi->dnid[jx];
+    }
+    return id;
+}
+
 const char * rpmfiBNIndex(rpmfi fi, int ix)
 {
     const char * BN = NULL;
 
     if (fi != NULL && ix >= 0 && ix < fi->fc) {
-	if (fi->bnl != NULL)
-	    BN = fi->bnl[ix];
+	if (fi->bnid != NULL)
+	    BN = rpmstrPoolStr(fi->pool, fi->bnid[ix]);
     }
     return BN;
 }
@@ -182,36 +127,20 @@ const char * rpmfiDNIndex(rpmfi fi, int jx)
     const char * DN = NULL;
 
     if (fi != NULL && jx >= 0 && jx < fi->dc) {
-	if (fi->dnl != NULL)
-	    DN = fi->dnl[jx];
+	if (fi->dnid != NULL)
+	    DN = rpmstrPoolStr(fi->pool, fi->dnid[jx]);
     }
     return DN;
 }
 
-const char * rpmfiFNIndex(rpmfi fi, int ix)
+char * rpmfiFNIndex(rpmfi fi, int ix)
 {
-    const char * FN = "";
-
+    char *fn = NULL;
     if (fi != NULL && ix >= 0 && ix < fi->fc) {
-	char * t;
-	if (fi->fn == NULL) {
-	    size_t dnlmax = 0, bnlmax = 0, len;
-	    for (int i = 0; i < fi->dc; i++) {
-		if ((len = strlen(fi->dnl[i])) > dnlmax)
-		    dnlmax = len;
-	    }
-	    for (int i = 0; i < fi->fc; i++) {
-		if ((len = strlen(fi->bnl[i])) > bnlmax)
-		    bnlmax = len;
-	    }
-	    fi->fn = xmalloc(dnlmax + bnlmax + 1);
-	}
-	FN = t = fi->fn;
-	*t = '\0';
-	t = stpcpy(t, fi->dnl[fi->dil[ix]]);
-	t = stpcpy(t, fi->bnl[ix]);
+	fn = rstrscat(NULL, rpmstrPoolStr(fi->pool, fi->dnid[fi->dil[ix]]),
+			    rpmstrPoolStr(fi->pool, fi->bnid[ix]), NULL);
     }
-    return FN;
+    return fn;
 }
 
 rpmfileAttrs rpmfiFFlagsIndex(rpmfi fi, int ix)
@@ -261,18 +190,18 @@ rpmfileState rpmfiFStateIndex(rpmfi fi, int ix)
 const unsigned char * rpmfiMD5(rpmfi fi)
 {
     const unsigned char *digest;
-    pgpHashAlgo algo = 0;
+    int algo = 0;
 
     digest = rpmfiFDigest(fi, &algo, NULL);
     return (algo == PGPHASHALGO_MD5) ? digest : NULL;
 }
 
-pgpHashAlgo rpmfiDigestAlgo(rpmfi fi)
+int rpmfiDigestAlgo(rpmfi fi)
 {
     return fi ? fi->digestalgo : 0;
 }
 
-const unsigned char * rpmfiFDigestIndex(rpmfi fi, int ix, pgpHashAlgo *algo, size_t *len)
+const unsigned char * rpmfiFDigestIndex(rpmfi fi, int ix, int *algo, size_t *len)
 {
     const unsigned char *digest = NULL;
 
@@ -288,7 +217,7 @@ const unsigned char * rpmfiFDigestIndex(rpmfi fi, int ix, pgpHashAlgo *algo, siz
     return digest;
 }
 
-char * rpmfiFDigestHex(rpmfi fi, pgpHashAlgo *algo)
+char * rpmfiFDigestHex(rpmfi fi, int *algo)
 {
     size_t diglen = 0;
     char *fdigest = NULL;
@@ -305,7 +234,7 @@ const char * rpmfiFLinkIndex(rpmfi fi, int ix)
 
     if (fi != NULL && ix >= 0 && ix < fi->fc) {
 	if (fi->flinks != NULL)
-	    flink = strcacheGet(fi->flinkcache, fi->flinks[ix]);
+	    flink = rpmstrPoolStr(fi->pool, fi->flinks[ix]);
     }
     return flink;
 }
@@ -406,7 +335,7 @@ uint32_t rpmfiFNlinkIndex(rpmfi fi, int ix)
 
     if (fi != NULL && ix >= 0 && ix < fi->fc) {
 	/* XXX rpm-2.3.12 has not RPMTAG_FILEINODES */
-	if (fi->finodes && fi->frdevs) {
+	if (fi->finodes && fi->finodes[ix] > 0 && fi->frdevs) {
 	    rpm_ino_t finode = fi->finodes[ix];
 	    rpm_rdev_t frdev = fi->frdevs[ix];
 	    int j;
@@ -437,7 +366,7 @@ const char * rpmfiFUserIndex(rpmfi fi, int ix)
 
     if (fi != NULL && ix >= 0 && ix < fi->fc) {
 	if (fi->fuser != NULL)
-	    fuser = strcacheGet(ugcache, fi->fuser[ix]);
+	    fuser = rpmstrPoolStr(fi->pool, fi->fuser[ix]);
     }
     return fuser;
 }
@@ -448,7 +377,7 @@ const char * rpmfiFGroupIndex(rpmfi fi, int ix)
 
     if (fi != NULL && ix >= 0 && ix < fi->fc) {
 	if (fi->fgroup != NULL)
-	    fgroup = strcacheGet(ugcache, fi->fgroup[ix]);
+	    fgroup = rpmstrPoolStr(fi->pool, fi->fgroup[ix]);
     }
     return fgroup;
 }
@@ -457,7 +386,7 @@ const char * rpmfiFCapsIndex(rpmfi fi, int ix)
 {
     const char *fcaps = NULL;
     if (fi != NULL && ix >= 0 && ix < fi->fc) {
-	fcaps = fi->fcapcache ? strcacheGet(fi->fcapcache, fi->fcaps[ix]) : "";
+	fcaps = fi->fcaps ? fi->fcaps[ix] : "";
     }
     return fcaps;
 }
@@ -466,18 +395,14 @@ const char * rpmfiFLangsIndex(rpmfi fi, int ix)
 {
     const char *flangs = NULL;
     if (fi != NULL && fi->flangs != NULL && ix >= 0 && ix < fi->fc) {
-	flangs = strcacheGet(langcache, fi->flangs[ix]);
+	flangs = rpmstrPoolStr(fi->pool, fi->flangs[ix]);
     }
     return flangs;
 }
 
-struct fingerPrint_s *rpmfiFpsIndex(rpmfi fi, int ix)
+struct fingerPrint_s *rpmfiFps(rpmfi fi)
 {
-    struct fingerPrint_s * fps = NULL;
-    if (fi != NULL && fi->fps != NULL && ix >= 0 && ix < fi->fc) {
-	fps = fi->fps + ix;
-    }
-    return fps;
+    return (fi != NULL) ? fi->fps : NULL;
 }
 
 int rpmfiNext(rpmfi fi)
@@ -491,10 +416,6 @@ int rpmfiNext(rpmfi fi)
 		fi->j = fi->dil[fi->i];
 	} else
 	    fi->i = -1;
-
-if (_rpmfi_debug  < 0 && i != -1)
-fprintf(stderr, "*** fi %p\t[%d] %s%s\n", fi, i, (i >= 0 ? fi->dnl[fi->j] : ""), (i >= 0 ? fi->bnl[fi->i] : ""));
-
     }
 
     return i;
@@ -521,10 +442,6 @@ int rpmfiNextD(rpmfi fi)
 	    j = fi->j;
 	else
 	    fi->j = -1;
-
-if (_rpmfi_debug  < 0 && j != -1)
-fprintf(stderr, "*** fi %p\t[%d]\n", fi, j);
-
     }
 
     return j;
@@ -573,47 +490,72 @@ rpmFileTypes rpmfiWhatis(rpm_mode_t mode)
     return REG;
 }
 
-int rpmfiCompare(const rpmfi afi, const rpmfi bfi)
+int rpmfiCompareIndex(rpmfi afi, int aix, rpmfi bfi, int bix)
 {
-    rpmFileTypes awhat = rpmfiWhatis(rpmfiFMode(afi));
-    rpmFileTypes bwhat = rpmfiWhatis(rpmfiFMode(bfi));
+    mode_t amode = rpmfiFModeIndex(afi, aix);
+    mode_t bmode = rpmfiFModeIndex(bfi, bix);
+    rpmFileTypes awhat = rpmfiWhatis(amode);
 
-    if ((rpmfiFFlags(afi) & RPMFILE_GHOST) ||
-	(rpmfiFFlags(bfi) & RPMFILE_GHOST)) return 0;
+    if ((rpmfiFFlagsIndex(afi, aix) & RPMFILE_GHOST) ||
+	(rpmfiFFlagsIndex(bfi, bix) & RPMFILE_GHOST)) return 0;
 
-    if (awhat != bwhat) return 1;
+    /* Mode difference is a conflict, except for symlinks */
+    if (!(awhat == LINK && rpmfiWhatis(bmode) == LINK) && amode != bmode)
+	return 1;
+
+    if (awhat == LINK || awhat == REG) {
+	if (rpmfiFSizeIndex(afi, aix) != rpmfiFSizeIndex(bfi, bix))
+	    return 1;
+    }
+
+    if (!rstreq(rpmfiFUserIndex(afi, aix), rpmfiFUserIndex(bfi, bix)))
+	return 1;
+    if (!rstreq(rpmfiFGroupIndex(afi, aix), rpmfiFGroupIndex(bfi, bix)))
+	return 1;
 
     if (awhat == LINK) {
-	const char * alink = rpmfiFLink(afi);
-	const char * blink = rpmfiFLink(bfi);
+	const char * alink = rpmfiFLinkIndex(afi, aix);
+	const char * blink = rpmfiFLinkIndex(bfi, bix);
 	if (alink == blink) return 0;
 	if (alink == NULL) return 1;
 	if (blink == NULL) return -1;
 	return strcmp(alink, blink);
     } else if (awhat == REG) {
 	size_t adiglen, bdiglen;
-	pgpHashAlgo aalgo, balgo;
-	const unsigned char * adigest = rpmfiFDigest(afi, &aalgo, &adiglen);
-	const unsigned char * bdigest = rpmfiFDigest(bfi, &balgo, &bdiglen);
+	int aalgo, balgo;
+	const unsigned char * adigest, * bdigest;
+	adigest = rpmfiFDigestIndex(afi, aix, &aalgo, &adiglen);
+	bdigest = rpmfiFDigestIndex(bfi, bix, &balgo, &bdiglen);
 	if (adigest == bdigest) return 0;
 	if (adigest == NULL) return 1;
 	if (bdigest == NULL) return -1;
 	/* can't meaningfully compare different hash types */
 	if (aalgo != balgo || adiglen != bdiglen) return -1;
 	return memcmp(adigest, bdigest, adiglen);
+    } else if (awhat == CDEV || awhat == BDEV) {
+	if (rpmfiFRdevIndex(afi, aix) != rpmfiFRdevIndex(bfi, bix))
+	    return 1;
     }
 
     return 0;
 }
 
-rpmFileAction rpmfiDecideFate(const rpmfi ofi, rpmfi nfi, int skipMissing)
+rpmFileAction rpmfiDecideFateIndex(rpmfi ofi, int oix, rpmfi nfi, int nix,
+				   int skipMissing)
 {
-    const char * fn = rpmfiFN(nfi);
-    rpmfileAttrs newFlags = rpmfiFFlags(nfi);
+    char * fn = rpmfiFNIndex(nfi, nix);
+    rpmfileAttrs newFlags = rpmfiFFlagsIndex(nfi, nix);
     char buffer[1024];
     rpmFileTypes dbWhat, newWhat, diskWhat;
     struct stat sb;
     int save = (newFlags & RPMFILE_NOREPLACE) ? FA_ALTNAME : FA_SAVE;
+    int action = FA_CREATE; /* assume we can create */
+
+    /* If the new file is a ghost, leave whatever might be on disk alone. */
+    if (newFlags & RPMFILE_GHOST) {
+	action = FA_SKIP;
+	goto exit;
+    }
 
     if (lstat(fn, &sb)) {
 	/*
@@ -623,118 +565,170 @@ rpmFileAction rpmfiDecideFate(const rpmfi ofi, rpmfi nfi, int skipMissing)
 	if (skipMissing && (newFlags & RPMFILE_MISSINGOK)) {
 	    rpmlog(RPMLOG_DEBUG, "%s skipped due to missingok flag\n",
 			fn);
-	    return FA_SKIP;
+	    action = FA_SKIP;
+	    goto exit;
 	} else {
-	    return FA_CREATE;
+	    goto exit;
 	}
     }
 
     diskWhat = rpmfiWhatis((rpm_mode_t)sb.st_mode);
-    dbWhat = rpmfiWhatis(rpmfiFMode(ofi));
-    newWhat = rpmfiWhatis(rpmfiFMode(nfi));
-
-    /*
-     * RPM >= 2.3.10 shouldn't create config directories -- we'll ignore
-     * them in older packages as well.
-     */
-    if (newWhat == XDIR)
-	return FA_CREATE;
-
-    if (diskWhat != newWhat && dbWhat != REG && dbWhat != LINK)
-	return save;
-    else if (newWhat != dbWhat && diskWhat != dbWhat)
-	return save;
-    else if (dbWhat != newWhat)
-	return FA_CREATE;
-    else if (dbWhat != LINK && dbWhat != REG)
-	return FA_CREATE;
+    dbWhat = rpmfiWhatis(rpmfiFModeIndex(ofi, oix));
+    newWhat = rpmfiWhatis(rpmfiFModeIndex(nfi, nix));
 
     /*
      * This order matters - we'd prefer to CREATE the file if at all
      * possible in case something else (like the timestamp) has changed.
+     * Only regular files and symlinks might need a backup, everything
+     * else falls through here with FA_CREATE.
      */
     memset(buffer, 0, sizeof(buffer));
     if (dbWhat == REG) {
-	pgpHashAlgo oalgo, nalgo;
+	int oalgo, nalgo;
 	size_t odiglen, ndiglen;
 	const unsigned char * odigest, * ndigest;
-	odigest = rpmfiFDigest(ofi, &oalgo, &odiglen);
+
+	/* See if the file on disk is identical to the one in old pkg */
+	odigest = rpmfiFDigestIndex(ofi, oix, &oalgo, &odiglen);
 	if (diskWhat == REG) {
-	    if (rpmDoDigest(oalgo, fn, 0, 
-		(unsigned char *)buffer, NULL))
-	        return FA_CREATE;	/* assume file has been removed */
-	    if (odigest && !memcmp(odigest, buffer, odiglen))
-	        return FA_CREATE;	/* unmodified config file, replace. */
+	    if (rpmDoDigest(oalgo, fn, 0, (unsigned char *)buffer, NULL))
+	        goto exit;	/* assume file has been removed */
+	    if (odigest && memcmp(odigest, buffer, odiglen) == 0)
+	        goto exit;	/* unmodified config file, replace. */
 	}
-	ndigest = rpmfiFDigest(nfi, &nalgo, &ndiglen);
-	/* Can't compare different hash types, backup to avoid data loss */
-	if (oalgo != nalgo || odiglen != ndiglen)
-	    return save;
-	if (odigest && ndigest && !memcmp(odigest, ndigest, odiglen))
-	    return FA_SKIP;	/* identical file, don't bother. */
-    } else /* dbWhat == LINK */ {
+
+	/* See if the file on disk is identical to the one in new pkg */
+	ndigest = rpmfiFDigestIndex(nfi, nix, &nalgo, &ndiglen);
+	if (diskWhat == REG && newWhat == REG) {
+	    /* hash algo changed in new, recalculate digest */
+	    if (oalgo != nalgo)
+		if (rpmDoDigest(nalgo, fn, 0, (unsigned char *)buffer, NULL))
+		    goto exit;		/* assume file has been removed */
+	    if (ndigest && memcmp(ndigest, buffer, ndiglen) == 0)
+	        goto exit;		/* file identical in new, replace. */
+	}
+
+	/* If file can be determined identical in old and new pkg, let it be */
+	if (newWhat == REG && oalgo == nalgo && odiglen == ndiglen) {
+	    if (odigest && ndigest && memcmp(odigest, ndigest, odiglen) == 0) {
+		action = FA_SKIP; /* identical file, dont bother */
+		goto exit;
+	    }
+	}
+	
+	/* ...but otherwise a backup will be needed */
+	action = save;
+    } else if (dbWhat == LINK) {
 	const char * oFLink, * nFLink;
-	oFLink = rpmfiFLink(ofi);
+
+	/* See if the link on disk is identical to the one in old pkg */
+	oFLink = rpmfiFLinkIndex(ofi, oix);
 	if (diskWhat == LINK) {
-	    if (readlink(fn, buffer, sizeof(buffer) - 1) == -1)
-		return FA_CREATE;	/* assume file has been removed */
+	    ssize_t link_len = readlink(fn, buffer, sizeof(buffer) - 1);
+	    if (link_len == -1)
+		goto exit;		/* assume file has been removed */
+	    buffer[link_len] = '\0';
 	    if (oFLink && rstreq(oFLink, buffer))
-		return FA_CREATE;	/* unmodified config file, replace. */
+		goto exit;		/* unmodified config file, replace. */
 	}
-	nFLink = rpmfiFLink(nfi);
-	if (oFLink && nFLink && rstreq(oFLink, nFLink))
-	    return FA_SKIP;	/* identical file, don't bother. */
+
+	/* See if the link on disk is identical to the one in new pkg */
+	nFLink = rpmfiFLinkIndex(nfi, nix);
+	if (diskWhat == LINK && newWhat == LINK) {
+	    if (nFLink && rstreq(nFLink, buffer))
+		goto exit;		/* unmodified config file, replace. */
+	}
+
+	/* If link is identical in old and new pkg, let it be */
+	if (newWhat == LINK && oFLink && nFLink && rstreq(oFLink, nFLink)) {
+	    action = FA_SKIP;		/* identical file, don't bother. */
+	    goto exit;
+	}
+
+	/* ...but otherwise a backup will be needed */
+	action = save;
     }
 
-    /*
-     * The config file on the disk has been modified, but
-     * the ones in the two packages are different. It would
-     * be nice if RPM was smart enough to at least try and
-     * merge the difference ala CVS, but...
-     */
-    return save;
+exit:
+    free(fn);
+    return action;
 }
 
-int rpmfiConfigConflict(const rpmfi fi)
+int rpmfiConfigConflictIndex(rpmfi fi, int ix)
 {
-    const char * fn = rpmfiFN(fi);
-    rpmfileAttrs flags = rpmfiFFlags(fi);
+    char * fn = NULL;
+    rpmfileAttrs flags = rpmfiFFlagsIndex(fi, ix);
     char buffer[1024];
     rpmFileTypes newWhat, diskWhat;
     struct stat sb;
+    int rc = 0;
 
-    if (!(flags & RPMFILE_CONFIG) || lstat(fn, &sb)) {
+    /* Non-configs are not config conflicts. */
+    if (!(flags & RPMFILE_CONFIG))
 	return 0;
-    }
 
-    diskWhat = rpmfiWhatis((rpm_mode_t)sb.st_mode);
-    newWhat = rpmfiWhatis(rpmfiFMode(fi));
-
+    /* Only links and regular files can be %config, this is kinda moot */
+    /* XXX: Why are we returning 1 here? */
+    newWhat = rpmfiWhatis(rpmfiFModeIndex(fi, ix));
     if (newWhat != LINK && newWhat != REG)
 	return 1;
 
-    if (diskWhat != newWhat)
-	return 1;
+    /* If it's not on disk, there's nothing to be saved */
+    fn = rpmfiFNIndex(fi, ix);
+    if (lstat(fn, &sb))
+	goto exit;
+
+    /*
+     * Preserve legacy behavior: an existing %ghost %config is considered
+     * "modified" but unlike regular %config, its never removed and
+     * never backed up. Whether this actually makes sense is a whole
+     * another question, but this is very long-standing behavior that
+     * people might be depending on. The resulting FA_ALTNAME etc action
+     * is special-cased in FSM to avoid actually creating backups on ghosts.
+     */
+    if (flags & RPMFILE_GHOST) {
+	rc = 1;
+	goto exit;
+    }
+
+    /* Files of different types obviously are not identical */
+    diskWhat = rpmfiWhatis((rpm_mode_t)sb.st_mode);
+    if (diskWhat != newWhat) {
+	rc = 1;
+	goto exit;
+    }
+
+    /* Files of different sizes obviously are not identical */
+    if (rpmfiFSizeIndex(fi, ix) != sb.st_size) {
+	rc = 1;
+	goto exit;
+    }
     
     memset(buffer, 0, sizeof(buffer));
     if (newWhat == REG) {
-	pgpHashAlgo algo;
+	int algo;
 	size_t diglen;
-	const unsigned char *ndigest = rpmfiFDigest(fi, &algo, &diglen);
+	const unsigned char *ndigest = rpmfiFDigestIndex(fi,ix, &algo, &diglen);
 	if (rpmDoDigest(algo, fn, 0, (unsigned char *)buffer, NULL))
-	    return 0;	/* assume file has been removed */
-	if (ndigest && !memcmp(ndigest, buffer, diglen))
-	    return 0;	/* unmodified config file */
+	    goto exit;	/* assume file has been removed */
+	if (ndigest && memcmp(ndigest, buffer, diglen) == 0)
+	    goto exit;	/* unmodified config file */
     } else /* newWhat == LINK */ {
 	const char * nFLink;
-	if (readlink(fn, buffer, sizeof(buffer) - 1) == -1)
-	    return 0;	/* assume file has been removed */
-	nFLink = rpmfiFLink(fi);
+	ssize_t link_len = readlink(fn, buffer, sizeof(buffer) - 1);
+	if (link_len == -1)
+	    goto exit;	/* assume file has been removed */
+	buffer[link_len] = '\0';
+	nFLink = rpmfiFLinkIndex(fi, ix);
 	if (nFLink && rstreq(nFLink, buffer))
-	    return 0;	/* unmodified config file */
+	    goto exit;	/* unmodified config file */
     }
 
-    return 1;
+    rc = 1;
+
+exit:
+    free(fn);
+    return rc;
 }
 
 static char **duparray(char ** src, int size)
@@ -798,7 +792,7 @@ static int addPrefixes(Header h, rpmRelocation *relocations, int numRelocations)
     if (numActual) {
 	headerPutStringArray(h, RPMTAG_INSTPREFIXES, actualRelocations, numActual);
     }
-    actualRelocations = _free(actualRelocations);
+    free(actualRelocations);
     return numActual;
 }
 
@@ -1025,7 +1019,7 @@ assert(fn != NULL);		/* XXX can't happen */
 	    if (relocations[j].newPath) { /* Relocate the path */
 		char *t = NULL;
 		rstrscat(&t, relocations[j].newPath, (dirNames[i] + len), NULL);
-		/* Unfortunatly rpmCleanPath strips the trailing slash.. */
+		/* Unfortunately rpmCleanPath strips the trailing slash.. */
 		(void) rpmCleanPath(t);
 		rstrcat(&t, "/");
 
@@ -1055,20 +1049,16 @@ rpmfi rpmfiFree(rpmfi fi)
     if (fi == NULL) return NULL;
 
     if (fi->nrefs > 1)
-	return rpmfiUnlink(fi, __FUNCTION__);
-
-if (_rpmfi_debug < 0)
-fprintf(stderr, "*** fi %p\t[%d]\n", fi, fi->fc);
+	return rpmfiUnlink(fi);
 
     if (fi->fc > 0) {
-	fi->bnl = _free(fi->bnl);
-	fi->dnl = _free(fi->dnl);
+	fi->bnid = _free(fi->bnid);
+	fi->dnid = _free(fi->dnid);
+	fi->dil = _free(fi->dil);
 
-	fi->flinkcache = strcacheFree(fi->flinkcache);
 	fi->flinks = _free(fi->flinks);
 	fi->flangs = _free(fi->flangs);
 	fi->digests = _free(fi->digests);
-	fi->fcapcache = strcacheFree(fi->fcapcache);
 	fi->fcaps = _free(fi->fcaps);
 
 	fi->cdict = _free(fi->cdict);
@@ -1079,26 +1069,26 @@ fprintf(stderr, "*** fi %p\t[%d]\n", fi, fi->fc);
 	fi->fstates = _free(fi->fstates);
 	fi->fps = _free(fi->fps);
 
-	if (!(fi->fiflags & RPMFI_KEEPHEADER) && fi->h == NULL) {
-	    fi->fmtimes = _constfree(fi->fmtimes);
-	    fi->fmodes = _free(fi->fmodes);
-	    fi->fflags = _constfree(fi->fflags);
-	    fi->vflags = _constfree(fi->vflags);
-	    fi->fsizes = _constfree(fi->fsizes);
-	    fi->frdevs = _constfree(fi->frdevs);
-	    fi->finodes = _constfree(fi->finodes);
-	    fi->dil = _free(fi->dil);
+	fi->pool = rpmstrPoolFree(fi->pool);
 
-	    fi->fcolors = _constfree(fi->fcolors);
-	    fi->fcdictx = _constfree(fi->fcdictx);
-	    fi->ddict = _constfree(fi->ddict);
-	    fi->fddictx = _constfree(fi->fddictx);
-	    fi->fddictn = _constfree(fi->fddictn);
+	/* these point to header memory if KEEPHEADER is used, dont free */
+	if (!(fi->fiflags & RPMFI_KEEPHEADER) && fi->h == NULL) {
+	    fi->fmtimes = _free(fi->fmtimes);
+	    fi->fmodes = _free(fi->fmodes);
+	    fi->fflags = _free(fi->fflags);
+	    fi->vflags = _free(fi->vflags);
+	    fi->fsizes = _free(fi->fsizes);
+	    fi->frdevs = _free(fi->frdevs);
+	    fi->finodes = _free(fi->finodes);
+
+	    fi->fcolors = _free(fi->fcolors);
+	    fi->fcdictx = _free(fi->fcdictx);
+	    fi->ddict = _free(fi->ddict);
+	    fi->fddictx = _free(fi->fddictx);
+	    fi->fddictn = _free(fi->fddictn);
 
 	}
     }
-
-    fi->fsm = freeFSM(fi->fsm);
 
     fi->fn = _free(fi->fn);
     fi->apath = _free(fi->apath);
@@ -1107,78 +1097,59 @@ fprintf(stderr, "*** fi %p\t[%d]\n", fi, fi->fc);
 
     fi->h = headerFree(fi->h);
 
-    (void) rpmfiUnlink(fi, __FUNCTION__);
+    (void) rpmfiUnlink(fi);
     memset(fi, 0, sizeof(*fi));		/* XXX trash and burn */
     fi = _free(fi);
 
     return NULL;
 }
 
-/* Helper to push header tag data into a string cache */
-static scidx_t *cacheTag(strcache cache, Header h, rpmTag tag)
+static rpmsid * tag2pool(rpmstrPool pool, Header h, rpmTag tag)
 {
-    scidx_t *idx = NULL;
+    rpmsid *sids = NULL;
     struct rpmtd_s td;
     if (headerGet(h, tag, &td, HEADERGET_MINMEM)) {
-       idx = xmalloc(sizeof(*idx) * rpmtdCount(&td));
-       int i = 0;
-       const char *str;
-       while ((str = rpmtdNextString(&td))) {
-	   idx[i++] = strcachePut(cache, str);
-       }
-       rpmtdFreeData(&td);
+	sids = rpmtdToPool(&td, pool);
+	rpmtdFreeData(&td);
     }
-    return idx;
+    return sids;
+}
+
+/* validate a indexed tag data triplet (such as file bn/dn/dx) */
+static int indexSane(rpmtd xd, rpmtd yd, rpmtd zd)
+{
+    int sane = 0;
+    uint32_t xc = rpmtdCount(xd);
+    uint32_t yc = rpmtdCount(yd);
+    uint32_t zc = rpmtdCount(zd);
+
+    /* check that the amount of data in each is sane */
+    if (xc > 0 && yc > 0 && yc <= xc && zc == xc) {
+	uint32_t * i;
+	/* ...and that the indexes are within bounds */
+	while ((i = rpmtdNextUint32(zd))) {
+	    if (*i >= yc)
+		break;
+	}
+	/* unless the loop runs to finish, the data is broken */
+	sane = (i == NULL);
+    }
+    return sane;
 }
 
 #define _hgfi(_h, _tag, _td, _flags, _data) \
     if (headerGet((_h), (_tag), (_td), (_flags))) \
 	_data = (td.data)
 
-rpmfi rpmfiNew(const rpmts ts, Header h, rpmTag tagN, rpmfiFlags flags)
+static int rpmfiPopulate(rpmfi fi, Header h, rpmfiFlags flags)
 {
-    rpmfi fi = NULL;
-    rpm_loff_t *asize = NULL;
-    unsigned char * t;
-    int isBuild, isSource;
-    struct rpmtd_s fdigests, digalgo;
-    struct rpmtd_s td;
     headerGetFlags scareFlags = (flags & RPMFI_KEEPHEADER) ? 
 				HEADERGET_MINMEM : HEADERGET_ALLOC;
     headerGetFlags defFlags = HEADERGET_ALLOC;
+    struct rpmtd_s fdigests, digalgo, td;
+    unsigned char * t;
 
-    fi = xcalloc(1, sizeof(*fi));
-    if (fi == NULL)	/* XXX can't happen */
-	goto exit;
-
-    fi->magic = RPMFIMAGIC;
-    fi->i = -1;
-
-    fi->fiflags = flags;
-    fi->scareFlags = scareFlags;
-
-    if (headerGet(h, RPMTAG_LONGARCHIVESIZE, &td, HEADERGET_EXT)) {
-	asize = rpmtdGetUint64(&td);
-    }
-    /* 0 means unknown */
-    fi->archiveSize = asize ? *asize : 0;
-    rpmtdFreeData(&td);
-    
-    /* Archive size is not set when this gets called from build */
-    isBuild = (asize == NULL);
-    isSource = headerIsSource(h);
-    if (isBuild) fi->fiflags |= RPMFI_ISBUILD;
-    if (isSource) fi->fiflags |= RPMFI_ISSOURCE;
-
-    _hgfi(h, RPMTAG_BASENAMES, &td, defFlags, fi->bnl);
-    fi->fc = rpmtdCount(&td);
-    if (fi->fc == 0) {
-	goto exit;
-    }
-
-    _hgfi(h, RPMTAG_DIRNAMES, &td, defFlags, fi->dnl);
-    fi->dc = rpmtdCount(&td);
-    _hgfi(h, RPMTAG_DIRINDEXES, &td, scareFlags, fi->dil);
+    /* XXX TODO: all these should be sanity checked, ugh... */
     if (!(flags & RPMFI_NOFILEMODES))
 	_hgfi(h, RPMTAG_FILEMODES, &td, scareFlags, fi->fmodes);
     if (!(flags & RPMFI_NOFILEFLAGS))
@@ -1206,23 +1177,19 @@ rpmfi rpmfiNew(const rpmts ts, Header h, rpmTag tagN, rpmfiFlags flags)
     if (!(flags & RPMFI_NOFILESTATES))
 	_hgfi(h, RPMTAG_FILESTATES, &td, defFlags, fi->fstates);
 
-    if (!(flags & RPMFI_NOFILECAPS) && headerIsEntry(h, RPMTAG_FILECAPS)) {
-	fi->fcapcache = strcacheNew();
-	fi->fcaps = cacheTag(fi->fcapcache, h, RPMTAG_FILECAPS);
-    }
+    if (!(flags & RPMFI_NOFILECAPS))
+	_hgfi(h, RPMTAG_FILECAPS, &td, defFlags, fi->fcaps);
 
-    if (!(flags & RPMFI_NOFILELINKTOS)) {
-	fi->flinkcache = strcacheNew();
-	fi->flinks = cacheTag(fi->flinkcache, h, RPMTAG_FILELINKTOS);
-    }
+    if (!(flags & RPMFI_NOFILELINKTOS))
+	fi->flinks = tag2pool(fi->pool, h, RPMTAG_FILELINKTOS);
     /* FILELANGS are only interesting when installing */
     if ((headerGetInstance(h) == 0) && !(flags & RPMFI_NOFILELANGS))
-	fi->flangs = cacheTag(langcache, h, RPMTAG_FILELANGS);
+	fi->flangs = tag2pool(fi->pool, h, RPMTAG_FILELANGS);
 
     /* See if the package has non-md5 file digests */
     fi->digestalgo = PGPHASHALGO_MD5;
     if (headerGet(h, RPMTAG_FILEDIGESTALGO, &digalgo, HEADERGET_MINMEM)) {
-	pgpHashAlgo *algo = rpmtdGetUint32(&digalgo);
+	uint32_t *algo = rpmtdGetUint32(&digalgo);
 	/* Hmm, what to do with unknown digest algorithms? */
 	if (algo && rpmDigestLength(*algo) != 0) {
 	    fi->digestalgo = *algo;
@@ -1258,42 +1225,87 @@ rpmfi rpmfiNew(const rpmts ts, Header h, rpmTag tagN, rpmfiFlags flags)
 	_hgfi(h, RPMTAG_FILEINODES, &td, scareFlags, fi->finodes);
 
     if (!(flags & RPMFI_NOFILEUSER)) 
-	fi->fuser = cacheTag(ugcache, h, RPMTAG_FILEUSERNAME);
+	fi->fuser = tag2pool(fi->pool, h, RPMTAG_FILEUSERNAME);
     if (!(flags & RPMFI_NOFILEGROUP)) 
-	fi->fgroup = cacheTag(ugcache, h, RPMTAG_FILEGROUPNAME);
+	fi->fgroup = tag2pool(fi->pool, h, RPMTAG_FILEGROUPNAME);
 
-    /* lazily alloced from rpmfiFN() */
-    fi->fn = NULL;
-
-exit:
-if (_rpmfi_debug < 0)
-fprintf(stderr, "*** fi %p\t[%d]\n", fi, (fi ? fi->fc : 0));
-
-    if (fi != NULL) {
-	fi->h = (fi->fiflags & RPMFI_KEEPHEADER) ? headerLink(h) : NULL;
-    }
-
-    /* FIX: rpmfi null annotations */
-    return rpmfiLink(fi, __FUNCTION__);
+    /* TODO: validate and return a real error */
+    return 0;
 }
 
-void rpmfiSetFReplacedSize(rpmfi fi, rpm_loff_t newsize)
+rpmfi rpmfiNewPool(rpmstrPool pool, Header h, rpmTagVal tagN, rpmfiFlags flags)
 {
-    if (fi != NULL && fi->i >= 0 && fi->i < fi->fc) {
+    rpmfi fi = xcalloc(1, sizeof(*fi)); 
+    struct rpmtd_s bn, dn, dx;
+
+    fi->magic = RPMFIMAGIC;
+    fi->i = -1;
+    fi->fiflags = flags;
+
+    /*
+     * Grab and validate file triplet data. Headers with no files simply
+     * fall through here and an empty file set is returned.
+     */
+    if (headerGet(h, RPMTAG_BASENAMES, &bn, HEADERGET_MINMEM)) {
+	headerGet(h, RPMTAG_DIRNAMES, &dn, HEADERGET_MINMEM);
+	headerGet(h, RPMTAG_DIRINDEXES, &dx, HEADERGET_ALLOC);
+
+	if (indexSane(&bn, &dn, &dx)) {
+	    /* private or shared pool? */
+	    fi->pool = (pool != NULL) ? rpmstrPoolLink(pool) :
+					rpmstrPoolCreate();
+
+	    /* init the file triplet data */
+	    fi->fc = rpmtdCount(&bn);
+	    fi->dc = rpmtdCount(&dn);
+	    fi->bnid = rpmtdToPool(&bn, fi->pool);
+	    fi->dnid = rpmtdToPool(&dn, fi->pool);
+	    /* steal index data from the td (pooh...) */
+	    fi->dil = dx.data;
+	    dx.data = NULL;
+
+	    /* populate the rest of the stuff */
+	    rpmfiPopulate(fi, h, flags);
+
+	    /* freeze the pool to save memory, but only if private pool */
+	    if (fi->pool != pool)
+		rpmstrPoolFreeze(fi->pool, 0);
+
+	    fi->h = (fi->fiflags & RPMFI_KEEPHEADER) ? headerLink(h) : NULL;
+	} else {
+	    /* broken data, free and return NULL */
+	    fi = _free(fi);
+	}
+	rpmtdFreeData(&bn);
+	rpmtdFreeData(&dn);
+	rpmtdFreeData(&dx);
+    }
+
+    return rpmfiLink(fi);
+}
+
+rpmfi rpmfiNew(const rpmts ts, Header h, rpmTagVal tagN, rpmfiFlags flags)
+{
+    return rpmfiNewPool(NULL, h, tagN, flags);
+}
+
+void rpmfiSetFReplacedSizeIndex(rpmfi fi, int ix, rpm_loff_t newsize)
+{
+    if (fi != NULL && ix >= 0 && ix < fi->fc) {
 	if (fi->replacedSizes == NULL) {
 	    fi->replacedSizes = xcalloc(fi->fc, sizeof(*fi->replacedSizes));
 	}
 	/* XXX watch out, replacedSizes is not rpm_loff_t (yet) */
-	fi->replacedSizes[fi->i] = (rpm_off_t) newsize;
+	fi->replacedSizes[ix] = (rpm_off_t) newsize;
     }
 }
 
-rpm_loff_t rpmfiFReplacedSize(rpmfi fi)
+rpm_loff_t rpmfiFReplacedSizeIndex(rpmfi fi, int ix)
 {
     rpm_loff_t rsize = 0;
-    if (fi != NULL && fi->i >= 0 && fi->i < fi->fc) {
+    if (fi != NULL && ix >= 0 && ix < fi->fc) {
 	if (fi->replacedSizes) {
-	    rsize = fi->replacedSizes[fi->i];
+	    rsize = fi->replacedSizes[ix];
 	}
     }
     return rsize;
@@ -1301,32 +1313,13 @@ rpm_loff_t rpmfiFReplacedSize(rpmfi fi)
 
 void rpmfiFpLookup(rpmfi fi, fingerPrintCache fpc)
 {
-    if (fi->fc > 0 && fi->fps == NULL) {
-	fi->fps = xcalloc(fi->fc, sizeof(*fi->fps));
+    /* This can get called twice (eg yum), scratch former results and redo */
+    if (fi->fc > 0) {
+	if (fi->fps)
+	    free(fi->fps);
+	fi->fps = fpLookupList(fpc, fi->pool,
+			       fi->dnid, fi->bnid, fi->dil, fi->fc);
     }
-    fpLookupList(fpc, fi->dnl, fi->bnl, fi->dil, fi->fc, fi->fps);
-}
-
-FSM_t rpmfiFSM(rpmfi fi)
-{
-    if (fi != NULL && fi->fsm == NULL) {
-    	cpioMapFlags mapflags;
-	/* Figure out mapflags: 
-	 * - path, mode, uid and gid are used by everything
-	 * - all binary packages get SBIT_CHECK set
-	 * - if archive size is not known, we're only building this package,
-	 *   different rules apply 
-	 */
-	mapflags = CPIO_MAP_PATH | CPIO_MAP_MODE | CPIO_MAP_UID | CPIO_MAP_GID;
-	if (fi->fiflags & RPMFI_ISBUILD) {
-	    mapflags |= CPIO_MAP_TYPE;
-	    if (fi->fiflags & RPMFI_ISSOURCE) mapflags |= CPIO_FOLLOW_SYMLINKS;
-	} else {
-	    if (!(fi->fiflags & RPMFI_ISSOURCE)) mapflags |= CPIO_SBIT_CHECK;
-	}
-	fi->fsm = newFSM(mapflags);
-    }
-    return (fi != NULL) ? fi->fsm : NULL;
 }
 
 /* 
@@ -1337,9 +1330,10 @@ FSM_t rpmfiFSM(rpmfi fi)
 #define RPMFI_ITERFUNC(TYPE, NAME, IXV) \
     TYPE rpmfi ## NAME(rpmfi fi) { return rpmfi ## NAME ## Index(fi, fi ? fi->IXV : -1); }
 
+RPMFI_ITERFUNC(rpmsid, BNId, i)
+RPMFI_ITERFUNC(rpmsid, DNId, j)
 RPMFI_ITERFUNC(const char *, BN, i)
 RPMFI_ITERFUNC(const char *, DN, j)
-RPMFI_ITERFUNC(const char *, FN, i)
 RPMFI_ITERFUNC(const char *, FLink, i)
 RPMFI_ITERFUNC(const char *, FUser, i)
 RPMFI_ITERFUNC(const char *, FGroup, i)
@@ -1357,7 +1351,19 @@ RPMFI_ITERFUNC(rpm_loff_t, FSize, i)
 RPMFI_ITERFUNC(rpm_color_t, FColor, i)
 RPMFI_ITERFUNC(uint32_t, FNlink, i)
 
-const unsigned char * rpmfiFDigest(rpmfi fi, pgpHashAlgo *algo, size_t *len)
+const char * rpmfiFN(rpmfi fi)
+{
+    const char *fn = ""; /* preserve behavior on errors */
+    if (fi != NULL) {
+	free(fi->fn);
+	fi->fn = rpmfiFNIndex(fi, fi->i);
+	if (fi->fn != NULL)
+	    fn = fi->fn;
+    }
+    return fn;
+}
+
+const unsigned char * rpmfiFDigest(rpmfi fi, int *algo, size_t *len)
 {
     return rpmfiFDigestIndex(fi, fi ? fi->i : -1, algo, len);
 }
@@ -1365,4 +1371,26 @@ const unsigned char * rpmfiFDigest(rpmfi fi, pgpHashAlgo *algo, size_t *len)
 uint32_t rpmfiFDepends(rpmfi fi, const uint32_t ** fddictp)
 {
     return rpmfiFDependsIndex(fi,  fi ? fi->i : -1, fddictp);
+}
+
+int rpmfiCompare(const rpmfi afi, const rpmfi bfi)
+{
+    return rpmfiCompareIndex(afi, afi ? afi->i : -1, bfi, bfi ? bfi->i : -1);
+}
+
+rpmFileAction rpmfiDecideFate(const rpmfi ofi, rpmfi nfi, int skipMissing)
+{
+    return rpmfiDecideFateIndex(ofi, ofi ? ofi->i : -1,
+				nfi, nfi ? nfi->i : -1,
+				skipMissing);
+}
+
+int rpmfiConfigConflict(const rpmfi fi)
+{
+    return rpmfiConfigConflictIndex(fi, fi ? fi->i : -1);
+}
+
+rpmstrPool rpmfiPool(rpmfi fi)
+{
+    return (fi != NULL) ? fi->pool : NULL;
 }

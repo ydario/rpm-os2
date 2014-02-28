@@ -69,7 +69,7 @@ rpm \- Менеджер пакетов RPM
 
  [\fB\fIPACKAGE_NAME\fB\fR] [\fB-a,--all\fR] [\fB-f,--file \fIFILE\fB\fR]
  [\fB-g,--group \fIGROUP\fB\fR] {\fB-p,--package \fIPACKAGE_FILE\fB\fR]
- [\fB--fileid \fIMD5\fB\fR] [\fB--hdrid \fISHA1\fB\fR] [\fB--pkgid \fIMD5\fB\fR] [\fB--tid \fITID\fB\fR]
+ [\fB--hdrid \fISHA1\fB\fR] [\fB--pkgid \fIMD5\fB\fR] [\fB--tid \fITID\fB\fR]
  [\fB--querybynumber \fIHDRNUM\fB\fR] [\fB--triggeredby \fIPACKAGE_NAME\fB\fR]
  [\fB--whatprovides \fICAPABILITY\fB\fR] [\fB--whatrequires \fICAPABILITY\fB\fR]
 
@@ -487,10 +487,6 @@ rpm \- Менеджер пакетов RPM
 \fB-f, --file \fIFILE\fB\fR
 Выполняет запрос к пакету, владельцу файла \fIFILE\fR.
 .TP
-\fB--fileid \fIMD5\fB\fR
-Выполняет запрос к пакету, который содержит указанный идентификатор файла, 
-т.е. \fIMD5\fR дайджест содержимого файла.
-.TP
 \fB-g, --group \fIGROUP\fB\fR
 Выполняет запрос к пакету с группой \fIGROUP\fR.
 .TP
@@ -659,7 +655,7 @@ path size mtime md5sum mode owner group isconfig isdoc rdev symlink
 \fB--nordev\fR
 Не проверять соответствующие атрибуты файлов.
 .PP
-Формат вывода представляет собой строку из 8 символов и маркера из заголовка пакета, 
+Формат вывода представляет собой строку из 9 символов и маркера из заголовка пакета, 
 за которыми следует имя файла. Возможные маркеры атрибутов приведены ниже:
 
 .nf
@@ -670,7 +666,7 @@ path size mtime md5sum mode owner group isconfig isdoc rdev symlink
 \fBr\fR \fB%readme\fR файл readme.
 .fi
 
-Каждый из 8 символов отражает результат проверки атрибута(ов) файлов с значением 
+Каждый из 9 символов отражает результат проверки атрибута(ов) файлов с значением 
 того же атрибута, записанного в базе данных. Символ 
 "\fB.\fR" (точка)
 означает, что проверка прошла, а символ 
@@ -761,9 +757,6 @@ Red Hat GPG/DSA:
 ключа (см. руководство по GPG). Вам также потребуется настроить 
 \fBrpm\fR макрос 
 .TP
-\fB%_signature\fR
-Типы подписи. На данный момент поддерживаются только gpg и pgp.
-.TP
 \fB%_gpg_name\fR
 Имя пользователя, ключом которого будут подписываться ваши пакеты.
 .PP
@@ -773,7 +766,6 @@ Red Hat GPG/DSA:
 используя программу \fI/usr/bin/gpg\fR, вам потребуется включить строки
 .PP
 .nf
-%_signature gpg
 %_gpg_path /etc/rpm/.gpg
 %_gpg_name John Doe <jdoe@foo.com>
 %_gpgbin /usr/bin/gpg

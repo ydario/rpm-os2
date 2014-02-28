@@ -55,13 +55,6 @@ Header headerFree( Header h);
 Header headerLink(Header h);
 
 /** \ingroup header
- * Dereference a header instance.
- * @param h		header
- * @return		new header reference
- */
-Header headerUnlink(Header h);
-
-/** \ingroup header
  * Sort tags in header.
  * @param h		header
  */
@@ -79,7 +72,7 @@ void headerUnsort(Header h);
  * @param magicp	include size of 8 bytes for (magic, 0)?
  * @return		size of on-disk header
  */
-unsigned int headerSizeof(Header h, enum hMagic magicp);
+unsigned int headerSizeof(Header h, int magicp);
 
 /** \ingroup header
  * Perform simple sanity and range checks on header tag(s).
@@ -94,10 +87,19 @@ int headerVerifyInfo(int il, int dl, const void * pev, void * iv, int negate);
 
 /** \ingroup header
  * Convert header to on-disk representation.
+ * @deprecated		Use headerExport() instead
  * @param h		header (with pointers)
  * @return		on-disk header blob (i.e. with offsets)
  */
 void * headerUnload(Header h);
+
+/** \ingroup header
+ * Export header to on-disk representation.
+ * @param h		header (with pointers)
+ * @retval bsize	on-disk header blob size in bytes
+ * @return		on-disk header blob (i.e. with offsets)
+ */
+void * headerExport(Header h, unsigned int * bsize);
 
 /** \ingroup header
  * Convert header to on-disk representation, and then reload.
@@ -106,7 +108,7 @@ void * headerUnload(Header h);
  * @param tag		region tag
  * @return		on-disk header (with offsets)
  */
-Header headerReload(Header h, rpmTag tag);
+Header headerReload(Header h, rpmTagVal tag);
 
 /** \ingroup header
  * Duplicate a header.
@@ -117,6 +119,7 @@ Header headerCopy(Header h);
 
 /** \ingroup header
  * Convert header to in-memory representation.
+ * @deprecated		Use headerImport() instead
  * @param uh		on-disk header blob (i.e. with offsets)
  * @return		header
  */
@@ -124,10 +127,27 @@ Header headerLoad(void * uh);
 
 /** \ingroup header
  * Make a copy and convert header to in-memory representation.
+ * @deprecated		Use headerImport() instead
  * @param uh		on-disk header blob (i.e. with offsets)
  * @return		header
  */
 Header headerCopyLoad(const void * uh);
+
+enum headerImportFlags_e {
+    HEADERIMPORT_COPY		= (1 << 0), /* Make copy of blob on import? */
+    HEADERIMPORT_FAST		= (1 << 1), /* Faster but less safe? */
+};
+
+typedef rpmFlags headerImportFlags;
+
+/** \ingroup header
+ * Import header to in-memory representation.
+ * @param blob		on-disk header blob (i.e. with offsets)
+ * @param bsize		on-disk header blob size in bytes (0 if unknown)
+ * @param flags		flags to control operation
+ * @return		header
+ */
+Header headerImport(void *blob, unsigned int bsize, headerImportFlags flags);
 
 /** \ingroup header
  * Read (and load) header from file handle.
@@ -135,7 +155,7 @@ Header headerCopyLoad(const void * uh);
  * @param magicp	read (and verify) 8 bytes of (magic, 0)?
  * @return		header (or NULL on error)
  */
-Header headerRead(FD_t fd, enum hMagic magicp);
+Header headerRead(FD_t fd, int magicp);
 
 /** \ingroup header
  * Write (with unload) header to file handle.
@@ -144,7 +164,7 @@ Header headerRead(FD_t fd, enum hMagic magicp);
  * @param magicp	prefix write with 8 bytes of (magic, 0)?
  * @return		0 on success, 1 on error
  */
-int headerWrite(FD_t fd, Header h, enum hMagic magicp);
+int headerWrite(FD_t fd, Header h, int magicp);
 
 /** \ingroup header
  * Check if tag is in header.
@@ -152,7 +172,7 @@ int headerWrite(FD_t fd, Header h, enum hMagic magicp);
  * @param tag		tag
  * @return		1 on success, 0 on failure
  */
-int headerIsEntry(Header h, rpmTag tag);
+int headerIsEntry(Header h, rpmTagVal tag);
 
 /** \ingroup header
  * Modifier flags for headerGet() operation.
@@ -163,14 +183,16 @@ int headerIsEntry(Header h, rpmTag tag);
  * tags don't generally honor the other flags, MINMEM, RAW, ALLOC and ARGV 
  * are only relevant for non-extension data.
  */
-typedef enum headerGetFlags_e {
+enum headerGetFlags_e {
     HEADERGET_DEFAULT	= 0,	    /* legacy headerGetEntry() behavior */
     HEADERGET_MINMEM 	= (1 << 0), /* pointers can refer to header memory */
     HEADERGET_EXT 	= (1 << 1), /* lookup extension types too */
     HEADERGET_RAW 	= (1 << 2), /* return raw contents (no i18n lookups) */
     HEADERGET_ALLOC	= (1 << 3), /* always allocate memory for all data */
     HEADERGET_ARGV	= (1 << 4), /* return string arrays NULL-terminated */
-} headerGetFlags;
+};
+
+typedef rpmFlags headerGetFlags;
 
 /** \ingroup header
  * Retrieve tag value.
@@ -180,13 +202,15 @@ typedef enum headerGetFlags_e {
  * @param flags		retrieval modifier flags
  * @return		1 on success, 0 on failure
  */
-int headerGet(Header h, rpmTag tag, rpmtd td, headerGetFlags flags);
+int headerGet(Header h, rpmTagVal tag, rpmtd td, headerGetFlags flags);
 
 
-typedef enum headerPutFlags_e {
+enum headerPutFlags_e {
     HEADERPUT_DEFAULT	= 0,
     HEADERPUT_APPEND 	= (1 << 0),
-} headerPutFlags;
+};
+
+typedef rpmFlags headerPutFlags;
 
 /** \ingroup header
  * Add or append tag to header.
@@ -221,14 +245,14 @@ int headerPut(Header h, rpmtd td, headerPutFlags flags);
  * @return		1 on success, 0 on failure
  * 
  */
-int headerPutString(Header h, rpmTag tag, const char *val);
-int headerPutStringArray(Header h, rpmTag tag, const char **val, rpm_count_t size);
-int headerPutBin(Header h, rpmTag tag, uint8_t *val, rpm_count_t size);
-int headerPutChar(Header h, rpmTag tag, char *val, rpm_count_t size);
-int headerPutUint8(Header h, rpmTag tag, uint8_t *val, rpm_count_t size);
-int headerPutUint16(Header h, rpmTag tag, uint16_t *val, rpm_count_t size);
-int headerPutUint32(Header h, rpmTag tag, uint32_t *val, rpm_count_t size);
-int headerPutUint64(Header h, rpmTag tag, uint64_t *val, rpm_count_t size);
+int headerPutString(Header h, rpmTagVal tag, const char *val);
+int headerPutStringArray(Header h, rpmTagVal tag, const char **val, rpm_count_t size);
+int headerPutBin(Header h, rpmTagVal tag, const uint8_t *val, rpm_count_t size);
+int headerPutChar(Header h, rpmTagVal tag, const char *val, rpm_count_t size);
+int headerPutUint8(Header h, rpmTagVal tag, const uint8_t *val, rpm_count_t size);
+int headerPutUint16(Header h, rpmTagVal tag, const uint16_t *val, rpm_count_t size);
+int headerPutUint32(Header h, rpmTagVal tag, const uint32_t *val, rpm_count_t size);
+int headerPutUint64(Header h, rpmTagVal tag, const uint64_t *val, rpm_count_t size);
 /** @} */
 
 /** \ingroup header
@@ -251,7 +275,7 @@ int headerPutUint64(Header h, rpmTag tag, uint64_t *val, rpm_count_t size);
  * @param lang		locale
  * @return		1 on success, 0 on failure
  */
-int headerAddI18NString(Header h, rpmTag tag, const char * string,
+int headerAddI18NString(Header h, rpmTagVal tag, const char * string,
 		const char * lang);
 
 /** \ingroup header
@@ -272,7 +296,7 @@ int headerMod(Header h, rpmtd td);
  * @param tag		tag
  * @return		0 on success, 1 on failure (INCONSISTENT)
  */
-int headerDel(Header h, rpmTag tag);
+int headerDel(Header h, rpmTagVal tag);
 
 /** \ingroup header
  * Return formatted output string from header tags.
@@ -292,7 +316,7 @@ char * headerFormat(Header h, const char * fmt, errmsg_t * errmsg);
  * @param tagstocopy	array of tags that are copied
  */
 void headerCopyTags(Header headerFrom, Header headerTo, 
-		    const rpmTag * tagstocopy);
+		    const rpmTagVal * tagstocopy);
 
 /** \ingroup header
  * Destroy header tag iterator.
@@ -321,7 +345,7 @@ int headerNext(HeaderIterator hi, rpmtd td);
  * @param hi		header tag iterator
  * @return		next tag, RPMTAG_NOT_FOUND to stop iteration
  */
-rpmTag headerNextTag(HeaderIterator hi);
+rpmTagVal headerNextTag(HeaderIterator hi);
 
 /** \ingroup header
  * Return name, version, release strings from header.
@@ -388,7 +412,7 @@ char * headerGetEVR(Header h, const char **np);
  * @param tag		tag to retrieve
  * @return 		string pointer (malloced) or NULL on failure
  */
-char * headerGetAsString(Header h, rpmTag tag);
+char * headerGetAsString(Header h, rpmTagVal tag);
 
 /** \ingroup header
  * Return a simple string tag from header
@@ -396,7 +420,7 @@ char * headerGetAsString(Header h, rpmTag tag);
  * @param tag		tag to retrieve
  * @return		string pointer (to header memory) or NULL on failure
  */
-const char * headerGetString(Header h, rpmTag tag);
+const char * headerGetString(Header h, rpmTagVal tag);
 
 /* \ingroup header
  * Return a simple number tag (or extension) from header
@@ -404,7 +428,7 @@ const char * headerGetString(Header h, rpmTag tag);
  * @param tag		tag to retrieve
  * @return		numeric tag value or 0 on failure
  */
-uint64_t headerGetNumber(Header h, rpmTag tag);
+uint64_t headerGetNumber(Header h, rpmTagVal tag);
 
 /** \ingroup header
  * Return header color.
@@ -437,10 +461,10 @@ typedef enum headerConvOps_e {
 /** \ingroup header
  * Convert header to/from (legacy) data presentation
  * @param h		header
- * @param op		operation
+ * @param op		one of headerConvOps operations
  * @return		1 on success, 0 on failure
  */
-int headerConvert(Header h, headerConvOps op);
+int headerConvert(Header h, int op);
 
 #ifdef __cplusplus
 }

@@ -9,6 +9,7 @@
 #include <sys/types.h>
 
 #include <rpm/rpmtypes.h>
+#include <rpm/rpmte.h>
 #include <rpm/rpmps.h>
 #include <rpm/rpmsw.h>
 #include <rpm/rpmpgp.h>
@@ -19,13 +20,12 @@
 extern "C" {
 #endif
 
-extern int _rpmts_debug;
 extern int _rpmts_stats;
 
 /** \ingroup rpmts
  * Bit(s) to control rpmtsRun() operation.
  */
-typedef enum rpmtransFlags_e {
+enum rpmtransFlags_e {
     RPMTRANS_FLAG_NONE		= 0,
     RPMTRANS_FLAG_TEST		= (1 <<  0),	/*!< from --test */
     RPMTRANS_FLAG_BUILD_PROBS	= (1 <<  1),	/*!< don't process payload */
@@ -34,17 +34,9 @@ typedef enum rpmtransFlags_e {
     RPMTRANS_FLAG_NOTRIGGERS	= (1 <<  4),	/*!< from --notriggers */
     RPMTRANS_FLAG_NODOCS	= (1 <<  5),	/*!< from --excludedocs */
     RPMTRANS_FLAG_ALLFILES	= (1 <<  6),	/*!< from --allfiles */
-    RPMTRANS_FLAG_KEEPOBSOLETE	= (1 <<  7),	/*!< @todo Document. */
+    /* bit 7 unused */
     RPMTRANS_FLAG_NOCONTEXTS	= (1 <<  8),	/*!< from --nocontexts */
-    RPMTRANS_FLAG_DIRSTASH	= (1 <<  9),	/*!< obsolete, unused */
-    RPMTRANS_FLAG_REPACKAGE	= (1 << 10),	/*!< obsolete, unused */
-
-    RPMTRANS_FLAG_PKGCOMMIT	= (1 << 11),
-    RPMTRANS_FLAG_PKGUNDO	= (1 << 12),
-    RPMTRANS_FLAG_COMMIT	= (1 << 13),
-    RPMTRANS_FLAG_UNDO		= (1 << 14),
-    RPMTRANS_FLAG_REVERSE	= (1 << 15),
-
+    /* bits 9-15 unused */
     RPMTRANS_FLAG_NOTRIGGERPREIN= (1 << 16),	/*!< from --notriggerprein */
     RPMTRANS_FLAG_NOPRE		= (1 << 17),	/*!< from --nopre */
     RPMTRANS_FLAG_NOPOST	= (1 << 18),	/*!< from --nopost */
@@ -53,16 +45,16 @@ typedef enum rpmtransFlags_e {
     RPMTRANS_FLAG_NOPREUN	= (1 << 21),	/*!< from --nopreun */
     RPMTRANS_FLAG_NOPOSTUN	= (1 << 22),	/*!< from --nopostun */
     RPMTRANS_FLAG_NOTRIGGERPOSTUN = (1 << 23),	/*!< from --notriggerpostun */
-    RPMTRANS_FLAG_NOPAYLOAD	= (1 << 24),
-    RPMTRANS_FLAG_APPLYONLY	= (1 << 25),
-
+    /* bits 24-25 unused */
+    RPMTRANS_FLAG_NOCOLLECTIONS	= (1 << 26),	/*!< from --nocollections */
     RPMTRANS_FLAG_NOMD5		= (1 << 27),	/*!< from --nomd5 */
     RPMTRANS_FLAG_NOFILEDIGEST	= (1 << 27),	/*!< from --nofiledigest (alias to --nomd5) */
-    RPMTRANS_FLAG_NOSUGGEST	= (1 << 28),	/*!< from --nosuggest */
-    RPMTRANS_FLAG_ADDINDEPS	= (1 << 29),	/*!< from --aid */
+    /* bits 28-29 unused */
     RPMTRANS_FLAG_NOCONFIGS	= (1 << 30),	/*!< from --noconfigs */
     RPMTRANS_FLAG_DEPLOOPS	= (1 << 31)	/*!< from --deploops */
-} rpmtransFlags;
+};
+
+typedef rpmFlags rpmtransFlags;
 
 #define	_noTransScripts		\
   ( RPMTRANS_FLAG_NOPRE |	\
@@ -78,10 +70,24 @@ typedef enum rpmtransFlags_e {
     RPMTRANS_FLAG_NOTRIGGERPOSTUN \
   )
 
+/* Avoid unnecessary breakage for stuff referring to these unused flags */
+#define RPMTRANS_FLAG_NOPAYLOAD 0
+#define RPMTRANS_FLAG_APPLYONLY 0
+#define RPMTRANS_FLAG_KEEPOBSOLETE 0
+#define RPMTRANS_FLAG_DIRSTASH 0
+#define RPMTRANS_FLAG_REPACKAGE 0
+#define RPMTRANS_FLAG_PKGCOMMIT 0
+#define RPMTRANS_FLAG_PKGUNDO 0
+#define RPMTRANS_FLAG_COMMIT 0
+#define RPMTRANS_FLAG_UNDO 0
+#define RPMTRANS_FLAG_REVERSE 0
+#define RPMTRANS_FLAG_NOSUGGEST 0
+#define RPMTRANS_FLAG_ADDINDEPS 0
+
 /** \ingroup rpmts
  * Bit(s) to control digest and signature verification.
  */
-typedef enum rpmVSFlags_e {
+enum rpmVSFlags_e {
     RPMVSF_DEFAULT	= 0,
     RPMVSF_NOHDRCHK	= (1 <<  0),
     RPMVSF_NEEDPAYLOAD	= (1 <<  1),
@@ -96,7 +102,9 @@ typedef enum rpmVSFlags_e {
     RPMVSF_NODSA	= (1 << 18),
     RPMVSF_NORSA	= (1 << 19)
     /* bit(s) 16-31 unused */
-} rpmVSFlags;
+};
+
+typedef rpmFlags rpmVSFlags;
 
 #define	_RPMVSF_NODIGESTS	\
   ( RPMVSF_NOSHA1HEADER |	\
@@ -188,28 +196,18 @@ int rpmtsOrder(rpmts ts);
  *    - setup the rpm verify signature flags via rpmtsSetVSFlags().
  *       
  * @param ts		transaction set
- * @param okProbs	previously known problems (or NULL)
+ * @param okProbs	unused
  * @param ignoreSet	bits to filter problem types
  * @return		0 on success, -1 on error, >0 with newProbs set
  */
 int rpmtsRun(rpmts ts, rpmps okProbs, rpmprobFilterFlags ignoreSet);
 
 /** \ingroup rpmts
- * Unreference a transaction instance.
- * @param ts		transaction set
- * @param msg
- * @return		NULL always
- */
-rpmts rpmtsUnlink (rpmts ts,
-		const char * msg);
-
-/** \ingroup rpmts
  * Reference a transaction set instance.
  * @param ts		transaction set
- * @param msg
  * @return		new transaction set reference
  */
-rpmts rpmtsLink (rpmts ts, const char * msg);
+rpmts rpmtsLink (rpmts ts);
 
 /** \ingroup rpmts
  * Close the database used by the transaction.
@@ -268,21 +266,13 @@ int rpmtsVerifyDB(rpmts ts);
 /** \ingroup rpmts
  * Return transaction database iterator.
  * @param ts		transaction set
- * @param rpmtag	rpm tag
+ * @param rpmtag	database index tag
  * @param keyp		key data (NULL for sequential access)
  * @param keylen	key data length (0 will use strlen(keyp))
  * @return		NULL on failure
  */
-rpmdbMatchIterator rpmtsInitIterator(const rpmts ts, rpmTag rpmtag,
+rpmdbMatchIterator rpmtsInitIterator(const rpmts ts, rpmDbiTagVal rpmtag,
 			const void * keyp, size_t keylen);
-
-/** \ingroup rpmts
- * Retrieve pubkey from rpm database.
- * @param ts		rpm transaction
- * @param dig		OpenPGP packet container
- * @return		RPMRC_OK on success, RPMRC_NOKEY if not found
- */
-rpmRC rpmtsFindPubkey(rpmts ts, pgpDig dig) RPM_GNUC_DEPRECATED;
 
 /** \ingroup rpmts
  * Import public key packet(s).
@@ -326,7 +316,7 @@ int rpmtsSetSolveCallback(rpmts ts,
 /** \ingroup rpmts
  * Return current transaction set problems.
  * @param ts		transaction set
- * @return		current problem set (or NULL)
+ * @return		current problem set (or NULL if no problems)
  */
 rpmps rpmtsProblems(rpmts ts);
 
@@ -386,20 +376,6 @@ const char * rpmtsRootDir(rpmts ts);
 int rpmtsSetRootDir(rpmts ts, const char * rootDir);
 
 /** \ingroup rpmts
- * Get transaction currDir, i.e. current directory before chroot(2).
- * @param ts		transaction set
- * @return		transaction currDir
- */
-const char * rpmtsCurrDir(rpmts ts);
-
-/** \ingroup rpmts
- * Set transaction currDir, i.e. current directory before chroot(2).
- * @param ts		transaction set
- * @param currDir	new transaction currDir (or NULL)
- */
-void rpmtsSetCurrDir(rpmts ts, const char * currDir);
-
-/** \ingroup rpmts
  * Get transaction script file handle, i.e. stdout/stderr on scriptlet execution
  * @param ts		transaction set
  * @return		transaction script file handle
@@ -412,28 +388,6 @@ FD_t rpmtsScriptFd(rpmts ts);
  * @param scriptFd	new script file handle (or NULL)
  */
 void rpmtsSetScriptFd(rpmts ts, FD_t scriptFd);
-
-/** \ingroup rpmts
- * Get selinuxEnabled flag, i.e. is SE linux enabled?
- * @param ts		transaction set
- * @return		selinuxEnabled flag
- */
-int rpmtsSELinuxEnabled(rpmts ts);
-
-/** \ingroup rpmts
- * Get chrootDone flag, i.e. has chroot(2) been performed?
- * @param ts		transaction set
- * @return		chrootDone flag
- */
-int rpmtsChrootDone(rpmts ts);
-
-/** \ingroup rpmts
- * Set chrootDone flag, i.e. has chroot(2) been performed?
- * @param ts		transaction set
- * @param chrootDone	new chrootDone flag
- * @return		previous chrootDone flag
- */
-int rpmtsSetChrootDone(rpmts ts, int chrootDone);
 
 /** \ingroup rpmts
  * Get transaction id, i.e. transaction time stamp.
@@ -507,21 +461,6 @@ rpmtransFlags rpmtsFlags(rpmts ts);
 rpmtransFlags rpmtsSetFlags(rpmts ts, rpmtransFlags transFlags);
 
 /** \ingroup rpmts
- * Get spec control structure from transaction set.
- * @param ts		transaction set
- * @return		spec control structure
- */
-rpmSpec rpmtsSpec(rpmts ts);
-
-/** \ingroup rpmts
- * Set a spec control structure in transaction set.
- * @param ts		transaction set
- * @param spec		new spec control structure
- * @return		previous spec control structure
- */
-rpmSpec rpmtsSetSpec(rpmts ts, rpmSpec spec);
-
-/** \ingroup rpmts
  * Retrieve color bits of transaction set.
  * @param ts		transaction set
  * @return		color bits
@@ -529,7 +468,7 @@ rpmSpec rpmtsSetSpec(rpmts ts, rpmSpec spec);
 rpm_color_t rpmtsColor(rpmts ts);
 
 /** \ingroup rpmts
- * Retrieve prefered file color
+ * Retrieve preferred file color
  * @param ts		transaction set
  * @return		color bits
  */
@@ -544,7 +483,7 @@ rpm_color_t rpmtsPrefColor(rpmts ts);
 rpm_color_t rpmtsSetColor(rpmts ts, rpm_color_t color);
 
 /** \ingroup rpmts
- * Set prefered file color
+ * Set preferred file color
  * @param ts		transaction set
  * @param color		new color bits
  * @return		previous color bits
@@ -558,6 +497,13 @@ rpm_color_t rpmtsSetPrefColor(rpmts ts, rpm_color_t color);
  * @return		pointer to operation timestamp.
  */
 rpmop rpmtsOp(rpmts ts, rpmtsOpX opx);
+
+/** \ingroup rpmts
+ * Get the plugins associated with a transaction set
+ * @param ts		transaction set
+ * @return		plugins
+ */
+rpmPlugins rpmtsPlugins(rpmts ts);
 
 /** \ingroup rpmts
  * Set transaction notify callback function and argument.
@@ -605,6 +551,28 @@ int rpmtsAddInstallElement(rpmts ts, Header h,
  * @return		0 on success, 1 on error (not installed)
  */
 int rpmtsAddEraseElement(rpmts ts, Header h, int dboffset);
+
+/** \ingroup rpmte
+ * Destroy transaction element iterator.
+ * @param tsi		transaction element iterator
+ * @return		NULL always
+ */
+rpmtsi rpmtsiFree(rpmtsi tsi);
+
+/** \ingroup rpmte
+ * Create transaction element iterator.
+ * @param ts		transaction set
+ * @return		transaction element iterator
+ */
+rpmtsi rpmtsiInit(rpmts ts);
+
+/** \ingroup rpmte
+ * Return next transaction element of type.
+ * @param tsi		transaction element iterator
+ * @param types		transaction element type selector (0 for any)
+ * @return		next transaction element of type, NULL on termination
+ */
+rpmte rpmtsiNext(rpmtsi tsi, rpmElementTypes types);
 
 #ifdef __cplusplus
 }

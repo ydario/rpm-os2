@@ -14,4 +14,4 @@ BuildArch:	noarch
 rm -rf $RPM_BUILD_ROOT
 
 %files
-%defattr(-,root,root,-)
+%defattr(-,root,root)

@@ -15,12 +15,13 @@ typedef const struct headerTagTableEntry_s * headerTagTableEntry;
 struct headerTagTableEntry_s {
     const char * name;		/*!< Tag name. */
     const char * shortname;	/*!< "Human readable" short name. */
-    rpmTag val;			/*!< Tag numeric value. */
+    rpmTagVal val;		/*!< Tag numeric value. */
     rpmTagType type;		/*!< Tag type. */
+    rpmTagReturnType retype;	/*!< Tag return type. */
     int extension;		/*!< Extension or "real" tag */
 };
 
-#include "lib/tagtbl.c"
+#include "lib/tagtbl.C"
 
 static const int rpmTagTableSize = sizeof(rpmTagTable) / sizeof(rpmTagTable[0]) - 1;
 
@@ -35,12 +36,12 @@ struct headerTagIndices_s {
     headerTagTableEntry * byName;	/*!< header tags sorted by name. */
     int byNameSize;			/*!< no. of entries. */
     int (*byNameCmp) (const void * avp, const void * bvp);				/*!< compare entries by name. */
-    rpmTag (*tagValue) (const char * name);	/* return value from name. */
+    rpmTagVal (*tagValue) (const char * name);	/* return value from name. */
     headerTagTableEntry * byValue;	/*!< header tags sorted by value. */
     int byValueSize;			/*!< no. of entries. */
     int (*byValueCmp) (const void * avp, const void * bvp);				/*!< compare entries by value. */
-    const char * (*tagName) (rpmTag value);	/* Return name from value. */
-    rpmTagType (*tagType) (rpmTag value);	/* Return type from value. */
+    const char * (*tagName) (rpmTagVal value);	/* Return name from value. */
+    rpmTagType (*tagType) (rpmTagVal value);	/* Return type from value. */
 };
 
 /**
@@ -103,9 +104,9 @@ assert(n == rpmTagTableSize);
 
 
 /* forward refs */
-static const char * _tagName(rpmTag tag);
-static rpmTagType _tagType(rpmTag tag);
-static rpmTag _tagValue(const char * tagstr);
+static const char * _tagName(rpmTagVal tag);
+static rpmTagType _tagType(rpmTagVal tag);
+static rpmTagVal _tagValue(const char * tagstr);
 
 static struct headerTagIndices_s _rpmTags = {
     tagLoadIndex,
@@ -115,42 +116,19 @@ static struct headerTagIndices_s _rpmTags = {
 
 static headerTagIndices const rpmTags = &_rpmTags;
 
-static const char * _tagName(rpmTag tag)
+static const char * _tagName(rpmTagVal tag)
 {
     const char *name = "(unknown)";
     const struct headerTagTableEntry_s *t;
     int comparison, i, l, u;
-    int xx;
 
     if (_rpmTags.byValue == NULL)
-	xx = tagLoadIndex(&_rpmTags.byValue, &_rpmTags.byValueSize, tagCmpValue);
+	tagLoadIndex(&_rpmTags.byValue, &_rpmTags.byValueSize, tagCmpValue);
 
     switch (tag) {
     case RPMDBI_PACKAGES:
 	name = "Packages";
 	break;
-    case RPMDBI_DEPENDS:
-	name = "Depends";
-	break;
-    case RPMDBI_ADDED:
-	name = "Added";
-	break;
-    case RPMDBI_REMOVED:
-	name = "Removed";
-	break;
-    case RPMDBI_AVAILABLE:
-	name = "Available";
-	break;
-    case RPMDBI_HDLIST:
-	name = "Hdlist";
-	break;
-    case RPMDBI_ARGLIST:
-	name = "Arglist";
-	break;
-    case RPMDBI_FTSWALK:
-	name = "Ftswalk";
-	break;
-
     /* XXX make sure rpmdb indices are identically named. */
     case RPMTAG_CONFLICTS:
 	name = "Conflictname";
@@ -190,28 +168,14 @@ static const char * _tagName(rpmTag tag)
     return name;
 }
 
-static rpmTagType _tagType(rpmTag tag)
+static rpmTagType _tagType(rpmTagVal tag)
 {
     const struct headerTagTableEntry_s *t;
     int comparison, i, l, u;
-    int xx;
 
     if (_rpmTags.byValue == NULL)
-	xx = tagLoadIndex(&_rpmTags.byValue, &_rpmTags.byValueSize, tagCmpValue);
-
-    switch (tag) {
-    case RPMDBI_PACKAGES:
-    case RPMDBI_DEPENDS:
-    case RPMDBI_ADDED:
-    case RPMDBI_REMOVED:
-    case RPMDBI_AVAILABLE:
-    case RPMDBI_HDLIST:
-    case RPMDBI_ARGLIST:
-    case RPMDBI_FTSWALK:
-	break;
-    default:
-	if (_rpmTags.byValue == NULL)
-	    break;
+	tagLoadIndex(&_rpmTags.byValue, &_rpmTags.byValueSize, tagCmpValue);
+    if (_rpmTags.byValue) {
 	l = 0;
 	u = _rpmTags.byValueSize;
 	while (l < u) {
@@ -230,39 +194,24 @@ static rpmTagType _tagType(rpmTag tag)
 		    i--;
 		}
 		t = _rpmTags.byValue[i];
-		return t->type;
+		/* XXX this is dumb */
+		return (rpmTagType)(t->type | t->retype);
 	    }
 	}
-	break;
     }
     return RPM_NULL_TYPE;
 }
 
-static rpmTag _tagValue(const char * tagstr)
+static rpmTagVal _tagValue(const char * tagstr)
 {
     const struct headerTagTableEntry_s *t;
     int comparison, i, l, u;
-    int xx;
 
     if (!rstrcasecmp(tagstr, "Packages"))
 	return RPMDBI_PACKAGES;
-    if (!rstrcasecmp(tagstr, "Depends"))
-	return RPMDBI_DEPENDS;
-    if (!rstrcasecmp(tagstr, "Added"))
-	return RPMDBI_ADDED;
-    if (!rstrcasecmp(tagstr, "Removed"))
-	return RPMDBI_REMOVED;
-    if (!rstrcasecmp(tagstr, "Available"))
-	return RPMDBI_AVAILABLE;
-    if (!rstrcasecmp(tagstr, "Hdlist"))
-	return RPMDBI_HDLIST;
-    if (!rstrcasecmp(tagstr, "Arglist"))
-	return RPMDBI_ARGLIST;
-    if (!rstrcasecmp(tagstr, "Ftswalk"))
-	return RPMDBI_FTSWALK;
 
     if (_rpmTags.byName == NULL)
-	xx = tagLoadIndex(&_rpmTags.byName, &_rpmTags.byNameSize, tagCmpName);
+	tagLoadIndex(&_rpmTags.byName, &_rpmTags.byNameSize, tagCmpName);
     if (_rpmTags.byName == NULL)
 	return RPMTAG_NOT_FOUND;
 
@@ -284,49 +233,59 @@ static rpmTag _tagValue(const char * tagstr)
     return RPMTAG_NOT_FOUND;
 }
 
-const char * rpmTagGetName(rpmTag tag)
+const char * rpmTagGetName(rpmTagVal tag)
 {
     return ((*rpmTags->tagName)(tag));
 }
 
-rpmTagType rpmTagGetType(rpmTag tag)
+rpmTagType rpmTagGetType(rpmTagVal tag)
 {
     return ((*rpmTags->tagType)(tag));
 }
 
+rpmTagType rpmTagGetTagType(rpmTagVal tag)
+{
+    return (rpmTagType)((*rpmTags->tagType)(tag) & RPM_MASK_TYPE);
+}
+
+rpmTagReturnType rpmTagGetReturnType(rpmTagVal tag)
+{
+    return ((*rpmTags->tagType)(tag) & RPM_MASK_RETURN_TYPE);
+}
+
 rpmTagClass rpmTagTypeGetClass(rpmTagType type)
 {
-    rpmTagClass class;
+    rpmTagClass tclass;
     switch (type & RPM_MASK_TYPE) {
     case RPM_CHAR_TYPE:
     case RPM_INT8_TYPE:
     case RPM_INT16_TYPE:
     case RPM_INT32_TYPE:
     case RPM_INT64_TYPE:
-	class = RPM_NUMERIC_CLASS;
+	tclass = RPM_NUMERIC_CLASS;
 	break;
     case RPM_STRING_TYPE:
     case RPM_STRING_ARRAY_TYPE:
     case RPM_I18NSTRING_TYPE:
-	class = RPM_STRING_CLASS;
+	tclass = RPM_STRING_CLASS;
 	break;
     case RPM_BIN_TYPE:
-	class = RPM_BINARY_CLASS;
+	tclass = RPM_BINARY_CLASS;
 	break;
     case RPM_NULL_TYPE:
     default:
-	class = RPM_NULL_CLASS;
+	tclass = RPM_NULL_CLASS;
 	break;
     }
-    return class;
+    return tclass;
 }
 
-rpmTagClass rpmTagGetClass(rpmTag tag)
+rpmTagClass rpmTagGetClass(rpmTagVal tag)
 {
-    return rpmTagTypeGetClass(rpmTagGetType(tag));
+    return rpmTagTypeGetClass(rpmTagGetTagType(tag));
 }
 
-rpmTag rpmTagGetValue(const char * tagstr)
+rpmTagVal rpmTagGetValue(const char * tagstr)
 {
     return ((*rpmTags->tagValue)(tagstr));
 }

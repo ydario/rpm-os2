@@ -4,7 +4,7 @@
 #include <unistd.h>
 
 /*
- * Miscellanous utility macros:
+ * Miscellaneous utility macros:
  * - portability wrappers for various gcc extensions like __attribute__()
  * - ...
  *
@@ -112,6 +112,10 @@
 # define RPM_END_DECLS
 #endif
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Rpm specific allocators which never return NULL but terminate on failure */
 RPM_GNUC_MALLOC RPM_GNUC_ALLOC_SIZE(1)
 void * rmalloc(size_t size);
@@ -146,6 +150,10 @@ typedef void * (*rpmMemFailFunc) (size_t size, void *data);
  * @param data		User data (or NULL)
  * @return		Previous callback function
  */
-void * rpmSetMemFail(rpmMemFailFunc func, void *data);
+rpmMemFailFunc rpmSetMemFail(rpmMemFailFunc func, void *data);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* _RPMUTIL_H */

@@ -4,12 +4,12 @@
  */
 #include "system.h"
 
-#include <rpm/rpmbuild.h>
 #include <rpm/rpmlog.h>
+#include "build/rpmbuild_internal.h"
 #include "debug.h"
 
 
-int parseBuildInstallClean(rpmSpec spec, rpmParseState parsePart)
+int parseBuildInstallClean(rpmSpec spec, int parsePart)
 {
     int nextPart, rc, res = PART_ERROR;
     StringBuf *sbp = NULL;

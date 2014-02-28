@@ -8,7 +8,6 @@ const char *__progname;
 
 #include <rpm/rpmcli.h>
 #include <rpm/rpmlib.h>		/* rpmEVR, rpmReadConfigFiles etc */
-#include <rpm/rpmgi.h>
 #include <rpm/rpmlog.h>
 #include <rpm/rpmstring.h>
 #include <rpm/rpmfileutil.h>
@@ -19,9 +18,9 @@ const char *__progname;
 #define POPT_SHOWRC		-998
 #define POPT_QUERYTAGS		-997
 #define POPT_PREDEFINE		-996
-#ifdef  NOTYET
-#define POPT_RCFILE		-995
-#endif
+#define POPT_DBPATH		-995
+#define POPT_UNDEFINE		-994
+#define POPT_PIPE		-993
 
 static int _debug = 0;
 
@@ -29,36 +28,12 @@ extern int _rpmds_nopromote;
 
 extern int _fsm_debug;
 
-extern int _fsm_threads;
-
-extern int _hdr_debug;
-
 extern int _print_pkts;
 
 extern int _psm_debug;
 
-extern int _psm_threads;
-
-extern int _rpmal_debug;
-
-extern int _rpmdb_debug;
-
-extern int _rpmds_debug;
-
 /* XXX avoid -lrpmbuild linkage. */
        int _rpmfc_debug;
-
-extern int _rpmfi_debug;
-
-extern int _rpmgi_debug;
-
-extern int _rpmps_debug;
-
-extern int _rpmsq_debug;
-
-extern int _rpmte_debug;
-
-extern int _rpmts_debug;
 
 extern int _rpmts_stats;
 
@@ -131,15 +106,25 @@ static void rpmcliAllArgCallback( poptContext con,
 	rpmcliConfigured();
 	(void) rpmDefineMacro(NULL, t, RMIL_CMDLINE);
 	(void) rpmDefineMacro(rpmCLIMacroContext, t, RMIL_CMDLINE);
-	s = _free(s);
+	free(s);
 	break;
     }
+    case POPT_UNDEFINE:
+	rpmcliConfigured();
+	if (*arg == '%')
+	    arg++;
+	delMacro(NULL, arg);
+	break;
     case 'E':
 	rpmcliConfigured();
 	{   char *val = rpmExpand(arg, NULL);
 	    fprintf(stdout, "%s\n", val);
-	    val = _free(val);
+	    free(val);
 	}
+	break;
+    case POPT_DBPATH:
+	rpmcliConfigured();
+	addMacro(NULL, "_dbpath", NULL, arg, RMIL_CMDLINE);
 	break;
     case POPT_SHOWVERSION:
 	printVersion(stdout);
@@ -154,10 +139,16 @@ static void rpmcliAllArgCallback( poptContext con,
 	rpmDisplayQueryTags(stdout);
 	exit(EXIT_SUCCESS);
 	break;
-#if defined(POPT_RCFILE)
-    case POPT_RCFILE:		/* XXX FIXME: noop for now */
+    case POPT_PIPE:
+	if (rpmcliPipeOutput) {
+	    fprintf(stderr,
+		    _("%s: error: more than one --pipe specified "
+		      "(incompatible popt aliases?)\n"), __progname);
+	    exit(EXIT_FAILURE);
+	}
+	rpmcliPipeOutput = xstrdup(arg);
 	break;
-#endif
+	
     case RPMCLI_POPT_NODIGEST:
 	rpmcliQueryFlags |= VERIFY_DIGEST;
 	break;
@@ -172,28 +163,6 @@ static void rpmcliAllArgCallback( poptContext con,
     }
 }
 
-int ftsOpts = 0;
-
-struct poptOption rpmcliFtsPoptTable[] = {
- { "comfollow", '\0', POPT_BIT_SET,	&ftsOpts, RPMGI_COMFOLLOW,
-	N_("follow command line symlinks"), NULL },
- { "logical", '\0', POPT_BIT_SET,	&ftsOpts, RPMGI_LOGICAL,
-	N_("logical walk"), NULL },
- { "nochdir", '\0', POPT_BIT_SET,	&ftsOpts, RPMGI_NOCHDIR,
-	N_("don't change directories"), NULL },
- { "nostat", '\0', POPT_BIT_SET,	&ftsOpts, RPMGI_NOSTAT,
-	N_("don't get stat info"), NULL },
- { "physical", '\0', POPT_BIT_SET,	&ftsOpts, RPMGI_PHYSICAL,
-	N_("physical walk"), NULL },
- { "seedot", '\0', POPT_BIT_SET,	&ftsOpts, RPMGI_SEEDOT,
-	N_("return dot and dot-dot"), NULL },
- { "xdev", '\0', POPT_BIT_SET,		&ftsOpts, RPMGI_XDEV,
-	N_("don't cross devices"), NULL },
- { "whiteout", '\0', POPT_BIT_SET,	&ftsOpts, RPMGI_WHITEOUT,
-	N_("return whiteout information"), NULL },
-   POPT_TABLEEND
-};
-
 struct poptOption rpmcliAllPoptTable[] = {
 /* FIX: cast? */
  { NULL, '\0', POPT_ARG_CALLBACK | POPT_CBFLAG_INC_DATA | POPT_CBFLAG_CONTINUE,
@@ -202,12 +171,15 @@ struct poptOption rpmcliAllPoptTable[] = {
  { "debug", 'd', POPT_ARG_VAL|POPT_ARGFLAG_DOC_HIDDEN, &_debug, -1,
         NULL, NULL },
 
- { "predefine", 'D', POPT_ARG_STRING|POPT_ARGFLAG_DOC_HIDDEN, 0, POPT_PREDEFINE,
+ { "predefine", '\0', POPT_ARG_STRING|POPT_ARGFLAG_DOC_HIDDEN, 0, POPT_PREDEFINE,
 	N_("predefine MACRO with value EXPR"),
 	N_("'MACRO EXPR'") },
  { "define", 'D', POPT_ARG_STRING, 0, 'D',
 	N_("define MACRO with value EXPR"),
 	N_("'MACRO EXPR'") },
+ { "undefine", '\0', POPT_ARG_STRING, 0, POPT_UNDEFINE,
+	N_("undefine MACRO"),
+	N_("MACRO") },
  { "eval", 'E', POPT_ARG_STRING, 0, 'E',
 	N_("print macro expansion of EXPR"),
 	N_("'EXPR'") },
@@ -222,21 +194,18 @@ struct poptOption rpmcliAllPoptTable[] = {
  { "nosignature", '\0', 0, 0, RPMCLI_POPT_NOSIGNATURE,
         N_("don't verify package signature(s)"), NULL },
 
- { "pipe", '\0', POPT_ARG_STRING|POPT_ARGFLAG_DOC_HIDDEN, &rpmcliPipeOutput, 0,
+ { "pipe", '\0', POPT_ARG_STRING|POPT_ARGFLAG_DOC_HIDDEN, 0, POPT_PIPE,
 	N_("send stdout to CMD"),
 	N_("CMD") },
-#if !defined(POPT_RCFILE)
  { "rcfile", '\0', POPT_ARG_STRING, &rpmcliRcfile, 0,
 	N_("read <FILE:...> instead of default file(s)"),
 	N_("<FILE:...>") },
-#else
- { "rcfile", '\0', 0, NULL, POPT_RCFILE,	
-	N_("read <FILE:...> instead of default file(s)"),
-	N_("<FILE:...>") },
-#endif
  { "root", 'r', POPT_ARG_STRING|POPT_ARGFLAG_SHOW_DEFAULT, &rpmcliRootDir, 0,
 	N_("use ROOT as top level directory"),
 	N_("ROOT") },
+ { "dbpath", '\0', POPT_ARG_STRING, 0, POPT_DBPATH,
+	N_("use database in DIRECTORY"),
+	N_("DIRECTORY") },
 
  { "querytags", '\0', 0, 0, POPT_QUERYTAGS,
         N_("display known query tags"), NULL },
@@ -254,38 +223,12 @@ struct poptOption rpmcliAllPoptTable[] = {
 
  { "fsmdebug", '\0', POPT_ARG_VAL|POPT_ARGFLAG_DOC_HIDDEN, &_fsm_debug, -1,
 	N_("debug payload file state machine"), NULL},
- { "fsmthreads", '\0', POPT_ARG_VAL|POPT_ARGFLAG_DOC_HIDDEN, &_fsm_threads, -1,
-	N_("use threads for file state machine"), NULL},
- { "hdrdebug", '\0', POPT_ARG_VAL|POPT_ARGFLAG_DOC_HIDDEN, &_hdr_debug, -1,
-	NULL, NULL},
  { "prtpkts", '\0', POPT_ARG_VAL|POPT_ARGFLAG_DOC_HIDDEN, &_print_pkts, -1,
-	NULL, NULL},
- { "psmdebug", '\0', POPT_ARG_VAL|POPT_ARGFLAG_DOC_HIDDEN, &_psm_debug, -1,
-	N_("debug package state machine"), NULL},
- { "psmthreads", '\0', POPT_ARG_VAL|POPT_ARGFLAG_DOC_HIDDEN, &_psm_threads, -1,
-	N_("use threads for package state machine"), NULL},
- { "rpmaldebug", '\0', POPT_ARG_VAL|POPT_ARGFLAG_DOC_HIDDEN, &_rpmal_debug, -1,
-	NULL, NULL},
- { "rpmdbdebug", '\0', POPT_ARG_VAL|POPT_ARGFLAG_DOC_HIDDEN, &_rpmdb_debug, -1,
-	NULL, NULL},
- { "rpmdsdebug", '\0', POPT_ARG_VAL|POPT_ARGFLAG_DOC_HIDDEN, &_rpmds_debug, -1,
 	NULL, NULL},
  { "rpmfcdebug", '\0', POPT_ARG_VAL|POPT_ARGFLAG_DOC_HIDDEN, &_rpmfc_debug, -1,
 	NULL, NULL},
- { "rpmfidebug", '\0', POPT_ARG_VAL|POPT_ARGFLAG_DOC_HIDDEN, &_rpmfi_debug, -1,
-	NULL, NULL},
- { "rpmgidebug", '\0', POPT_ARG_VAL|POPT_ARGFLAG_DOC_HIDDEN, &_rpmgi_debug, -1,
-	NULL, NULL},
  { "rpmiodebug", '\0', POPT_ARG_VAL|POPT_ARGFLAG_DOC_HIDDEN, &_rpmio_debug, -1,
 	N_("debug rpmio I/O"), NULL},
- { "rpmpsdebug", '\0', POPT_ARG_VAL|POPT_ARGFLAG_DOC_HIDDEN, &_rpmps_debug, -1,
-	NULL, NULL},
- { "rpmsqdebug", '\0', POPT_ARG_VAL|POPT_ARGFLAG_DOC_HIDDEN, &_rpmsq_debug, -1,
-	NULL, NULL},
- { "rpmtedebug", '\0', POPT_ARG_VAL|POPT_ARGFLAG_DOC_HIDDEN, &_rpmte_debug, -1,
-	NULL, NULL},
- { "rpmtsdebug", '\0', POPT_ARG_VAL|POPT_ARGFLAG_DOC_HIDDEN, &_rpmts_debug, -1,
-	NULL, NULL},
  { "stats", '\0', POPT_ARG_VAL|POPT_ARGFLAG_DOC_HIDDEN, &_rpmts_stats, -1,
 	NULL, NULL},
 
@@ -295,11 +238,12 @@ struct poptOption rpmcliAllPoptTable[] = {
 poptContext
 rpmcliFini(poptContext optCon)
 {
-    optCon = poptFreeContext(optCon);
-
-#if HAVE_MCHECK_H && HAVE_MTRACE
-    muntrace();   /* Trace malloc only if MALLOC_TRACE=mtrace-output-file. */
-#endif
+    poptFreeContext(optCon);
+    rpmFreeMacros(NULL);
+    rpmFreeMacros(rpmCLIMacroContext);
+    rpmFreeRpmrc();
+    rpmlogClose();
+    rpmcliInitialized = -1;
 
     return NULL;
 }
@@ -307,13 +251,10 @@ rpmcliFini(poptContext optCon)
 poptContext
 rpmcliInit(int argc, char *const argv[], struct poptOption * optionsTable)
 {
-    const char * optArg;
     poptContext optCon;
     int rc;
+    const char *ctx, *execPath;
 
-#if HAVE_MCHECK_H && HAVE_MTRACE
-    mtrace();   /* Trace malloc only if MALLOC_TRACE=mtrace-output-file. */
-#endif
     setprogname(argv[0]);       /* Retrofit glibc __progname */
 
     /* XXX glibc churn sanity */
@@ -337,26 +278,26 @@ rpmcliInit(int argc, char *const argv[], struct poptOption * optionsTable)
 	return NULL;
     }
 
-    optCon = poptGetContext(__progname, argc, (const char **)argv, optionsTable, 0);
+    /* XXX hack to get popt working from build tree wrt lt-foo names */
+    ctx = rstreqn(__progname, "lt-", 3) ? __progname + 3 : __progname;
+
+    optCon = poptGetContext(ctx, argc, (const char **)argv, optionsTable, 0);
     {
 	char *poptfile = rpmGenPath(rpmConfigDir(), LIBRPMALIAS_FILENAME, NULL);
 	(void) poptReadConfigFile(optCon, poptfile);
 	free(poptfile);
     }
     (void) poptReadDefaultConfig(optCon, 1);
-    poptSetExecPath(optCon, rpmConfigDir(), 1);
+
+    if ((execPath = getenv("RPM_POPTEXEC_PATH")) == NULL)
+	execPath = LIBRPMALIAS_EXECPATH;
+    poptSetExecPath(optCon, execPath, 1);
 
     /* Process all options, whine if unknown. */
     while ((rc = poptGetNextOpt(optCon)) > 0) {
-	optArg = poptGetOptArg(optCon);
-	switch (rc) {
-	default:
-	    fprintf(stderr, _("%s: option table misconfigured (%d)\n"),
+	fprintf(stderr, _("%s: option table misconfigured (%d)\n"),
 		__progname, rc);
-	    exit(EXIT_FAILURE);
-
-	    break;
-        }
+	exit(EXIT_FAILURE);
     }
 
     if (rc < -1) {

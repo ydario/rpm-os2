@@ -4,13 +4,10 @@
 
 #include "system.h"
 
-#include <popt.h>
-
 #include <rpm/rpmtag.h>
-#include <rpm/rpmmacro.h>       /* XXX rpmExpand("%{_dependency_whiteout */
+#include <rpm/rpmmacro.h>
 #include <rpm/rpmlog.h>
 #include <rpm/rpmds.h>
-#include <rpm/rpmfi.h>
 
 #include "lib/rpmte_internal.h"	/* XXX tsortInfo_s */
 #include "lib/rpmts_internal.h"
@@ -25,85 +22,112 @@ struct scc_s {
     int count; /* # of external requires this SCC has */
     /* int qcnt;  # of external requires pointing to this SCC */
     int size;  /* # of members */
-    rpmte * members;
+    tsortInfo * members;
 };
 
 typedef struct scc_s * scc;
 
-struct badDeps_s {
-    char * pname;
-    const char * qname;
+struct relation_s {
+    tsortInfo   rel_suc;  // pkg requiring this package
+    rpmsenseFlags rel_flags; // accumulated flags of the requirements
+    struct relation_s * rel_next;
 };
 
-static int badDepsInitialized = 0;
-static struct badDeps_s * badDeps = NULL;
+typedef struct relation_s * relation;
 
-/**
- */
-static void freeBadDeps(void)
+struct tsortInfo_s {
+    rpmte te;
+    int	     tsi_count;     // #pkgs this pkg requires
+    int	     tsi_qcnt;      // #pkgs requiring this package
+    int	     tsi_reqx;       // requires Idx/mark as (queued/loop)
+    struct relation_s * tsi_relations;
+    struct relation_s * tsi_forward_relations;
+    tsortInfo tsi_suc;        // used for queuing (addQ)
+    int      tsi_SccIdx;     // # of the SCC the node belongs to
+                             // (1 for trivial SCCs)
+    int      tsi_SccLowlink; // used for SCC detection
+};
+
+static void rpmTSIFree(tsortInfo tsi)
 {
-    if (badDeps) {
-	struct badDeps_s * bdp;
-	/* bdp->qname is a pointer to pname so doesn't need freeing */
-	for (bdp = badDeps; bdp->pname != NULL && bdp->qname != NULL; bdp++)
-	    bdp->pname = _free(bdp->pname);
-	badDeps = _free(badDeps);
+    relation rel;
+
+    while (tsi->tsi_relations != NULL) {
+	rel = tsi->tsi_relations;
+	tsi->tsi_relations = tsi->tsi_relations->rel_next;
+	free(rel);
     }
-    badDepsInitialized = 0;
+    while (tsi->tsi_forward_relations != NULL) {
+	rel = tsi->tsi_forward_relations;
+	tsi->tsi_forward_relations = \
+	    tsi->tsi_forward_relations->rel_next;
+	free(rel);
+    }
 }
 
-/**
- * Check for dependency relations to be ignored.
- *
- * @param ts		transaction set
- * @param p		successor element (i.e. with Requires: )
- * @param q		predecessor element (i.e. with Provides: )
- * @return		1 if dependency is to be ignored.
- */
-static int ignoreDep(const rpmts ts, const rpmte p, const rpmte q)
+static inline int addSingleRelation(rpmte p,
+				    rpmte q,
+				    rpmsenseFlags dsflags)
 {
-    struct badDeps_s * bdp;
+    struct tsortInfo_s *tsi_p, *tsi_q;
+    relation rel;
+    rpmElementType teType = rpmteType(p);
+    rpmsenseFlags flags;
 
-    if (!badDepsInitialized) {
-	char * s = rpmExpand("%{?_dependency_whiteout}", NULL);
-	const char ** av = NULL;
-	int msglvl = (rpmtsFlags(ts) & RPMTRANS_FLAG_DEPLOOPS)
-			? RPMLOG_WARNING : RPMLOG_DEBUG;
-	int ac = 0;
-	int i;
+    /* Avoid deps outside this transaction and self dependencies */
+    if (q == NULL || q == p)
+	return 0;
 
-	if (s != NULL && *s != '\0'
-	&& !(i = poptParseArgvString(s, &ac, (const char ***)&av))
-	&& ac > 0 && av != NULL)
-	{
-	    bdp = badDeps = xcalloc(ac+1, sizeof(*badDeps));
-	    for (i = 0; i < ac; i++, bdp++) {
-		char * pname, * qname;
-
-		if (av[i] == NULL)
-		    break;
-		pname = xstrdup(av[i]);
-		if ((qname = strchr(pname, '>')) != NULL)
-		    *qname++ = '\0';
-		bdp->pname = pname;
-		bdp->qname = qname;
-		rpmlog(msglvl,
-			_("ignore package name relation(s) [%d]\t%s -> %s\n"),
-			i, bdp->pname, (bdp->qname ? bdp->qname : "???"));
-	    }
-	    bdp->pname = NULL;
-	    bdp->qname = NULL;
-	}
-	av = _free(av);
-	s = _free(s);
-	badDepsInitialized++;
+    /* Erasures are reversed installs. */
+    if (teType == TR_REMOVED) {
+	rpmte r = p;
+	p = q;
+	q = r;
+	flags = isErasePreReq(dsflags);
+    } else {
+	flags = isInstallPreReq(dsflags);
     }
 
-    if (badDeps != NULL)
-    for (bdp = badDeps; bdp->pname != NULL && bdp->qname != NULL; bdp++) {
-	if (rstreq(rpmteN(p), bdp->pname) && rstreq(rpmteN(q), bdp->qname))
-	    return 1;
+    /* map legacy prereq to pre/preun as needed */
+    if (isLegacyPreReq(dsflags)) {
+	flags |= (teType == TR_ADDED) ?
+	    RPMSENSE_SCRIPT_PRE : RPMSENSE_SCRIPT_PREUN;
     }
+
+    tsi_p = rpmteTSI(p);
+    tsi_q = rpmteTSI(q);
+
+    /* if relation got already added just update the flags */
+    if (tsi_q->tsi_relations && tsi_q->tsi_relations->rel_suc == tsi_p) {
+	tsi_q->tsi_relations->rel_flags |= flags;
+	tsi_p->tsi_forward_relations->rel_flags |= flags;
+	return 0;
+    }
+
+    /* Record next "q <- p" relation (i.e. "p" requires "q"). */
+    if (p != q) {
+	/* bump p predecessor count */
+	tsi_p->tsi_count++;
+    }
+
+    rel = xcalloc(1, sizeof(*rel));
+    rel->rel_suc = tsi_p;
+    rel->rel_flags = flags;
+
+    rel->rel_next = tsi_q->tsi_relations;
+    tsi_q->tsi_relations = rel;
+    if (p != q) {
+	/* bump q successor count */
+	tsi_q->tsi_qcnt++;
+    }
+
+    rel = xcalloc(1, sizeof(*rel));
+    rel->rel_suc = tsi_q;
+    rel->rel_flags = flags;
+
+    rel->rel_next = tsi_p->tsi_forward_relations;
+    tsi_p->tsi_forward_relations = rel;
+
     return 0;
 }
 
@@ -120,15 +144,12 @@ static inline int addRelation(rpmts ts,
 			      rpmds requires)
 {
     rpmte q;
-    struct tsortInfo_s * tsi_p, * tsi_q;
-    relation rel;
-    rpmElementType teType = rpmteType(p);
-    rpmsenseFlags flags, dsflags;
+    rpmsenseFlags dsflags;
 
     dsflags = rpmdsFlags(requires);
 
-    /* Avoid rpmlib feature and package config dependencies */
-    if (dsflags & (RPMSENSE_RPMLIB|RPMSENSE_CONFIG))
+    /* Avoid dependendencies which are not relevant for ordering */
+    if (dsflags & (RPMSENSE_RPMLIB|RPMSENSE_CONFIG|RPMSENSE_PRETRANS|RPMSENSE_POSTTRANS))
 	return 0;
 
     q = rpmalSatisfiesDepend(al, requires);
@@ -137,65 +158,41 @@ static inline int addRelation(rpmts ts,
     if (q == NULL || q == p)
 	return 0;
 
-    /* Avoid certain dependency relations. */
-    if (ignoreDep(ts, p, q))
-	return 0;
+    addSingleRelation(p, q, dsflags);
 
-    /* Erasures are reversed installs. */
-    if (teType == TR_REMOVED) {
-        rpmte r = p;
-        p = q;
-        q = r;
-	flags = isErasePreReq(dsflags);
-    } else {
-	flags = isInstallPreReq(dsflags);
+    return 0;
+}
+
+/*
+ * Collections might have special ordering requirements. Notably
+ * sepolicy collection requires having all the bits in the collection
+ * close to each other. We try to ensure this by creating a strongly
+ * connected component of such "grouped" collections, by introducing 
+ * an artificial relation loop across the all its members.
+ */
+static int addCollRelations(rpmal al, rpmte p, ARGV_t *seenColls)
+{
+    ARGV_const_t qcolls;
+
+    for (qcolls = rpmteCollections(p); qcolls && *qcolls; qcolls++) {
+	char * flags;
+	if (argvSearch(*seenColls, *qcolls, NULL))
+	    continue;
+
+	flags = rstrscat(NULL, "%{__collection_", *qcolls, "_flags}", NULL);
+	if (rpmExpandNumeric(flags) & 0x1) {
+	    rpmte *tes = rpmalAllInCollection(al, *qcolls);
+	    for (rpmte *te = tes; te && *te; te++) {
+		rpmte next = (*(te + 1) != NULL) ? *(te + 1) : *tes;
+		addSingleRelation(*te, next, RPMSENSE_ANY);
+	    }
+	    _free(tes);
+	}
+	free(flags);
+
+	argvAdd(seenColls, *qcolls);
+	argvSort(*seenColls, NULL);
     }
-
-    /* map legacy prereq to pre/preun as needed */
-    if (isLegacyPreReq(dsflags)) {
-	flags |= (teType == TR_ADDED) ?
-		 RPMSENSE_SCRIPT_PRE : RPMSENSE_SCRIPT_PREUN;
-    }
-
-    tsi_p = rpmteTSI(p);
-    tsi_q = rpmteTSI(q);
-
-    /* if relation got already added just update the flags */
-    if (tsi_q->tsi_relations && tsi_q->tsi_relations->rel_suc == p) {
-	tsi_q->tsi_relations->rel_flags |= flags;
-	tsi_p->tsi_forward_relations->rel_flags |= flags;
-	return 0;
-    }
-
-    /* Record next "q <- p" relation (i.e. "p" requires "q"). */
-    if (p != q) {
-	/* bump p predecessor count */
-	rpmteTSI(p)->tsi_count++;
-    }
-
-    /* Save max. depth in dependency tree */
-    if (rpmteDepth(p) <= rpmteDepth(q))
-	(void) rpmteSetDepth(p, (rpmteDepth(q) + 1));
-    if (rpmteDepth(p) > ts->maxDepth)
-	ts->maxDepth = rpmteDepth(p);
-
-    rel = xcalloc(1, sizeof(*rel));
-    rel->rel_suc = p;
-    rel->rel_flags = flags;
-
-    rel->rel_next = rpmteTSI(q)->tsi_relations;
-    rpmteTSI(q)->tsi_relations = rel;
-    if (p != q) {
-	/* bump q successor count */
-	rpmteTSI(q)->tsi_qcnt++;
-    }
-
-    rel = xcalloc(1, sizeof(*rel));
-    rel->rel_suc = q;
-    rel->rel_flags = flags;
-
-    rel->rel_next = rpmteTSI(p)->tsi_forward_relations;
-    rpmteTSI(p)->tsi_forward_relations = rel;
 
     return 0;
 }
@@ -207,15 +204,15 @@ static inline int addRelation(rpmts ts,
  * @retval rp		address of last element
  * @param prefcolor
  */
-static void addQ(rpmte p,
-		rpmte * qp,
-		rpmte * rp,
+static void addQ(tsortInfo p, tsortInfo * qp, tsortInfo * rp,
 		rpm_color_t prefcolor)
 {
-    rpmte q, qprev;
+    tsortInfo q, qprev;
+    rpm_color_t pcolor = rpmteColor(p->te);
+    int tailcond;
 
     /* Mark the package as queued. */
-    rpmteTSI(p)->tsi_reqx = 1;
+    p->tsi_reqx = 1;
 
     if ((*rp) == NULL) {	/* 1st element */
 	/* FIX: double indirection */
@@ -223,148 +220,152 @@ static void addQ(rpmte p,
 	return;
     }
 
-    /* Find location in queue using metric tsi_qcnt. */
+    if (rpmteType(p->te) == TR_ADDED)
+	tailcond = (pcolor && pcolor != prefcolor);
+    else
+	tailcond = (pcolor && pcolor == prefcolor);
+
+    /* Find location in queue using metric tsi_qcnt and color. */
     for (qprev = NULL, q = (*qp);
 	 q != NULL;
-	 qprev = q, q = rpmteTSI(q)->tsi_suc)
+	 qprev = q, q = q->tsi_suc)
     {
-	/* XXX Insure preferred color first. */
-	if (rpmteColor(p) != prefcolor && rpmteColor(p) != rpmteColor(q))
+	/* Place preferred color towards queue head on install, tail on erase */
+	if (tailcond && (pcolor != rpmteColor(q->te)))
 	    continue;
 
-	if (rpmteTSI(q)->tsi_qcnt <= rpmteTSI(p)->tsi_qcnt)
+	if (q->tsi_qcnt <= p->tsi_qcnt)
 	    break;
     }
 
     if (qprev == NULL) {	/* insert at beginning of list */
-	rpmteTSI(p)->tsi_suc = q;
+	p->tsi_suc = q;
 	(*qp) = p;		/* new head */
     } else if (q == NULL) {	/* insert at end of list */
-	rpmteTSI(qprev)->tsi_suc = p;
+	qprev->tsi_suc = p;
 	(*rp) = p;		/* new tail */
     } else {			/* insert between qprev and q */
-	rpmteTSI(p)->tsi_suc = q;
-	rpmteTSI(qprev)->tsi_suc = p;
+	p->tsi_suc = q;
+	qprev->tsi_suc = p;
+    }
+}
+
+typedef struct sccData_s {
+    int index;			/* DFS node number counter */
+    tsortInfo *stack;		/* Stack of nodes */
+    int stackcnt;		/* Stack top counter */
+    scc SCCs;			/* Array of SCC's found */
+    int sccCnt;			/* Number of SCC's found */
+} * sccData;
+
+static void tarjan(sccData sd, tsortInfo tsi)
+{
+    tsortInfo tsi_q;
+    relation rel;
+
+    /* use negative index numbers */
+    sd->index--;
+    /* Set the depth index for p */
+    tsi->tsi_SccIdx = sd->index;
+    tsi->tsi_SccLowlink = sd->index;
+
+    sd->stack[sd->stackcnt++] = tsi;                   /* Push p on the stack */
+    for (rel=tsi->tsi_relations; rel != NULL; rel=rel->rel_next) {
+	/* Consider successors of p */
+	tsi_q = rel->rel_suc;
+	if (tsi_q->tsi_SccIdx > 0)
+	    /* Ignore already found SCCs */
+	    continue;
+	if (tsi_q->tsi_SccIdx == 0){
+	    /* Was successor q not yet visited? */
+	    tarjan(sd, tsi_q);                       /* Recurse */
+	    /* negative index numers: use max as it is closer to 0 */
+	    tsi->tsi_SccLowlink = (
+		tsi->tsi_SccLowlink > tsi_q->tsi_SccLowlink
+		? tsi->tsi_SccLowlink : tsi_q->tsi_SccLowlink);
+	} else {
+	    tsi->tsi_SccLowlink = (
+		tsi->tsi_SccLowlink > tsi_q->tsi_SccIdx
+		? tsi->tsi_SccLowlink : tsi_q->tsi_SccIdx);
+	}
+    }
+
+    if (tsi->tsi_SccLowlink == tsi->tsi_SccIdx) {
+	/* v is the root of an SCC? */
+	if (sd->stack[sd->stackcnt-1] == tsi) {
+	    /* ignore trivial SCCs */
+	    tsi_q = sd->stack[--sd->stackcnt];
+	    tsi_q->tsi_SccIdx = 1;
+	} else {
+	    int stackIdx = sd->stackcnt;
+	    do {
+		tsi_q = sd->stack[--stackIdx];
+		tsi_q->tsi_SccIdx = sd->sccCnt;
+	    } while (tsi_q != tsi);
+
+	    stackIdx = sd->stackcnt;
+	    do {
+		tsi_q = sd->stack[--stackIdx];
+		/* Calculate count for the SCC */
+		sd->SCCs[sd->sccCnt].count += tsi_q->tsi_count;
+		/* Subtract internal relations */
+		for (rel=tsi_q->tsi_relations; rel != NULL;
+						    rel=rel->rel_next) {
+		    if (rel->rel_suc != tsi_q &&
+			    rel->rel_suc->tsi_SccIdx == sd->sccCnt)
+			sd->SCCs[sd->sccCnt].count--;
+		}
+	    } while (tsi_q != tsi);
+	    sd->SCCs[sd->sccCnt].size = sd->stackcnt - stackIdx;
+	    /* copy members */
+	    sd->SCCs[sd->sccCnt].members = xcalloc(sd->SCCs[sd->sccCnt].size,
+					   sizeof(tsortInfo));
+	    memcpy(sd->SCCs[sd->sccCnt].members, sd->stack + stackIdx,
+		   sd->SCCs[sd->sccCnt].size * sizeof(tsortInfo));
+	    sd->stackcnt = stackIdx;
+	    sd->sccCnt++;
+	}
     }
 }
 
 /* Search for SCCs and return an array last entry has a .size of 0 */
-static scc detectSCCs(rpmts ts)
+static scc detectSCCs(tsortInfo orderInfo, int nelem, int debugloops)
 {
-    int index = 0;                /* DFS node number counter */
-    rpmte stack[ts->orderCount];  /* An empty stack of nodes */
-    int stackcnt = 0;
-    rpmtsi pi;
-    rpmte p;
+    /* Set up data structures needed for the tarjan algorithm */
+    scc SCCs = xcalloc(nelem+3, sizeof(*SCCs));
+    tsortInfo *stack = xcalloc(nelem, sizeof(*stack));
+    struct sccData_s sd = { 0, stack, 0, SCCs, 2 };
 
-    int sccCnt = 2;
-    scc SCCs = xcalloc(ts->orderCount+3, sizeof(struct scc_s));
-
-    auto void tarjan(rpmte p);
-
-    void tarjan(rpmte p) {
-	tsortInfo tsi = rpmteTSI(p);
-	rpmte q;
-	tsortInfo tsi_q;
-	relation rel;
-
-        /* use negative index numbers */
-	index--;
-	/* Set the depth index for p */
-	tsi->tsi_SccIdx = index;
-	tsi->tsi_SccLowlink = index;
-
-	stack[stackcnt++] = p;                   /* Push p on the stack */
-	for (rel=tsi->tsi_relations; rel != NULL; rel=rel->rel_next) {
-	    /* Consider successors of p */
-	    q = rel->rel_suc;
-	    tsi_q = rpmteTSI(q);
-	    if (tsi_q->tsi_SccIdx > 0)
-		/* Ignore already found SCCs */
-		continue;
-	    if (tsi_q->tsi_SccIdx == 0){
-		/* Was successor q not yet visited? */
-		tarjan(q);                       /* Recurse */
-		/* negative index numers: use max as it is closer to 0 */
-		tsi->tsi_SccLowlink = (
-		    tsi->tsi_SccLowlink > tsi_q->tsi_SccLowlink
-		    ? tsi->tsi_SccLowlink : tsi_q->tsi_SccLowlink);
-	    } else {
-		tsi->tsi_SccLowlink = (
-		    tsi->tsi_SccLowlink > tsi_q->tsi_SccIdx
-		    ? tsi->tsi_SccLowlink : tsi_q->tsi_SccIdx);
-	    }
-	}
-
-	if (tsi->tsi_SccLowlink == tsi->tsi_SccIdx) {
-	    /* v is the root of an SCC? */
-	    if (stack[stackcnt-1] == p) {
-		/* ignore trivial SCCs */
-		q = stack[--stackcnt];
-		tsi_q = rpmteTSI(q);
-		tsi_q->tsi_SccIdx = 1;
-	    } else {
-		int stackIdx = stackcnt;
-		do {
-		    q = stack[--stackIdx];
-		    tsi_q = rpmteTSI(q);
-		    tsi_q->tsi_SccIdx = sccCnt;
-		} while (q != p);
-
-		stackIdx = stackcnt;
-		do {
-		    q = stack[--stackIdx];
-		    tsi_q = rpmteTSI(q);
-		    /* Calculate count for the SCC */
-		    SCCs[sccCnt].count += tsi_q->tsi_count;
-		    /* Subtract internal relations */
-		    for (rel=tsi_q->tsi_relations; rel != NULL;
-							rel=rel->rel_next) {
-			if (rel->rel_suc != q &&
-				rpmteTSI(rel->rel_suc)->tsi_SccIdx == sccCnt)
-			    SCCs[sccCnt].count--;
-		    }
-		} while (q != p);
-		SCCs[sccCnt].size = stackcnt - stackIdx;
-		/* copy members */
-		SCCs[sccCnt].members = xcalloc(SCCs[sccCnt].size,
-					       sizeof(rpmte));
-		memcpy(SCCs[sccCnt].members, stack + stackIdx,
-		       SCCs[sccCnt].size * sizeof(rpmte));
-		stackcnt = stackIdx;
-		sccCnt++;
-	    }
-	}
-    }
-
-    pi = rpmtsiInit(ts);
-    while ((p=rpmtsiNext(pi, 0)) != NULL) {
+    for (int i = 0; i < nelem; i++) {
+	tsortInfo tsi = &orderInfo[i];
 	/* Start a DFS at each node */
-	if (rpmteTSI(p)->tsi_SccIdx == 0)
-	    tarjan(p);
+	if (tsi->tsi_SccIdx == 0)
+	    tarjan(&sd, tsi);
     }
-    pi = rpmtsiFree(pi);
 
-    SCCs = xrealloc(SCCs, (sccCnt+1)*sizeof(struct scc_s));
+    free(stack);
+
+    SCCs = xrealloc(SCCs, (sd.sccCnt+1)*sizeof(struct scc_s));
+
     /* Debug output */
-    if (sccCnt > 2) {
-	int msglvl = (rpmtsFlags(ts) & RPMTRANS_FLAG_DEPLOOPS) ?
-		     RPMLOG_WARNING : RPMLOG_DEBUG;
-	rpmlog(msglvl, "%i Strongly Connected Components\n", sccCnt-2);
-	for (int i = 2; i < sccCnt; i++) {
-	    rpmlog(msglvl, "SCC #%i: requires %i packages\n",
-		   i, SCCs[i].count);
+    if (sd.sccCnt > 2) {
+	int msglvl = debugloops ?  RPMLOG_WARNING : RPMLOG_DEBUG;
+	rpmlog(msglvl, "%i Strongly Connected Components\n", sd.sccCnt-2);
+	for (int i = 2; i < sd.sccCnt; i++) {
+	    rpmlog(msglvl, "SCC #%i: %i members (%i external dependencies)\n",
+			   i-1, SCCs[i].size, SCCs[i].count);
+
 	    /* loop over members */
 	    for (int j = 0; j < SCCs[i].size; j++) {
-		rpmlog(msglvl, "\t%s\n", rpmteNEVRA(SCCs[i].members[j]));
+		tsortInfo member = SCCs[i].members[j];
+		rpmlog(msglvl, "\t%s\n", rpmteNEVRA(member->te));
 		/* show relations between members */
-		rpmte member = SCCs[i].members[j];
-		relation rel = rpmteTSI(member)->tsi_forward_relations;
+		relation rel = member->tsi_forward_relations;
 		for (; rel != NULL; rel=rel->rel_next) {
-		    if (rpmteTSI(rel->rel_suc)->tsi_SccIdx!=i) continue;
+		    if (rel->rel_suc->tsi_SccIdx!=i) continue;
 		    rpmlog(msglvl, "\t\t%s %s\n",
 			   rel->rel_flags ? "=>" : "->",
-			   rpmteNEVRA(rel->rel_suc));
+			   rpmteNEVRA(rel->rel_suc->te));
 		}
 	    }
 	}
@@ -372,115 +373,84 @@ static scc detectSCCs(rpmts ts)
     return SCCs;
 }
 
-static void collectTE(rpm_color_t prefcolor, rpmte q,
+static void collectTE(rpm_color_t prefcolor, tsortInfo q,
 		      rpmte * newOrder, int * newOrderCount,
 		      scc SCCs,
-		      rpmte * queue_end,
-		      rpmte * outer_queue,
-		      rpmte * outer_queue_end)
+		      tsortInfo * queue_end,
+		      tsortInfo * outer_queue,
+		      tsortInfo * outer_queue_end)
 {
-    int treex = rpmteTree(q);
-    int depth = rpmteDepth(q);
-    char deptypechar = (rpmteType(q) == TR_REMOVED ? '-' : '+');
-    tsortInfo tsi = rpmteTSI(q);
+    char deptypechar = (rpmteType(q->te) == TR_REMOVED ? '-' : '+');
 
-    rpmlog(RPMLOG_DEBUG, "%5d%5d%5d%5d%5d %*s%c%s\n",
-	   *newOrderCount, rpmteNpreds(q),
-	   rpmteTSI(q)->tsi_qcnt,
-	   treex, depth,
-	   (2 * depth), "",
-	   deptypechar,
-	   (rpmteNEVRA(q) ? rpmteNEVRA(q) : "???"));
+    if (rpmIsDebug()) {
+	int depth = 1;
+	/* figure depth in tree for nice formatting */
+	for (rpmte p = q->te; (p = rpmteParent(p)); depth++) {}
+	rpmlog(RPMLOG_DEBUG, "%5d%5d%5d%5d %*s%c%s\n",
+	       *newOrderCount, q->tsi_count, q->tsi_qcnt,
+	       depth, (2 * depth), "",
+	       deptypechar, rpmteNEVRA(q->te));
+    }
 
-    (void) rpmteSetDegree(q, 0);
-
-    newOrder[*newOrderCount] = q;
+    newOrder[*newOrderCount] = q->te;
     (*newOrderCount)++;
 
     /* T6. Erase relations. */
-    for (relation rel = rpmteTSI(q)->tsi_relations;
-	 				rel != NULL; rel = rel->rel_next) {
-	rpmte p = rel->rel_suc;
-	tsortInfo p_tsi = rpmteTSI(p);
+    for (relation rel = q->tsi_relations; rel != NULL; rel = rel->rel_next) {
+	tsortInfo p = rel->rel_suc;
 	/* ignore already collected packages */
-	if (p_tsi->tsi_SccIdx == 0) continue;
+	if (p->tsi_SccIdx == 0) continue;
 	if (p == q) continue;
 
-	if (p && (--p_tsi->tsi_count) == 0) {
+	if (p && (--p->tsi_count) == 0) {
+	    (void) rpmteSetParent(p->te, q->te);
 
-	    (void) rpmteSetTree(p, treex);
-	    (void) rpmteSetDepth(p, depth+1);
-	    (void) rpmteSetParent(p, q);
-	    (void) rpmteSetDegree(q, rpmteDegree(q)+1);
-
-	    if (tsi->tsi_SccIdx > 1 && tsi->tsi_SccIdx != p_tsi->tsi_SccIdx) {
+	    if (q->tsi_SccIdx > 1 && q->tsi_SccIdx != p->tsi_SccIdx) {
                 /* Relation point outside of this SCC: add to outside queue */
 		assert(outer_queue != NULL && outer_queue_end != NULL);
 		addQ(p, outer_queue, outer_queue_end, prefcolor);
 	    } else {
-		addQ(p, &tsi->tsi_suc, queue_end, prefcolor);
+		addQ(p, &q->tsi_suc, queue_end, prefcolor);
 	    }
 	}
-	if (p && p_tsi->tsi_SccIdx > 1 &&
-	                 p_tsi->tsi_SccIdx != rpmteTSI(q)->tsi_SccIdx) {
-	    if (--SCCs[p_tsi->tsi_SccIdx].count == 0) {
+	if (p && p->tsi_SccIdx > 1 &&
+	                 p->tsi_SccIdx != q->tsi_SccIdx) {
+	    if (--SCCs[p->tsi_SccIdx].count == 0) {
 		/* New SCC is ready, add this package as representative */
-
-		(void) rpmteSetTree(p, treex);
-		(void) rpmteSetDepth(p, depth+1);
-		(void) rpmteSetParent(p, q);
-		(void) rpmteSetDegree(q, rpmteDegree(q)+1);
+		(void) rpmteSetParent(p->te, q->te);
 
 		if (outer_queue != NULL) {
 		    addQ(p, outer_queue, outer_queue_end, prefcolor);
 		} else {
-		    addQ(p, &rpmteTSI(q)->tsi_suc, queue_end, prefcolor);
+		    addQ(p, &q->tsi_suc, queue_end, prefcolor);
 		}
 	    }
 	}
     }
-    tsi->tsi_SccIdx = 0;
+    q->tsi_SccIdx = 0;
 }
 
-static void collectSCC(rpm_color_t prefcolor, rpmte p,
-		       rpmte * newOrder, int * newOrderCount,
-		       scc SCCs, rpmte * queue_end)
+static void dijkstra(const struct scc_s *SCC, int sccNr)
 {
-    int sccNr = rpmteTSI(p)->tsi_SccIdx;
-    struct scc_s SCC = SCCs[sccNr];
-    int i;
     int start, end;
     relation rel;
 
-    /* remove p from the outer queue */
-    rpmte outer_queue_start = rpmteTSI(p)->tsi_suc;
-    rpmteTSI(p)->tsi_suc = NULL;
-
-    /*
-     * Run a multi source Dijkstra's algorithm to find relations
-     * that can be zapped with least danger to pre reqs.
-     * As weight of the edges is always 1 it is not necessary to
-     * sort the vertices by distance as the queue gets them
-     * already in order
-    */
-
     /* can use a simple queue as edge weights are always 1 */
-    rpmte * queue = xmalloc((SCC.size+1) * sizeof(rpmte));
+    tsortInfo * queue = xmalloc((SCC->size+1) * sizeof(*queue));
 
     /*
      * Find packages that are prerequired and use them as
      * starting points for the Dijkstra algorithm
      */
     start = end = 0;
-    for (i = 0; i < SCC.size; i++) {
-	rpmte q = SCC.members[i];
-	tsortInfo tsi = rpmteTSI(q);
+    for (int i = 0; i < SCC->size; i++) {
+	tsortInfo tsi = SCC->members[i];
 	tsi->tsi_SccLowlink = INT_MAX;
 	for (rel=tsi->tsi_forward_relations; rel != NULL; rel=rel->rel_next) {
-	    if (rel->rel_flags && rpmteTSI(rel->rel_suc)->tsi_SccIdx == sccNr) {
-		if (rel->rel_suc != q) {
+	    if (rel->rel_flags && rel->rel_suc->tsi_SccIdx == sccNr) {
+		if (rel->rel_suc != tsi) {
 		    tsi->tsi_SccLowlink =  0;
-		    queue[end++] = q;
+		    queue[end++] = tsi;
 		} else {
 		    tsi->tsi_SccLowlink =  INT_MAX/2;
 		}
@@ -490,21 +460,19 @@ static void collectSCC(rpm_color_t prefcolor, rpmte p,
     }
 
     if (start == end) { /* no regular prereqs; add self prereqs to queue */
-	for (i = 0; i < SCC.size; i++) {
-	    rpmte q = SCC.members[i];
-	    tsortInfo tsi = rpmteTSI(q);
+	for (int i = 0; i < SCC->size; i++) {
+	    tsortInfo tsi = SCC->members[i];
 	    if (tsi->tsi_SccLowlink != INT_MAX) {
-		queue[end++] = q;
+		queue[end++] = tsi;
 	    }
 	}
     }
 
     /* Do Dijkstra */
     while (start != end) {
-	rpmte q = queue[start++];
-	tsortInfo tsi = rpmteTSI(q);
+	tsortInfo tsi = queue[start++];
 	for (rel=tsi->tsi_forward_relations; rel != NULL; rel=rel->rel_next) {
-	    tsortInfo next_tsi = rpmteTSI(rel->rel_suc);
+	    tsortInfo next_tsi = rel->rel_suc;
 	    if (next_tsi->tsi_SccIdx != sccNr) continue;
 	    if (next_tsi->tsi_SccLowlink > tsi->tsi_SccLowlink+1) {
 		next_tsi->tsi_SccLowlink = tsi->tsi_SccLowlink + 1;
@@ -512,22 +480,41 @@ static void collectSCC(rpm_color_t prefcolor, rpmte p,
 	    }
 	}
     }
-    queue = _free(queue);
+    free(queue);
+}
 
+static void collectSCC(rpm_color_t prefcolor, tsortInfo p_tsi,
+		       rpmte * newOrder, int * newOrderCount,
+		       scc SCCs, tsortInfo * queue_end)
+{
+    int sccNr = p_tsi->tsi_SccIdx;
+    const struct scc_s * SCC = SCCs+sccNr;
+
+    /* remove p from the outer queue */
+    tsortInfo outer_queue_start = p_tsi->tsi_suc;
+    p_tsi->tsi_suc = NULL;
+
+    /*
+     * Run a multi source Dijkstra's algorithm to find relations
+     * that can be zapped with least danger to pre reqs.
+     * As weight of the edges is always 1 it is not necessary to
+     * sort the vertices by distance as the queue gets them
+     * already in order
+    */
+    dijkstra(SCC, sccNr);
 
     while (1) {
-	rpmte best = NULL;
-	rpmte inner_queue_start, inner_queue_end;
+	tsortInfo best = NULL;
+	tsortInfo inner_queue_start, inner_queue_end;
 	int best_score = 0;
 
 	/* select best candidate to start with */
-	for (int i = 0; i < SCC.size; i++) {
-	    rpmte q = SCC.members[i];
-	    tsortInfo tsi = rpmteTSI(q);
+	for (int i = 0; i < SCC->size; i++) {
+	    tsortInfo tsi = SCC->members[i];
 	    if (tsi->tsi_SccIdx == 0) /* package already collected */
 		continue;
 	    if (tsi->tsi_SccLowlink >= best_score) {
-		best = q;
+		best = tsi;
 		best_score = tsi->tsi_SccLowlink;
 	    }
 	}
@@ -540,139 +527,121 @@ static void collectSCC(rpm_color_t prefcolor, rpmte p,
 	addQ(best, &inner_queue_start, &inner_queue_end, prefcolor);
 
 	for (; inner_queue_start != NULL;
-	     inner_queue_start = rpmteTSI(inner_queue_start)->tsi_suc) {
+	     inner_queue_start = inner_queue_start->tsi_suc) {
 	    /* Mark the package as unqueued. */
-	    rpmteTSI(inner_queue_start)->tsi_reqx = 0;
+	    inner_queue_start->tsi_reqx = 0;
 	    collectTE(prefcolor, inner_queue_start, newOrder, newOrderCount,
 		      SCCs, &inner_queue_end, &outer_queue_start, queue_end);
 	}
     }
 
     /* restore outer queue */
-    rpmteTSI(p)->tsi_suc = outer_queue_start;
+    p_tsi->tsi_suc = outer_queue_start;
 }
 
 int rpmtsOrder(rpmts ts)
 {
+    tsMembers tsmem = rpmtsMembers(ts);
     rpm_color_t prefcolor = rpmtsPrefColor(ts);
     rpmtsi pi; rpmte p;
-    rpmte q;
-    rpmte r;
+    tsortInfo q, r;
     rpmte * newOrder;
     int newOrderCount = 0;
-    int treex;
     int rc;
-    rpmal erasedPackages = rpmalCreate(5, rpmtsColor(ts), prefcolor);
+    rpmal erasedPackages;
     scc SCCs;
+    int nelem = rpmtsNElements(ts);
+    tsortInfo sortInfo = xcalloc(nelem, sizeof(struct tsortInfo_s));
+    ARGV_t seenColls = NULL;
 
     (void) rpmswEnter(rpmtsOp(ts, RPMTS_OP_ORDER), 0);
 
-    /*
-     * XXX FIXME: this gets needlesly called twice on normal usage patterns,
-     * should track the need for generating the index somewhere
-     */
-    rpmalMakeIndex(ts->addedPackages);
-
     /* Create erased package index. */
-    pi = rpmtsiInit(ts);
-    while ((p = rpmtsiNext(pi, TR_REMOVED)) != NULL) {
-        rpmalAdd(erasedPackages, p);
-    }
-    pi = rpmtsiFree(pi);
-    rpmalMakeIndex(erasedPackages);
+    erasedPackages = rpmtsCreateAl(ts, TR_REMOVED);
 
-    pi = rpmtsiInit(ts);
-    while ((p = rpmtsiNext(pi, 0)) != NULL)
-	rpmteNewTSI(p);
-    pi = rpmtsiFree(pi);
+    for (int i = 0; i < nelem; i++) {
+	sortInfo[i].te = tsmem->order[i];
+	rpmteSetTSI(tsmem->order[i], &sortInfo[i]);
+    }
 
     /* Record relations. */
     rpmlog(RPMLOG_DEBUG, "========== recording tsort relations\n");
     pi = rpmtsiInit(ts);
     while ((p = rpmtsiNext(pi, 0)) != NULL) {
 	rpmal al = (rpmteType(p) == TR_REMOVED) ? 
-		   erasedPackages : ts->addedPackages;
+		   erasedPackages : tsmem->addedPackages;
 	rpmds requires = rpmdsInit(rpmteDS(p, RPMTAG_REQUIRENAME));
+	rpmds order = rpmdsInit(rpmteDS(p, RPMTAG_ORDERNAME));
 
 	while (rpmdsNext(requires) >= 0) {
 	    /* Record next "q <- p" relation (i.e. "p" requires "q"). */
 	    (void) addRelation(ts, al, p, requires);
 	}
+
+	while (rpmdsNext(order) >= 0) {
+	    /* Record next "q <- p" ordering request */
+	    (void) addRelation(ts, al, p, order);
+	}
+
+	addCollRelations(al, p, &seenColls);
     }
-    pi = rpmtsiFree(pi);
 
-    /* Save predecessor count and mark tree roots. */
-    treex = 0;
-    pi = rpmtsiInit(ts);
-    while ((p = rpmtsiNext(pi, 0)) != NULL) {
-	int npreds = rpmteTSI(p)->tsi_count;
+    seenColls = argvFree(seenColls);
+    rpmtsiFree(pi);
 
-	(void) rpmteSetNpreds(p, npreds);
-	(void) rpmteSetDepth(p, 1);
+    newOrder = xcalloc(tsmem->orderCount, sizeof(*newOrder));
+    SCCs = detectSCCs(sortInfo, nelem, (rpmtsFlags(ts) & RPMTRANS_FLAG_DEPLOOPS));
 
-	if (npreds == 0)
-	    (void) rpmteSetTree(p, treex++);
-	else
-	    (void) rpmteSetTree(p, -1);
-    }
-    pi = rpmtsiFree(pi);
-    ts->ntrees = treex;
-
-    newOrder = xcalloc(ts->orderCount, sizeof(*newOrder));
-    SCCs = detectSCCs(ts);
-
-    rpmlog(RPMLOG_DEBUG, "========== tsorting packages (order, #predecessors, #succesors, tree, depth)\n");
+    rpmlog(RPMLOG_DEBUG, "========== tsorting packages (order, #predecessors, #succesors, depth)\n");
 
     for (int i = 0; i < 2; i++) {
 	/* Do two separate runs: installs first - then erases */
 	int oType = !i ? TR_ADDED : TR_REMOVED;
 	q = r = NULL;
-	pi = rpmtsiInit(ts);
 	/* Scan for zeroes and add them to the queue */
-	while ((p = rpmtsiNext(pi, oType)) != NULL) {
-	    if (rpmteTSI(p)->tsi_count != 0)
+	for (int e = 0; e < nelem; e++) {
+	    tsortInfo p = &sortInfo[e];
+	    if (rpmteType(p->te) != oType) continue;
+	    if (p->tsi_count != 0)
 		continue;
-	    rpmteTSI(p)->tsi_suc = NULL;
+	    p->tsi_suc = NULL;
 	    addQ(p, &q, &r, prefcolor);
 	}
-	pi = rpmtsiFree(pi);
 
 	/* Add one member of each leaf SCC */
 	for (int i = 2; SCCs[i].members != NULL; i++) {
-	    if (SCCs[i].count == 0 && rpmteType(SCCs[i].members[0]) == oType) {
-		p = SCCs[i].members[0];
-		rpmteTSI(p)->tsi_suc = NULL;
-		addQ(p, &q, &r, prefcolor);
+	    tsortInfo member = SCCs[i].members[0];
+	    if (SCCs[i].count == 0 && rpmteType(member->te) == oType) {
+		addQ(member, &q, &r, prefcolor);
 	    }
 	}
 
-	/* Process queue */
-	for (; q != NULL; q = rpmteTSI(q)->tsi_suc) {
+	while (q != NULL) {
 	    /* Mark the package as unqueued. */
-	    rpmteTSI(q)->tsi_reqx = 0;
-	    if (rpmteTSI(q)->tsi_SccIdx > 1) {
+	    q->tsi_reqx = 0;
+	    if (q->tsi_SccIdx > 1) {
 		collectSCC(prefcolor, q, newOrder, &newOrderCount, SCCs, &r);
 	    } else {
 		collectTE(prefcolor, q, newOrder, &newOrderCount, SCCs, &r,
 			  NULL, NULL);
 	    }
+	    q = q->tsi_suc;
 	}
     }
 
     /* Clean up tsort data */
-    pi = rpmtsiInit(ts);
-    while ((p = rpmtsiNext(pi, 0)) != NULL)
-	rpmteFreeTSI(p);
-    pi = rpmtsiFree(pi);
+    for (int i = 0; i < nelem; i++) {
+	rpmteSetTSI(tsmem->order[i], NULL);
+	rpmTSIFree(&sortInfo[i]);
+    }
+    free(sortInfo);
 
-    assert(newOrderCount == ts->orderCount);
+    assert(newOrderCount == tsmem->orderCount);
 
-    ts->order = _free(ts->order);
-    ts->order = newOrder;
-    ts->orderAlloced = ts->orderCount;
+    tsmem->order = _free(tsmem->order);
+    tsmem->order = newOrder;
+    tsmem->orderAlloced = tsmem->orderCount;
     rc = 0;
-
-    freeBadDeps();
 
     for (int i = 2; SCCs[i].members != NULL; i++) {
 	free(SCCs[i].members);

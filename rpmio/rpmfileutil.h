@@ -23,7 +23,10 @@ typedef enum rpmCompressedMagic_e {
     COMPRESSED_BZIP2		= 2,	/*!< bzip2 can handle */
     COMPRESSED_ZIP		= 3,	/*!< unzip can handle */
     COMPRESSED_LZMA		= 4,	/*!< lzma can handle */
-    COMPRESSED_XZ		= 5	/*!< xz can handle */
+    COMPRESSED_XZ		= 5,	/*!< xz can handle */
+    COMPRESSED_LZIP		= 6,	/*!< lzip can handle */
+    COMPRESSED_LRZIP		= 7,	/*!< lrzip can handle */
+    COMPRESSED_7ZIP		= 8	/*!< 7zip can handle */
 } rpmCompressedMagic;
 
 /** \ingroup rpmfileutil
@@ -35,7 +38,7 @@ typedef enum rpmCompressedMagic_e {
  * @retval *fsizep	file size pointer (or NULL)
  * @return		0 on success, 1 on error
  */
-int rpmDoDigest(pgpHashAlgo algo, const char * fn,int asAscii,
+int rpmDoDigest(int algo, const char * fn,int asAscii,
 		  unsigned char * digest, rpm_loff_t * fsizep);
 
 /** \ingroup rpmfileutil
@@ -104,6 +107,14 @@ char * rpmGenPath	(const char * urlroot,
  * @return		canonicalized path (malloc'ed)
  */
 char * rpmGetPath (const char * path, ...) RPM_GNUC_NULL_TERMINATED;
+
+/** \ingroup rpmfileutil
+ * Check whether pattern contains any glob metacharacters.
+ * @param pattern	glob pattern
+ * @param quote		allow backslash quoting of metacharacters?
+ * @return		1 if pattern contains globs, 0 otherwise
+ */
+int rpmIsGlob(const char * pattern, int quote);
 
 /** \ingroup rpmfileutil
  * Return URL path(s) from a (URL prefixed) pattern glob.

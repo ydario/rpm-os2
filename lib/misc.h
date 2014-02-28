@@ -8,6 +8,7 @@
 
 #include <string.h>
 #include <rpm/rpmtypes.h>
+#include <rpm/header.h>		/* for headerGetFlags typedef, duh.. */
 
 #ifdef __cplusplus
 extern "C" {
@@ -17,24 +18,23 @@ extern "C" {
 RPM_GNUC_INTERNAL
 int rpmIsKnownArch(const char *name);
 
-/*
- * These may be called w/ a NULL argument to flush the cache -- they return
- * -1 if the user can't be found.
- */
 RPM_GNUC_INTERNAL
-int     unameToUid(const char * thisUname, uid_t * uid);
+char * rpmVerifyString(uint32_t verifyResult, const char *pad);
 
 RPM_GNUC_INTERNAL
-int     gnameToGid(const char * thisGname, gid_t * gid);
+char * rpmFFlagsString(uint32_t fflags, const char *pad);
 
-/*
- * Call w/ -1 to flush the cache, returns NULL if the user can't be found.
- */
-RPM_GNUC_INTERNAL
-const char * uidToUname(uid_t uid);
+typedef char * (*headerTagFormatFunction) (rpmtd td);
+typedef int (*headerTagTagFunction) (Header h, rpmtd td, headerGetFlags hgflags);
 
 RPM_GNUC_INTERNAL
-const char * gidToGname(gid_t gid);
+headerTagTagFunction rpmHeaderTagFunc(rpmTagVal tag);
+
+RPM_GNUC_INTERNAL
+headerTagFormatFunction rpmHeaderFormatFuncByName(const char *fmt);
+
+RPM_GNUC_INTERNAL
+headerTagFormatFunction rpmHeaderFormatFuncByValue(rpmtdFormats fmt);
 
 #ifdef __cplusplus
 }

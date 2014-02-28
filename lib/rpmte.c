@@ -6,16 +6,21 @@
 
 #include <rpm/rpmtypes.h>
 #include <rpm/rpmlib.h>		/* RPM_MACHTABLE_* */
+#include <rpm/rpmmacro.h>
 #include <rpm/rpmds.h>
 #include <rpm/rpmfi.h>
 #include <rpm/rpmts.h>
 #include <rpm/rpmdb.h>
+#include <rpm/rpmlog.h>
 
+#include "lib/rpmplugins.h"
 #include "lib/rpmte_internal.h"
+/* strpool-related interfaces */
+#include "lib/rpmfi_internal.h"
+#include "lib/rpmds_internal.h"
+#include "lib/rpmts_internal.h"
 
 #include "debug.h"
-
-int _rpmte_debug = 0;
 
 /** \ingroup rpmte
  * A single package instance to be installed/removed atomically.
@@ -32,34 +37,31 @@ struct rpmte_s {
     char * release;		/*!< Release: */
     char * arch;		/*!< Architecture hint. */
     char * os;			/*!< Operating system hint. */
-    int archScore;		/*!< (TR_ADDED) Arch score. */
-    int osScore;		/*!< (TR_ADDED) Os score. */
     int isSource;		/*!< (TR_ADDED) source rpm? */
 
     rpmte depends;              /*!< Package updated by this package (ERASE te) */
     rpmte parent;		/*!< Parent transaction element. */
-    int degree;			/*!< No. of immediate children. */
-    int npreds;			/*!< No. of predecessors. */
-    int tree;			/*!< Tree index. */
-    int depth;			/*!< Depth in dependency tree. */
-    int breadth;		/*!< Breadth in dependency tree. */
     unsigned int db_instance;	/*!< Database instance (of removed pkgs) */
     tsortInfo tsi;		/*!< Dependency ordering chains. */
 
-    rpmds this;			/*!< This package's provided NEVR. */
+    rpmds thisds;		/*!< This package's provided NEVR. */
     rpmds provides;		/*!< Provides: dependencies. */
     rpmds requires;		/*!< Requires: dependencies. */
     rpmds conflicts;		/*!< Conflicts: dependencies. */
     rpmds obsoletes;		/*!< Obsoletes: dependencies. */
+    rpmds order;		/*!< Order: dependencies. */
     rpmfi fi;			/*!< File information. */
     rpmps probs;		/*!< Problems (relocations) */
+    rpmts ts;			/*!< Parent transaction */
 
     rpm_color_t color;		/*!< Color bit(s) from package dependencies. */
     rpm_loff_t pkgFileSize;	/*!< No. of bytes in package file (approx). */
+    unsigned int headerSize;	/*!< No. of bytes in package header */
 
     fnpyKey key;		/*!< (TR_ADDED) Retrieval key. */
     rpmRelocation * relocs;	/*!< (TR_ADDED) Payload file relocations. */
     int nrelocs;		/*!< (TR_ADDED) No. of relocations. */
+    uint8_t *badrelocs;		/*!< (TR_ADDED) Bad relocations (or NULL) */
     FD_t fd;			/*!< (TR_ADDED) Payload file descriptor. */
 
 #define RPMTE_HAVE_PRETRANS	(1 << 0)
@@ -68,70 +70,40 @@ struct rpmte_s {
     int failed;			/*!< (parent) install/erase failed */
 
     rpmfs fs;
+
+    ARGV_t lastInCollectionsAny;	/*!< list of collections this te is the last to be installed or removed */
+    ARGV_t lastInCollectionsAdd;	/*!< list of collections this te is the last to be only installed */
+    ARGV_t firstInCollectionsRemove;	/*!< list of collections this te is the first to be only removed */
+    ARGV_t collections;			/*!< list of collections */
 };
 
+/* forward declarations */
+static void rpmteColorDS(rpmte te, rpmTag tag);
+static int rpmteClose(rpmte te, int reset_fi);
 
 void rpmteCleanDS(rpmte te)
 {
-    te->this = rpmdsFree(te->this);
+    te->thisds = rpmdsFree(te->thisds);
     te->provides = rpmdsFree(te->provides);
     te->requires = rpmdsFree(te->requires);
     te->conflicts = rpmdsFree(te->conflicts);
     te->obsoletes = rpmdsFree(te->obsoletes);
+    te->order = rpmdsFree(te->order);
 }
 
-/**
- * Destroy transaction element data.
- * @param p		transaction element
- */
-static void delTE(rpmte p)
-{
-    if (p->relocs) {
-	for (int i = 0; i < p->nrelocs; i++) {
-	    free(p->relocs[i].oldPath);
-	    free(p->relocs[i].newPath);
-	}
-	free(p->relocs);
-    }
-
-    rpmteCleanDS(p);
-
-    p->fi = rpmfiFree(p->fi);
-
-    if (p->fd != NULL)
-        p->fd = fdFree(p->fd, RPMDBG_M("delTE"));
-
-    p->os = _free(p->os);
-    p->arch = _free(p->arch);
-    p->epoch = _free(p->epoch);
-    p->name = _free(p->name);
-    p->version = _free(p->version);
-    p->release = _free(p->release);
-    p->NEVR = _free(p->NEVR);
-    p->NEVRA = _free(p->NEVRA);
-
-    p->h = headerFree(p->h);
-    p->fs = rpmfsFree(p->fs);
-    p->probs = rpmpsFree(p->probs);
-
-    memset(p, 0, sizeof(*p));	/* XXX trash and burn */
-    /* FIX: p->{NEVR,name} annotations */
-    return;
-}
-
-static rpmfi getFI(rpmte p, rpmts ts, Header h)
+static rpmfi getFI(rpmte p, Header h)
 {
     rpmfiFlags fiflags;
     fiflags = (p->type == TR_ADDED) ? (RPMFI_NOHEADER | RPMFI_FLAGS_INSTALL) :
 				      (RPMFI_NOHEADER | RPMFI_FLAGS_ERASE);
 
     /* relocate stuff in header if necessary */
-    if (rpmteType(p) == TR_ADDED && rpmfsFC(p->fs) > 0) {
+    if (rpmteType(p) == TR_ADDED && rpmfsFC(p->fs) > 0 && p->nrelocs) {
 	if (!headerIsSource(h) && !headerIsEntry(h, RPMTAG_ORIGBASENAMES)) {
 	    rpmRelocateFileList(p->relocs, p->nrelocs, p->fs, h);
 	}
     }
-    return rpmfiNew(ts, h, RPMTAG_BASENAMES, fiflags);
+    return rpmfiNewPool(rpmtsPool(p->ts), h, RPMTAG_BASENAMES, fiflags);
 }
 
 /* stupid bubble sort, but it's probably faster here */
@@ -154,7 +126,15 @@ static void sortRelocs(rpmRelocation *relocations, int numRelocations)
     }
 }
 
-static void buildRelocs(rpmts ts, rpmte p, Header h, rpmRelocation *relocs)
+static char * stripTrailingChar(char * s, char c)
+{
+    char * t;
+    for (t = s + strlen(s) - 1; *t == c && t >= s; t--)
+	*t = '\0';
+    return s;
+}
+
+static void buildRelocs(rpmte p, Header h, rpmRelocation *relocs)
 {
     int i;
     struct rpmtd_s validRelocs;
@@ -203,12 +183,9 @@ static void buildRelocs(rpmts ts, rpmte p, Header h, rpmRelocation *relocs)
 	    }
 
 	    if (!valid) {
-		if (p->probs == NULL) {
-		    p->probs = rpmpsCreate();
-		}
-		rpmpsAppend(p->probs, RPMPROB_BADRELOCATE,
-			rpmteNEVRA(p), rpmteKey(p),
-			p->relocs[i].oldPath, NULL, NULL, 0);
+		if (p->badrelocs == NULL)
+		    p->badrelocs = xcalloc(p->nrelocs, sizeof(*p->badrelocs));
+		p->badrelocs[i] = 1;
 	    }
 	} else {
 	    p->relocs[i].newPath = NULL;
@@ -223,27 +200,33 @@ static void buildRelocs(rpmts ts, rpmte p, Header h, rpmRelocation *relocs)
 
 /**
  * Initialize transaction element data from header.
- * @param ts		transaction set
  * @param p		transaction element
  * @param h		header
  * @param key		(TR_ADDED) package retrieval key (e.g. file name)
  * @param relocs	(TR_ADDED) package file relocations
  */
-static void addTE(rpmts ts, rpmte p, Header h,
-		fnpyKey key,
-		rpmRelocation * relocs)
+static int addTE(rpmte p, Header h, fnpyKey key, rpmRelocation * relocs)
 {
+    rpmstrPool tspool = rpmtsPool(p->ts);
+    struct rpmtd_s colls, bnames;
+    int rc = 1; /* assume failure */
+
     p->name = headerGetAsString(h, RPMTAG_NAME);
     p->version = headerGetAsString(h, RPMTAG_VERSION);
     p->release = headerGetAsString(h, RPMTAG_RELEASE);
 
+    /* name, version and release are required in all packages */
+    if (p->name == NULL || p->version == NULL || p->release == NULL)
+	goto exit;
+
     p->epoch = headerGetAsString(h, RPMTAG_EPOCH);
 
     p->arch = headerGetAsString(h, RPMTAG_ARCH);
-    p->archScore = p->arch ? rpmMachineScore(RPM_MACHTABLE_INSTARCH, p->arch) : 0;
-
     p->os = headerGetAsString(h, RPMTAG_OS);
-    p->osScore = p->os ? rpmMachineScore(RPM_MACHTABLE_INSTOS, p->os) : 0;
+
+    /* gpg-pubkey's dont have os or arch (sigh), for others they are required */
+    if (!rstreq(p->name, "gpg-pubkey") && (p->arch == NULL || p->os == NULL))
+	goto exit;
 
     p->isSource = headerIsSource(h);
     
@@ -252,76 +235,117 @@ static void addTE(rpmts ts, rpmte p, Header h,
 
     p->nrelocs = 0;
     p->relocs = NULL;
+    p->badrelocs = NULL;
     if (relocs != NULL)
-	buildRelocs(ts, p, h, relocs);
+	buildRelocs(p, h, relocs);
 
     p->db_instance = headerGetInstance(h);
     p->key = key;
     p->fd = NULL;
 
     p->pkgFileSize = 0;
+    p->headerSize = headerSizeof(h, HEADER_MAGIC_NO);
 
-    p->this = rpmdsThis(h, RPMTAG_PROVIDENAME, RPMSENSE_EQUAL);
-    p->provides = rpmdsNew(h, RPMTAG_PROVIDENAME, 0);
-    p->requires = rpmdsNew(h, RPMTAG_REQUIRENAME, 0);
-    p->conflicts = rpmdsNew(h, RPMTAG_CONFLICTNAME, 0);
-    p->obsoletes = rpmdsNew(h, RPMTAG_OBSOLETENAME, 0);
+    p->thisds = rpmdsThisPool(tspool, h, RPMTAG_PROVIDENAME, RPMSENSE_EQUAL);
+    p->provides = rpmdsNewPool(tspool, h, RPMTAG_PROVIDENAME, 0);
+    p->requires = rpmdsNewPool(tspool, h, RPMTAG_REQUIRENAME, 0);
+    p->conflicts = rpmdsNewPool(tspool, h, RPMTAG_CONFLICTNAME, 0);
+    p->obsoletes = rpmdsNewPool(tspool, h, RPMTAG_OBSOLETENAME, 0);
+    p->order = rpmdsNewPool(tspool, h, RPMTAG_ORDERNAME, 0);
 
-    {
-	// get number of files by hand as rpmfiNew needs p->fs
-	struct rpmtd_s bnames;
-	headerGet(h, RPMTAG_BASENAMES, &bnames, HEADERGET_MINMEM);
+    /* Relocation needs to know file count before rpmfiNew() */
+    headerGet(h, RPMTAG_BASENAMES, &bnames, HEADERGET_MINMEM);
+    p->fs = rpmfsNew(rpmtdCount(&bnames), (p->type == TR_ADDED));
+    rpmtdFreeData(&bnames);
 
-	p->fs = rpmfsNew(rpmtdCount(&bnames), p->type);
+    p->fi = getFI(p, h);
 
-	rpmtdFreeData(&bnames);
-    }
-    p->fi = getFI(p, ts, h);
+    /* Packages with no files return an empty file info set, NULL is an error */
+    if (p->fi == NULL)
+	goto exit;
 
     /* See if we have pre/posttrans scripts. */
-    p->transscripts |= (headerIsEntry(h, RPMTAG_PRETRANS) &&
+    p->transscripts |= (headerIsEntry(h, RPMTAG_PRETRANS) ||
 			 headerIsEntry(h, RPMTAG_PRETRANSPROG)) ?
 			RPMTE_HAVE_PRETRANS : 0;
-    p->transscripts |= (headerIsEntry(h, RPMTAG_POSTTRANS) &&
+    p->transscripts |= (headerIsEntry(h, RPMTAG_POSTTRANS) ||
 			 headerIsEntry(h, RPMTAG_POSTTRANSPROG)) ?
 			RPMTE_HAVE_POSTTRANS : 0;
 
+    p->lastInCollectionsAny = NULL;
+    p->lastInCollectionsAdd = NULL;
+    p->firstInCollectionsRemove = NULL;
+    p->collections = NULL;
+    if (headerGet(h, RPMTAG_COLLECTIONS, &colls, HEADERGET_MINMEM)) {
+	const char *collname;
+	while ((collname = rpmtdNextString(&colls))) {
+	    argvAdd(&p->collections, collname);
+	}
+	argvSort(p->collections, NULL);
+	rpmtdFreeData(&colls);
+    }
+
     rpmteColorDS(p, RPMTAG_PROVIDENAME);
     rpmteColorDS(p, RPMTAG_REQUIRENAME);
-    return;
+
+    if (p->type == TR_ADDED)
+	p->pkgFileSize = headerGetNumber(h, RPMTAG_LONGSIGSIZE) + 96 + 256;
+
+    rc = 0;
+
+exit:
+    return rc;
 }
 
 rpmte rpmteFree(rpmte te)
 {
     if (te != NULL) {
-	delTE(te);
-	te = _free(te);
+	if (te->relocs) {
+	    for (int i = 0; i < te->nrelocs; i++) {
+		free(te->relocs[i].oldPath);
+		free(te->relocs[i].newPath);
+	    }
+	    free(te->relocs);
+	    free(te->badrelocs);
+	}
+
+	free(te->os);
+	free(te->arch);
+	free(te->epoch);
+	free(te->name);
+	free(te->version);
+	free(te->release);
+	free(te->NEVR);
+	free(te->NEVRA);
+
+	fdFree(te->fd);
+	rpmfiFree(te->fi);
+	headerFree(te->h);
+	rpmfsFree(te->fs);
+	rpmpsFree(te->probs);
+	rpmteCleanDS(te);
+
+	argvFree(te->collections);
+	argvFree(te->lastInCollectionsAny);
+	argvFree(te->lastInCollectionsAdd);
+	argvFree(te->firstInCollectionsRemove);
+
+	memset(te, 0, sizeof(*te));	/* XXX trash and burn */
+	free(te);
     }
     return NULL;
 }
 
-rpmte rpmteNew(const rpmts ts, Header h,
-		rpmElementType type,
-		fnpyKey key,
-		rpmRelocation * relocs,
-		int dboffset)
+rpmte rpmteNew(rpmts ts, Header h, rpmElementType type, fnpyKey key,
+	       rpmRelocation * relocs)
 {
     rpmte p = xcalloc(1, sizeof(*p));
-    uint32_t *ep; 
-    struct rpmtd_s size;
-
+    p->ts = ts;
     p->type = type;
-    addTE(ts, p, h, key, relocs);
-    switch (type) {
-    case TR_ADDED:
-	headerGet(h, RPMTAG_SIGSIZE, &size, HEADERGET_DEFAULT);
-	if ((ep = rpmtdGetUint32(&size))) {
-	    p->pkgFileSize += 96 + 256 + *ep;
-	}
-	break;
-    case TR_REMOVED:
-	/* nothing to do */
-	break;
+
+    if (addTE(p, h, key, relocs)) {
+	rpmteFree(p);
+	return NULL;
     }
 
     return p;
@@ -409,69 +433,54 @@ rpm_color_t rpmteSetColor(rpmte te, rpm_color_t color)
     return ocolor;
 }
 
+ARGV_const_t rpmteCollections(rpmte te)
+{
+    return (te != NULL) ? te->collections : NULL;
+}
+
+int rpmteHasCollection(rpmte te, const char *collname)
+{
+    return (argvSearch(rpmteCollections(te), collname, NULL) != NULL);
+}
+
+int rpmteAddToLastInCollectionAdd(rpmte te, const char *collname)
+{
+    if (te != NULL) {
+	argvAdd(&te->lastInCollectionsAdd, collname);
+	argvSort(te->lastInCollectionsAdd, NULL);
+	return 0;
+    }
+    return -1;
+}
+
+int rpmteAddToLastInCollectionAny(rpmte te, const char *collname)
+{
+    if (te != NULL) {
+	argvAdd(&te->lastInCollectionsAny, collname);
+	argvSort(te->lastInCollectionsAny, NULL);
+	return 0;
+    }
+    return -1;
+}
+
+int rpmteAddToFirstInCollectionRemove(rpmte te, const char *collname)
+{
+    if (te != NULL) {
+	argvAdd(&te->firstInCollectionsRemove, collname);
+	argvSort(te->firstInCollectionsRemove, NULL);
+	return 0;
+    }
+    return -1;
+}
+
 rpm_loff_t rpmtePkgFileSize(rpmte te)
 {
     return (te != NULL ? te->pkgFileSize : 0);
 }
 
-int rpmteDepth(rpmte te)
+unsigned int rpmteHeaderSize(rpmte te)
 {
-    return (te != NULL ? te->depth : 0);
-}
-
-int rpmteSetDepth(rpmte te, int ndepth)
-{
-    int odepth = 0;
-    if (te != NULL) {
-	odepth = te->depth;
-	te->depth = ndepth;
-    }
-    return odepth;
-}
-
-int rpmteBreadth(rpmte te)
-{
-    return (te != NULL ? te->depth : 0);
-}
-
-int rpmteSetBreadth(rpmte te, int nbreadth)
-{
-    int obreadth = 0;
-    if (te != NULL) {
-	obreadth = te->breadth;
-	te->breadth = nbreadth;
-    }
-    return obreadth;
-}
-
-int rpmteNpreds(rpmte te)
-{
-    return (te != NULL ? te->npreds : 0);
-}
-
-int rpmteSetNpreds(rpmte te, int npreds)
-{
-    int opreds = 0;
-    if (te != NULL) {
-	opreds = te->npreds;
-	te->npreds = npreds;
-    }
-    return opreds;
-}
-
-int rpmteTree(rpmte te)
-{
-    return (te != NULL ? te->tree : 0);
-}
-
-int rpmteSetTree(rpmte te, int ntree)
-{
-    int otree = 0;
-    if (te != NULL) {
-	otree = te->tree;
-	te->tree = ntree;
-    }
-    return otree;
+    return (te != NULL ? te->headerSize : 0);
 }
 
 rpmte rpmteParent(rpmte te)
@@ -489,55 +498,18 @@ rpmte rpmteSetParent(rpmte te, rpmte pte)
     return opte;
 }
 
-int rpmteDegree(rpmte te)
-{
-    return (te != NULL ? te->degree : 0);
-}
-
-int rpmteSetDegree(rpmte te, int ndegree)
-{
-    int odegree = 0;
-    if (te != NULL) {
-	odegree = te->degree;
-	te->degree = ndegree;
-    }
-    return odegree;
-}
-
 tsortInfo rpmteTSI(rpmte te)
 {
     return te->tsi;
 }
 
-void rpmteFreeTSI(rpmte te)
+void rpmteSetTSI(rpmte te, tsortInfo tsi)
 {
-    relation rel;
-    if (te == NULL || rpmteTSI(te) == NULL) return;
-
-    while (te->tsi->tsi_relations != NULL) {
-	rel = te->tsi->tsi_relations;
-	te->tsi->tsi_relations = te->tsi->tsi_relations->rel_next;
-	rel = _free(rel);
-    }
-    while (te->tsi->tsi_forward_relations != NULL) {
-	rel = te->tsi->tsi_forward_relations;
-	te->tsi->tsi_forward_relations = \
-	    te->tsi->tsi_forward_relations->rel_next;
-	rel = _free(rel);
-    }
-    te->tsi = _free(te->tsi);
+    te->tsi = tsi;
 }
 
-void rpmteNewTSI(rpmte te)
+void rpmteSetDependsOn(rpmte te, rpmte depends)
 {
-    if (te != NULL) {
-	rpmteFreeTSI(te);
-	te->tsi = xcalloc(1, sizeof(*te->tsi));
-	memset(te->tsi, 0, sizeof(*te->tsi));
-    }
-}
-
-void rpmteSetDependsOn(rpmte te, rpmte depends) {
     te->depends = depends;
 }
 
@@ -570,16 +542,11 @@ FD_t rpmteSetFd(rpmte te, FD_t fd)
 {
     if (te != NULL)  {
 	if (te->fd != NULL)
-	    te->fd = fdFree(te->fd, RPMDBG_M("rpmteSetFd"));
+	    te->fd = fdFree(te->fd);
 	if (fd != NULL)
-	    te->fd = fdLink(fd, RPMDBG_M("rpmteSetFd"));
+	    te->fd = fdLink(fd);
     }
     return NULL;
-}
-
-FD_t rpmteFd(rpmte te)
-{
-    return (te != NULL ? te->fd : NULL);
 }
 
 fnpyKey rpmteKey(rpmte te)
@@ -587,27 +554,21 @@ fnpyKey rpmteKey(rpmte te)
     return (te != NULL ? te->key : NULL);
 }
 
-rpmds rpmteDS(rpmte te, rpmTag tag)
+rpmds rpmteDS(rpmte te, rpmTagVal tag)
 {
     if (te == NULL)
 	return NULL;
 
-    if (tag == RPMTAG_NAME)
-	return te->this;
-    else
-    if (tag == RPMTAG_PROVIDENAME)
-	return te->provides;
-    else
-    if (tag == RPMTAG_REQUIRENAME)
-	return te->requires;
-    else
-    if (tag == RPMTAG_CONFLICTNAME)
-	return te->conflicts;
-    else
-    if (tag == RPMTAG_OBSOLETENAME)
-	return te->obsoletes;
-    else
-	return NULL;
+    switch (tag) {
+    case RPMTAG_NAME:		return te->thisds;
+    case RPMTAG_PROVIDENAME:	return te->provides;
+    case RPMTAG_REQUIRENAME:	return te->requires;
+    case RPMTAG_CONFLICTNAME:	return te->conflicts;
+    case RPMTAG_OBSOLETENAME:	return te->obsoletes;
+    case RPMTAG_ORDERNAME:	return te->order;
+    default:			break;
+    }
+    return NULL;
 }
 
 rpmfi rpmteSetFI(rpmte te, rpmfi fi)
@@ -615,7 +576,7 @@ rpmfi rpmteSetFI(rpmte te, rpmfi fi)
     if (te != NULL)  {
 	te->fi = rpmfiFree(te->fi);
 	if (fi != NULL)
-	    te->fi = rpmfiLink(fi, __FUNCTION__);
+	    te->fi = rpmfiLink(fi);
     }
     return NULL;
 }
@@ -628,7 +589,7 @@ rpmfi rpmteFI(rpmte te)
     return te->fi; /* XXX take fi reference here? */
 }
 
-void rpmteColorDS(rpmte te, rpmTag tag)
+static void rpmteColorDS(rpmte te, rpmTag tag)
 {
     rpmfi fi = rpmteFI(te);
     rpmds ds = rpmteDS(te, tag);
@@ -636,10 +597,8 @@ void rpmteColorDS(rpmte te, rpmTag tag)
     char mydt;
     const uint32_t * ddict;
     rpm_color_t * colors;
-    int32_t * refs;
     rpm_color_t val;
     int Count;
-    size_t nb;
     unsigned ix;
     int ndx, i;
 
@@ -659,10 +618,8 @@ void rpmteColorDS(rpmte te, rpmTag tag)
     }
 
     colors = xcalloc(Count, sizeof(*colors));
-    nb = Count * sizeof(*refs);
-    refs = memset(xmalloc(nb), -1, nb);
 
-    /* Calculate dependency color and reference count. */
+    /* Calculate dependency color. */
     fi = rpmfiInit(fi, 0);
     if (fi != NULL)
     while (rpmfiNext(fi) >= 0) {
@@ -678,113 +635,48 @@ void rpmteColorDS(rpmte te, rpmTag tag)
 	    ix &= 0x00ffffff;
 assert (ix < Count);
 	    colors[ix] |= val;
-	    refs[ix]++;
 	}
     }
 
-    /* Set color/refs values in dependency set. */
+    /* Set color values in dependency set. */
     ds = rpmdsInit(ds);
     while ((i = rpmdsNext(ds)) >= 0) {
 	val = colors[i];
 	te->color |= val;
 	(void) rpmdsSetColor(ds, val);
-	val = refs[i];
-	if (val >= 0)
-	    val++;
-	(void) rpmdsSetRefs(ds, val);
     }
     free(colors);
-    free(refs);
 }
 
-int rpmtsiOc(rpmtsi tsi)
-{
-    return tsi->ocsave;
-}
-
-rpmtsi rpmtsiFree(rpmtsi tsi)
-{
-    /* XXX watchout: a funky recursion segfaults here iff nrefs is wrong. */
-    if (tsi)
-	tsi->ts = rpmtsFree(tsi->ts);
-    return _free(tsi);
-}
-
-rpmtsi rpmtsiInit(rpmts ts)
-{
-    rpmtsi tsi = NULL;
-
-    tsi = xcalloc(1, sizeof(*tsi));
-    tsi->ts = rpmtsLink(ts, RPMDBG_M("rpmtsi"));
-    tsi->reverse = ((rpmtsFlags(ts) & RPMTRANS_FLAG_REVERSE) ? 1 : 0);
-    tsi->oc = (tsi->reverse ? (rpmtsNElements(ts) - 1) : 0);
-    tsi->ocsave = tsi->oc;
-    return tsi;
-}
-
-/**
- * Return next transaction element.
- * @param tsi		transaction element iterator
- * @return		transaction element, NULL on termination
- */
-static
-rpmte rpmtsiNextElement(rpmtsi tsi)
-{
-    rpmte te = NULL;
-    int oc = -1;
-
-    if (tsi == NULL || tsi->ts == NULL || rpmtsNElements(tsi->ts) <= 0)
-	return te;
-
-    if (tsi->reverse) {
-	if (tsi->oc >= 0)		oc = tsi->oc--;
-    } else {
-    	if (tsi->oc < rpmtsNElements(tsi->ts))	oc = tsi->oc++;
-    }
-    tsi->ocsave = oc;
-    if (oc != -1)
-	te = rpmtsElement(tsi->ts, oc);
-    return te;
-}
-
-rpmte rpmtsiNext(rpmtsi tsi, rpmElementType type)
-{
-    rpmte te;
-
-    while ((te = rpmtsiNextElement(tsi)) != NULL) {
-	if (type == 0 || (te->type & type) != 0)
-	    break;
-    }
-    return te;
-}
-
-static Header rpmteDBHeader(rpmts ts, unsigned int rec)
+static Header rpmteDBHeader(rpmte te)
 {
     Header h = NULL;
     rpmdbMatchIterator mi;
 
-    mi = rpmtsInitIterator(ts, RPMDBI_PACKAGES, &rec, sizeof(rec));
+    mi = rpmtsInitIterator(te->ts, RPMDBI_PACKAGES,
+			   &te->db_instance, sizeof(te->db_instance));
     /* iterator returns weak refs, grab hold of header */
     if ((h = rpmdbNextIterator(mi)))
 	h = headerLink(h);
-    mi = rpmdbFreeIterator(mi);
+    rpmdbFreeIterator(mi);
     return h;
 }
 
-static Header rpmteFDHeader(rpmts ts, rpmte te)
+static Header rpmteFDHeader(rpmte te)
 {
     Header h = NULL;
-    te->fd = rpmtsNotify(ts, te, RPMCALLBACK_INST_OPEN_FILE, 0, 0);
+    te->fd = rpmtsNotify(te->ts, te, RPMCALLBACK_INST_OPEN_FILE, 0, 0);
     if (te->fd != NULL) {
 	rpmVSFlags ovsflags;
 	rpmRC pkgrc;
 
-	ovsflags = rpmtsSetVSFlags(ts, rpmtsVSFlags(ts) | RPMVSF_NEEDPAYLOAD);
-	pkgrc = rpmReadPackageFile(ts, rpmteFd(te), rpmteNEVRA(te), &h);
-	rpmtsSetVSFlags(ts, ovsflags);
+	ovsflags = rpmtsSetVSFlags(te->ts,
+				   rpmtsVSFlags(te->ts) | RPMVSF_NEEDPAYLOAD);
+	pkgrc = rpmReadPackageFile(te->ts, te->fd, rpmteNEVRA(te), &h);
+	rpmtsSetVSFlags(te->ts, ovsflags);
 	switch (pkgrc) {
 	default:
-	    rpmteClose(te, ts, 1);
+	    rpmteClose(te, 1);
 	    break;
 	case RPMRC_NOTTRUSTED:
 	case RPMRC_NOKEY:
@@ -795,27 +687,30 @@ static Header rpmteFDHeader(rpmts ts, rpmte te)
     return h;
 }
 
-int rpmteOpen(rpmte te, rpmts ts, int reload_fi)
+static int rpmteOpen(rpmte te, int reload_fi)
 {
+    int rc = 0; /* assume failure */
     Header h = NULL;
-    unsigned int instance;
-    if (te == NULL || ts == NULL)
+    if (te == NULL || te->ts == NULL || rpmteFailed(te))
 	goto exit;
 
-    instance = rpmteDBInstance(te);
     rpmteSetHeader(te, NULL);
 
     switch (rpmteType(te)) {
     case TR_ADDED:
-	h = instance ? rpmteDBHeader(ts, instance) : rpmteFDHeader(ts, te);
+	h = rpmteDBInstance(te) ? rpmteDBHeader(te) : rpmteFDHeader(te);
 	break;
     case TR_REMOVED:
-	h = rpmteDBHeader(ts, instance);
+	h = rpmteDBHeader(te);
     	break;
     }
     if (h != NULL) {
 	if (reload_fi) {
-	    te->fi = getFI(te, ts, h);
+	    /* This can fail if we get a different, bad header from callback */
+	    te->fi = getFI(te, h);
+	    rc = (te->fi != NULL);
+	} else {
+	    rc = 1;
 	}
 	
 	rpmteSetHeader(te, h);
@@ -823,18 +718,18 @@ int rpmteOpen(rpmte te, rpmts ts, int reload_fi)
     }
 
 exit:
-    return (h != NULL);
+    return rc;
 }
 
-int rpmteClose(rpmte te, rpmts ts, int reset_fi)
+static int rpmteClose(rpmte te, int reset_fi)
 {
-    if (te == NULL || ts == NULL)
+    if (te == NULL || te->ts == NULL)
 	return 0;
 
     switch (te->type) {
     case TR_ADDED:
 	if (te->fd) {
-	    rpmtsNotify(ts, te, RPMCALLBACK_INST_CLOSE_FILE, 0, 0);
+	    rpmtsNotify(te->ts, te, RPMCALLBACK_INST_CLOSE_FILE, 0, 0);
 	    te->fd = NULL;
 	}
 	break;
@@ -849,21 +744,32 @@ int rpmteClose(rpmte te, rpmts ts, int reset_fi)
     return 1;
 }
 
-int rpmteMarkFailed(rpmte te, rpmts ts)
+FD_t rpmtePayload(rpmte te)
 {
-    rpmtsi pi = rpmtsiInit(ts);
-    int rc = 0;
+    FD_t payload = NULL;
+    if (te->fd && te->h) {
+	const char *compr = headerGetString(te->h, RPMTAG_PAYLOADCOMPRESSOR);
+	char *ioflags = rstrscat(NULL, "r.", compr ? compr : "gzip", NULL);
+	payload = Fdopen(fdDup(Fileno(te->fd)), ioflags);
+	free(ioflags);
+    }
+    return payload;
+}
+
+static int rpmteMarkFailed(rpmte te)
+{
+    rpmtsi pi = rpmtsiInit(te->ts);
     rpmte p;
 
-    te->failed = 1;
+    te->failed++;
     /* XXX we can do a much better here than this... */
     while ((p = rpmtsiNext(pi, TR_REMOVED))) {
 	if (rpmteDependsOn(p) == te) {
-	    p->failed = 1;
+	    p->failed++;
 	}
     }
     rpmtsiFree(pi);
-    return rc;
+    return te->failed;
 }
 
 int rpmteFailed(rpmte te)
@@ -871,7 +777,7 @@ int rpmteFailed(rpmte te)
     return (te != NULL) ? te->failed : -1;
 }
 
-int rpmteHaveTransScript(rpmte te, rpmTag tag)
+int rpmteHaveTransScript(rpmte te, rpmTagVal tag)
 {
     int rc = 0;
     if (tag == RPMTAG_PRETRANS) {
@@ -884,108 +790,187 @@ int rpmteHaveTransScript(rpmte te, rpmTag tag)
 
 rpmps rpmteProblems(rpmte te)
 {
-    return te ? te->probs : NULL;
+    return (te != NULL) ? rpmpsLink(te->probs) : NULL;
 }
 
-rpmfs rpmteGetFileStates(rpmte te) {
+void rpmteCleanProblems(rpmte te)
+{
+    if (te != NULL && te->probs != NULL) {
+	te->probs = rpmpsFree(te->probs);
+    }
+}
+
+static void appendProblem(rpmte te, rpmProblemType type,
+		fnpyKey key, const char * altNEVR,
+		const char * str, uint64_t number)
+{
+    rpmProblem o;
+    rpmProblem p = rpmProblemCreate(type, te->NEVRA, key, altNEVR, str, number);
+    rpmpsi psi = rpmpsInitIterator(te->probs);
+
+    /* Only add new, unique problems to the set */
+    while ((o = rpmpsiNext(psi))) {
+	if (rpmProblemCompare(p, o) == 0)
+	    break;
+    }
+    rpmpsFreeIterator(psi);
+
+    if (o == NULL) {
+	if (te->probs == NULL)
+	    te->probs = rpmpsCreate();
+	rpmpsAppendProblem(te->probs, p);
+    }
+    rpmProblemFree(p);
+}
+
+void rpmteAddProblem(rpmte te, rpmProblemType type,
+		     const char *altNEVR, const char *str, uint64_t number)
+{
+    if (te != NULL) {
+	appendProblem(te, type, rpmteKey(te), altNEVR, str, number);
+    }
+}
+
+void rpmteAddDepProblem(rpmte te, const char * altNEVR, rpmds ds,
+		        fnpyKey * suggestedKeys)
+{
+    if (te != NULL) {
+	const char * DNEVR = rpmdsDNEVR(ds);
+	rpmProblemType type;
+	fnpyKey key = (suggestedKeys ? suggestedKeys[0] : NULL);
+
+	switch ((unsigned)DNEVR[0]) {
+	case 'O':	type = RPMPROB_OBSOLETES;	break;
+	case 'C':	type = RPMPROB_CONFLICT;	break;
+	default:
+	case 'R':	type = RPMPROB_REQUIRES;	break;
+	}
+
+	appendProblem(te, type, key, altNEVR, DNEVR+2, rpmdsInstance(ds));
+    }
+}
+
+void rpmteAddRelocProblems(rpmte te)
+{
+    if (te && te->badrelocs) {
+	for (int i = 0; i < te->nrelocs; i++) {
+	    if (te->badrelocs[i]) {
+		rpmteAddProblem(te, RPMPROB_BADRELOCATE, NULL,
+				te->relocs[i].oldPath, 0);
+	    }
+	}
+    }
+}
+
+const char * rpmteTypeString(rpmte te)
+{
+    switch(rpmteType(te)) {
+    case TR_ADDED:	return _("install");
+    case TR_REMOVED:	return _("erase");
+    default:		return "???";
+    }
+}
+
+rpmfs rpmteGetFileStates(rpmte te)
+{
     return te->fs;
 }
 
-rpmfs rpmfsNew(unsigned int fc, rpmElementType type) {
-    rpmfs fs = xmalloc(sizeof(*fs));
-    fs->fc = fc;
-    fs->replaced = NULL;
-    fs->states = NULL;
-    if (type == TR_ADDED) {
-	fs->states = xmalloc(sizeof(*fs->states) * fs->fc);
-	memset(fs->states, RPMFILE_STATE_NORMAL, fs->fc);
+rpmRC rpmteSetupCollectionPlugins(rpmte te)
+{
+    ARGV_const_t colls = rpmteCollections(te);
+    rpmPlugins plugins = rpmtsPlugins(te->ts);
+    rpmRC rc = RPMRC_OK;
+
+    if (!colls) {
+	return rc;
     }
-    fs->actions = xmalloc(fc * sizeof(*fs->actions));
-    memset(fs->actions, FA_UNKNOWN, fc * sizeof(*fs->actions));
-    fs->numReplaced = fs->allocatedReplaced = 0;
-    return fs;
-}
 
-rpmfs rpmfsFree(rpmfs fs) {
-    fs->replaced = _free(fs->replaced);
-    fs->states = _free(fs->states);
-    fs->actions = _free(fs->actions);
-
-    fs = _free(fs);
-    return fs;
-}
-
-rpm_count_t rpmfsFC(rpmfs fs) {
-    return fs->fc;
-}
-
-void rpmfsAddReplaced(rpmfs fs, int pkgFileNum, int otherPkg, int otherFileNum)
-{
-    if (!fs->replaced) {
-	fs->replaced = xcalloc(3, sizeof(*fs->replaced));
-	fs->allocatedReplaced = 3;
+    rpmteOpen(te, 0);
+    for (; colls && *colls; colls++) {
+	if (!rpmpluginsPluginAdded(plugins, *colls)) {
+	    rc = rpmpluginsAddCollectionPlugin(plugins, *colls);
+	    if (rc != RPMRC_OK) {
+		break;
+	    }
+	}
+	rc = rpmpluginsCallOpenTE(plugins, *colls, te);
+	if (rc != RPMRC_OK) {
+	    break;
+	}
     }
-    if (fs->numReplaced>=fs->allocatedReplaced) {
-	fs->allocatedReplaced += (fs->allocatedReplaced>>1) + 2;
-	fs->replaced = xrealloc(fs->replaced, fs->allocatedReplaced*sizeof(*fs->replaced));
+    rpmteClose(te, 0);
+
+    return rc;
+}
+
+static rpmRC rpmteRunAllCollections(rpmte te, rpmPluginHook hook)
+{
+    ARGV_const_t colls;
+    rpmRC(*collHook) (rpmPlugins, const char *);
+    rpmRC rc = RPMRC_OK;
+
+    if (rpmtsFlags(te->ts) & RPMTRANS_FLAG_NOCOLLECTIONS) {
+	goto exit;
     }
-    fs->replaced[fs->numReplaced].pkgFileNum = pkgFileNum;
-    fs->replaced[fs->numReplaced].otherPkg = otherPkg;
-    fs->replaced[fs->numReplaced].otherFileNum = otherFileNum;
 
-    fs->numReplaced++;
-}
-
-sharedFileInfo rpmfsGetReplaced(rpmfs fs)
-{
-    if (fs && fs->numReplaced)
-        return fs->replaced;
-    else
-        return NULL;
-}
-
-sharedFileInfo rpmfsNextReplaced(rpmfs fs , sharedFileInfo replaced)
-{
-    if (fs && replaced) {
-        replaced++;
-	if (replaced - fs->replaced < fs->numReplaced)
-	    return replaced;
+    switch (hook) {
+    case PLUGINHOOK_COLL_POST_ADD:
+	colls = te->lastInCollectionsAdd;
+	collHook = rpmpluginsCallCollectionPostAdd;
+	break;
+    case PLUGINHOOK_COLL_POST_ANY:
+	colls = te->lastInCollectionsAny;
+	collHook = rpmpluginsCallCollectionPostAny;
+	break;
+    case PLUGINHOOK_COLL_PRE_REMOVE:
+	colls = te->firstInCollectionsRemove;
+	collHook = rpmpluginsCallCollectionPreRemove;
+	break;
+    default:
+	goto exit;
     }
-    return NULL;
-}
 
-void rpmfsSetState(rpmfs fs, unsigned int ix, rpmfileState state)
-{
-    assert(ix < fs->fc);
-    fs->states[ix] = state;
-}
-
-rpmfileState rpmfsGetState(rpmfs fs, unsigned int ix)
-{
-    assert(ix < fs->fc);
-    if (fs->states) return fs->states[ix];
-    return RPMFILE_STATE_MISSING;
-}
-
-rpm_fstate_t * rpmfsGetStates(rpmfs fs)
-{
-    return fs->states;
-}
-
-rpmFileAction rpmfsGetAction(rpmfs fs, unsigned int ix)
-{
-    rpmFileAction action;
-    if (fs->actions != NULL && ix < fs->fc) {
-	action = fs->actions[ix];
-    } else {
-	action = FA_UNKNOWN;
+    for (; colls && *colls; colls++) {
+	rc = collHook(rpmtsPlugins(te->ts), *colls);
     }
-    return action;
+
+  exit:
+    return rc;
 }
 
-void rpmfsSetAction(rpmfs fs, unsigned int ix, rpmFileAction action)
+int rpmteProcess(rpmte te, pkgGoal goal)
 {
-    if (fs->actions != NULL && ix < fs->fc) {
-	fs->actions[ix] = action;
+    /* Only install/erase resets pkg file info */
+    int scriptstage = (goal != PKG_INSTALL && goal != PKG_ERASE);
+    int test = (rpmtsFlags(te->ts) & RPMTRANS_FLAG_TEST);
+    int reset_fi = (scriptstage == 0 && test == 0);
+    int failed = 1;
+
+    /* Dont bother opening for elements without pre/posttrans scripts */
+    if (goal == PKG_PRETRANS || goal == PKG_POSTTRANS) {
+	if (!rpmteHaveTransScript(te, goal)) {
+	    return 0;
+	}
     }
+
+    if (!scriptstage) {
+	rpmteRunAllCollections(te, PLUGINHOOK_COLL_PRE_REMOVE);
+    }
+
+    if (rpmteOpen(te, reset_fi)) {
+	failed = rpmpsmRun(te->ts, te, goal);
+	rpmteClose(te, reset_fi);
+    }
+    
+    if (!scriptstage) {
+	rpmteRunAllCollections(te, PLUGINHOOK_COLL_POST_ADD);
+	rpmteRunAllCollections(te, PLUGINHOOK_COLL_POST_ANY);
+    }
+
+    if (failed) {
+	failed = rpmteMarkFailed(te);
+    }
+
+    return failed;
 }

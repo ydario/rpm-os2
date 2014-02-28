@@ -12,13 +12,12 @@ typedef enum rpmluavType_e {
 #include <stdarg.h>
 #include <lua.h>
 
+typedef struct rpmluapb_s * rpmluapb;
+
 struct rpmlua_s {
     lua_State *L;
     size_t pushsize;
-    int storeprint;
-    size_t printbufsize;
-    size_t printbufused;
-    char *printbuf;
+    rpmluapb printbuf;
 };
 
 struct rpmluav_s {
@@ -42,8 +41,12 @@ struct rpmluav_s {
 typedef struct rpmlua_s * rpmlua;
 typedef struct rpmluav_s * rpmluav;
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 rpmlua rpmluaNew(void);
-void *rpmluaFree(rpmlua lua);
+rpmlua rpmluaFree(rpmlua lua);
 rpmlua rpmluaGetGlobalState(void);
 
 int rpmluaCheckScript(rpmlua lua, const char *script,
@@ -56,8 +59,8 @@ void rpmluaInteractive(rpmlua lua);
 void *rpmluaGetData(rpmlua lua, const char *key);
 void rpmluaSetData(rpmlua lua, const char *key, const void *data);
 
-const char *rpmluaGetPrintBuffer(rpmlua lua);
-void rpmluaSetPrintBuffer(rpmlua lua, int flag);
+char *rpmluaPopPrintBuffer(rpmlua lua);
+void rpmluaPushPrintBuffer(rpmlua lua);
 
 void rpmluaGetVar(rpmlua lua, rpmluav var);
 void rpmluaSetVar(rpmlua lua, rpmluav var);
@@ -67,7 +70,7 @@ void rpmluaPushTable(rpmlua lua, const char *key, ...);
 void rpmluaPop(rpmlua lua);
 
 rpmluav rpmluavNew(void);
-void * rpmluavFree(rpmluav var);
+rpmluav rpmluavFree(rpmluav var);
 void rpmluavSetListMode(rpmluav var, int flag);
 void rpmluavSetKey(rpmluav var, rpmluavType type, const void *value);
 void rpmluavSetValue(rpmluav var, rpmluavType type, const void *value);
@@ -81,5 +84,9 @@ double rpmluavGetKeyNum(rpmluav var);
 double rpmluavGetValueNum(rpmluav var);
 int rpmluavKeyIsNum(rpmluav var);
 int rpmluavValueIsNum(rpmluav var);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* RPMLUA_H */

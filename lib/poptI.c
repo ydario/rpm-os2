@@ -13,13 +13,11 @@ struct rpmInstallArguments_s rpmIArgs = {
     0,			/* transFlags */
     0,			/* probFilter */
     0,			/* installInterfaceFlags */
-    0,			/* qva_flags */
     0,			/* numRelocations */
     0,			/* noDeps */
     0,			/* incldocs */
     NULL,		/* relocations */
     NULL,		/* prefix */
-    NULL		/* rootdir */
 };
 
 #define	POPT_RELOCATE		-1021
@@ -77,18 +75,6 @@ static void installArgCallback( poptContext con,
 	ia->numRelocations++;
       }	break;
 
-    case RPMCLI_POPT_NODIGEST:
-	ia->qva_flags |= VERIFY_DIGEST;
-	break;
-
-    case RPMCLI_POPT_NOSIGNATURE:
-	ia->qva_flags |= VERIFY_SIGNATURE;
-	break;
-
-    case RPMCLI_POPT_NOHDRCHK:
-	ia->qva_flags |= VERIFY_HDRCHK;
-	break;
-
     case RPMCLI_POPT_NODEPS:
 	ia->noDeps = 1;
 	break;
@@ -123,9 +109,6 @@ struct poptOption rpmInstallPoptTable[] = {
  { NULL, '\0', POPT_ARG_CALLBACK | POPT_CBFLAG_INC_DATA | POPT_CBFLAG_CONTINUE,
 	installArgCallback, 0, NULL, NULL },
 
- { "aid", '\0', POPT_BIT_SET, &rpmIArgs.transFlags, RPMTRANS_FLAG_ADDINDEPS,
-	N_("add suggested packages to transaction"), NULL },
-
  { "allfiles", '\0', POPT_BIT_SET,
 	&rpmIArgs.transFlags, RPMTRANS_FLAG_ALLFILES,
   N_("install all files, even configurations which might otherwise be skipped"),
@@ -134,11 +117,6 @@ struct poptOption rpmInstallPoptTable[] = {
 	&rpmIArgs.installInterfaceFlags, UNINSTALL_ALLMATCHES,
 	N_("remove all packages which match <package> (normally an error is generated if <package> specified multiple packages)"),
 	NULL},
-
- { "apply", '\0', POPT_BIT_SET|POPT_ARGFLAG_DOC_HIDDEN, &rpmIArgs.transFlags,
-	(_noTransScripts|_noTransTriggers|
-		RPMTRANS_FLAG_APPLYONLY|RPMTRANS_FLAG_PKGCOMMIT),
-	N_("do not execute package scriptlet(s)"), NULL },
 
  { "badreloc", '\0', POPT_BIT_SET,
 	&rpmIArgs.probFilter, RPMPROB_FILTER_FORCERELOCATE,
@@ -161,9 +139,6 @@ struct poptOption rpmInstallPoptTable[] = {
 	N_("skip files with leading component <path> "),
 	N_("<path>") },
 
- { "fileconflicts", '\0', POPT_BIT_CLR, &rpmIArgs.probFilter,
-	(RPMPROB_FILTER_REPLACEOLDFILES | RPMPROB_FILTER_REPLACENEWFILES),
-	N_("detect file conflicts between packages"), NULL},
  { "force", '\0', 0, NULL, RPMCLI_POPT_FORCE,
 	N_("short hand for --replacepkgs --replacefiles"), NULL},
 
@@ -202,7 +177,7 @@ struct poptOption rpmInstallPoptTable[] = {
 
  { "nofiledigest", '\0', 0, NULL, RPMCLI_POPT_NOFILEDIGEST,
 	N_("don't verify digest of files"), NULL },
- { "nomd5", '\0', 0, NULL, RPMCLI_POPT_NOFILEDIGEST,
+ { "nomd5", '\0', POPT_ARGFLAG_DOC_HIDDEN, NULL, RPMCLI_POPT_NOFILEDIGEST,
 	N_("don't verify digest of files (obsolete)"), NULL },
  { "nocontexts", '\0',0,  NULL, RPMCLI_POPT_NOCONTEXTS,
 	N_("don't install file security contexts"), NULL},
@@ -211,10 +186,6 @@ struct poptOption rpmInstallPoptTable[] = {
 	&rpmIArgs.installInterfaceFlags, INSTALL_NOORDER,
 	N_("do not reorder package installation to satisfy dependencies"),
 	NULL},
-
- { "nosuggest", '\0', POPT_BIT_SET, &rpmIArgs.transFlags,
-	RPMTRANS_FLAG_NOSUGGEST,
-	N_("do not suggest missing dependency resolution(s)"), NULL},
 
  { "noscripts", '\0', 0, NULL, RPMCLI_POPT_NOSCRIPTS,
 	N_("do not execute package scriptlet(s)"), NULL },
@@ -232,13 +203,6 @@ struct poptOption rpmInstallPoptTable[] = {
 	RPMTRANS_FLAG_NOPOSTUN,
 	N_("do not execute %%postun scriptlet (if any)"), NULL },
 
- { "nodigest", '\0', POPT_ARGFLAG_DOC_HIDDEN, 0, RPMCLI_POPT_NODIGEST,
-        N_("don't verify package digest(s)"), NULL },
- { "nohdrchk", '\0', POPT_ARGFLAG_DOC_HIDDEN, 0, RPMCLI_POPT_NOHDRCHK,
-        N_("don't verify database header(s) when retrieved"), NULL },
- { "nosignature", '\0', POPT_ARGFLAG_DOC_HIDDEN, 0, RPMCLI_POPT_NOSIGNATURE,
-        N_("don't verify package signature(s)"), NULL },
-
  { "notriggers", '\0', POPT_BIT_SET, &rpmIArgs.transFlags, _noTransTriggers,
 	N_("do not execute any scriptlet(s) triggered by this package"), NULL},
  { "notriggerprein", '\0', POPT_BIT_SET|POPT_ARGFLAG_DOC_HIDDEN,
@@ -253,6 +217,10 @@ struct poptOption rpmInstallPoptTable[] = {
  { "notriggerpostun", '\0', POPT_BIT_SET|POPT_ARGFLAG_DOC_HIDDEN,
 	&rpmIArgs.transFlags, RPMTRANS_FLAG_NOTRIGGERPOSTUN,
 	N_("do not execute any %%triggerpostun scriptlet(s)"), NULL},
+
+ { "nocollections", '\0', POPT_BIT_SET,
+	&rpmIArgs.transFlags, RPMTRANS_FLAG_NOCOLLECTIONS,
+	N_("do not perform any collection actions"), NULL},
 
  { "oldpackage", '\0', POPT_BIT_SET,
 	&rpmIArgs.probFilter, RPMPROB_FILTER_OLDPACKAGE,

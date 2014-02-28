@@ -7,8 +7,6 @@
 #include "header-py.h"
 #include "rpmds-py.h"
 
-#include "debug.h"
-
 struct rpmdsObject_s {
     PyObject_HEAD
     PyObject *md_dict;		/*!< to look like PyModuleObject */
@@ -54,12 +52,6 @@ rpmds_Flags(rpmdsObject * s)
 }
 
 static PyObject *
-rpmds_BT(rpmdsObject * s)
-{
-    return Py_BuildValue("i", (int) rpmdsBT(s->ds));
-}
-
-static PyObject *
 rpmds_TagN(rpmdsObject * s)
 {
     return Py_BuildValue("i", rpmdsTagN(s->ds));
@@ -69,12 +61,6 @@ static PyObject *
 rpmds_Color(rpmdsObject * s)
 {
     return Py_BuildValue("i", rpmdsColor(s->ds));
-}
-
-static PyObject *
-rpmds_Refs(rpmdsObject * s)
-{
-    return Py_BuildValue("i", rpmdsRefs(s->ds));
 }
 
 static PyObject *
@@ -90,12 +76,7 @@ rpmds_iternext(rpmdsObject * s)
 
     /* If more to do, return a (N, EVR, Flags) tuple. */
     if (rpmdsNext(s->ds) >= 0) {
-	const char * N = rpmdsN(s->ds);
-	const char * EVR = rpmdsEVR(s->ds);
-	rpmTag tagN = rpmdsTagN(s->ds);
-	rpmsenseFlags Flags = rpmdsFlags(s->ds);
-
-	result = rpmds_Wrap(Py_TYPE(s), rpmdsSingle(tagN, N, EVR, Flags) );
+	result = rpmds_Wrap(Py_TYPE(s), rpmdsCurrent(s->ds));
     } else
 	s->active = 0;
 
@@ -183,13 +164,17 @@ static PyObject *rpmds_Compare(rpmdsObject * s, PyObject * o)
     return PyBool_FromLong(rpmdsCompare(s->ds, ods->ds));
 }
 
+static PyObject *rpmds_Instance(rpmdsObject * s)
+{
+    return Py_BuildValue("i", rpmdsInstance(s->ds));
+}
+
 static PyObject * rpmds_Rpmlib(rpmdsObject * s)
 {
     rpmds ds = NULL;
-    int xx;
 
     /* XXX check return code, permit arg (NULL uses system default). */
-    xx = rpmdsRpmlib(&ds, NULL);
+    rpmdsRpmlib(&ds, NULL);
 
     return rpmds_Wrap(&rpmds_Type, ds);
 }
@@ -207,14 +192,10 @@ static struct PyMethodDef rpmds_methods[] = {
 	"ds.EVR -> EVR		- Return current EVR.\n" },
  {"Flags",	(PyCFunction)rpmds_Flags,	METH_NOARGS,
 	"ds.Flags -> Flags	- Return current Flags.\n" },
- {"BT",		(PyCFunction)rpmds_BT,		METH_NOARGS,
-	"ds.BT -> BT	- Return build time.\n" },
  {"TagN",	(PyCFunction)rpmds_TagN,	METH_NOARGS,
 	"ds.TagN -> TagN	- Return current TagN.\n" },
  {"Color",	(PyCFunction)rpmds_Color,	METH_NOARGS,
 	"ds.Color -> Color	- Return current Color.\n" },
- {"Refs",	(PyCFunction)rpmds_Refs,	METH_NOARGS,
-	"ds.Refs -> Refs	- Return current Refs.\n" },
  {"SetNoPromote",(PyCFunction)rpmds_SetNoPromote, METH_VARARGS|METH_KEYWORDS,
 	NULL},
  {"Notify",	(PyCFunction)rpmds_Notify,	METH_VARARGS|METH_KEYWORDS,
@@ -232,6 +213,8 @@ The current index in ds is positioned at overlapping member upon success.\n" },
  {"Rpmlib",     (PyCFunction)rpmds_Rpmlib,      METH_NOARGS|METH_STATIC,
 	"ds.Rpmlib -> nds       - Return internal rpmlib dependency set.\n"},
  {"Compare",	(PyCFunction)rpmds_Compare,	METH_O,
+	NULL},
+ {"Instance",	(PyCFunction)rpmds_Instance,	METH_NOARGS,
 	NULL},
  {NULL,		NULL}		/* sentinel */
 };
@@ -277,10 +260,49 @@ static int rpmds_init(rpmdsObject * s, PyObject *args, PyObject *kwds)
     return 0;
 }
 
+static int depflags(PyObject *o, rpmsenseFlags *senseFlags)
+{
+    int ok = 0;
+    PyObject *str = NULL;
+    rpmsenseFlags flags = RPMSENSE_ANY;
+
+    if (PyInt_Check(o)) {
+	ok = 1;
+	flags = PyInt_AsLong(o);
+    } else if (utf8FromPyObject(o, &str)) {
+	ok = 1;
+	for (const char *s = PyBytes_AsString(str); *s; s++) {
+	    switch (*s) {
+	    case '=':
+		flags |= RPMSENSE_EQUAL;
+		break;
+	    case '<':
+		flags |= RPMSENSE_LESS;
+		break;
+	    case '>':
+		flags |= RPMSENSE_GREATER;
+		break;
+	    default:
+		ok = 0;
+		break;
+	    }
+	}
+	Py_DECREF(str);
+    }
+
+    if (flags == (RPMSENSE_EQUAL|RPMSENSE_LESS|RPMSENSE_GREATER))
+	ok = 0;
+
+    if (ok)
+	*senseFlags = flags;
+
+    return ok;
+}
+
 static PyObject * rpmds_new(PyTypeObject * subtype, PyObject *args, PyObject *kwds)
 {
     PyObject *obj;
-    rpmTag tagN = RPMTAG_REQUIRENAME;
+    rpmTagVal tagN = RPMTAG_REQUIRENAME;
     rpmds ds = NULL;
     Header h = NULL;
     char * kwlist[] = {"obj", "tag", NULL};
@@ -293,8 +315,12 @@ static PyObject * rpmds_new(PyTypeObject * subtype, PyObject *args, PyObject *kw
 	const char *name = NULL;
 	const char *evr = NULL;
 	rpmsenseFlags flags = RPMSENSE_ANY;
-	if (PyArg_ParseTuple(obj, "s|is", &name, &flags, &evr)) {
+	/* TODO: if flags are specified, evr should be required too */
+	if (PyArg_ParseTuple(obj, "s|O&s", &name, depflags, &flags, &evr)) {
 	    ds = rpmdsSingle(tagN, name, evr, flags);
+	} else {
+	    PyErr_SetString(PyExc_ValueError, "invalid dependency tuple");
+	    return NULL;
 	}
     } else if (hdrFromPyObject(obj, &h)) {
 	if (tagN == RPMTAG_NEVR) {

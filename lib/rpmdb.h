@@ -1,7 +1,7 @@
 #ifndef H_RPMDB
 #define H_RPMDB
 
-/** \ingroup rpmdb dbi db1 db3
+/** \ingroup rpmdb dbi
  * \file lib/rpmdb.h
  * Access RPM indices using Berkeley DB interface(s).
  */
@@ -12,8 +12,6 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-extern int _rpmdb_debug;
 
 /**
  * Tag value pattern match mode.
@@ -39,78 +37,6 @@ typedef enum rpmdbOpX_e {
  * @return              pointer to operation timestamp.
  */
 rpmop rpmdbOp(rpmdb db, rpmdbOpX opx);
-
-/** \ingroup rpmdb
- * Set chrootDone flag, i.e. has chroot(2) been performed?
- * @param db            rpm database
- * @param chrootDone    new chrootDone flag
- * @return              previous chrootDone flag
- */
-int rpmdbSetChrootDone(rpmdb db, int chrootDone);
-
-/** \ingroup rpmdb
- * Unreference a database instance.
- * @param db		rpm database
- * @param msg
- * @return		NULL always
- */
-rpmdb rpmdbUnlink (rpmdb db, const char * msg);
-
-/** \ingroup rpmdb
- * Reference a database instance.
- * @param db		rpm database
- * @param msg
- * @return		new rpm database reference
- */
-rpmdb rpmdbLink (rpmdb db, const char * msg);
-
-/** \ingroup rpmdb
- * Open rpm database.
- * @param prefix	path to top of install tree
- * @retval dbp		address of rpm database
- * @param mode		open(2) flags:  O_RDWR or O_RDONLY (O_CREAT also)
- * @param perms		database permissions
- * @return		0 on success
- */
-int rpmdbOpen (const char * prefix, rpmdb * dbp,
-		int mode, int perms);
-
-/** \ingroup rpmdb
- * Initialize database.
- * @param prefix	path to top of install tree
- * @param perms		database permissions
- * @return		0 on success
- */
-int rpmdbInit(const char * prefix, int perms);
-
-/** \ingroup rpmdb
- * Verify database components.
- * @param prefix	path to top of install tree
- * @return		0 on success
- */
-int rpmdbVerify(const char * prefix);
-
-/**
- * Close a single database index.
- * @param db		rpm database
- * @param rpmtag	rpm tag
- * @return              0 on success
- */
-int rpmdbCloseDBI(rpmdb db, rpmTag rpmtag);
-
-/** \ingroup rpmdb
- * Close all database indices and free rpmdb.
- * @param db		rpm database
- * @return		0 on success
- */
-int rpmdbClose (rpmdb db);
-
-/** \ingroup rpmdb
- * Sync all database indices.
- * @param db		rpm database
- * @return		0 on success
- */
-int rpmdbSync (rpmdb db);
 
 /** \ingroup rpmdb
  * Open all database indices.
@@ -156,18 +82,6 @@ int rpmdbAppendIterator(rpmdbMatchIterator mi,
 		const int * hdrNums, int nHdrNums);
 
 /** \ingroup rpmdb
- * Remove items from set of package instances to iterate.
- * @note Sorted hdrNums are always passed in rpmlib.
- * @param mi		rpm database iterator
- * @param hdrNums	array of package instances
- * @param nHdrNums	number of elements in array
- * @param sorted	is the array sorted? (array will be sorted on return)
- * @return		0 on success, 1 on failure (bad args)
- */
-int rpmdbPruneIterator(rpmdbMatchIterator mi,
-		int * hdrNums, int nHdrNums, int sorted);
-
-/** \ingroup rpmdb
  * Add pattern to iterator selector.
  * @param mi		rpm database iterator
  * @param tag		rpm tag
@@ -175,7 +89,7 @@ int rpmdbPruneIterator(rpmdbMatchIterator mi,
  * @param pattern	pattern to match
  * @return		0 on success
  */
-int rpmdbSetIteratorRE(rpmdbMatchIterator mi, rpmTag tag,
+int rpmdbSetIteratorRE(rpmdbMatchIterator mi, rpmTagVal tag,
 		rpmMireMode mode, const char * pattern);
 
 /** \ingroup rpmdb
@@ -208,12 +122,12 @@ int rpmdbSetHdrChk(rpmdbMatchIterator mi, rpmts ts,
 /** \ingroup rpmdb
  * Return database iterator.
  * @param db		rpm database
- * @param rpmtag	rpm tag
+ * @param rpmtag	database index tag
  * @param keyp		key data (NULL for sequential access)
  * @param keylen	key data length (0 will use strlen(keyp))
  * @return		NULL on failure
  */
-rpmdbMatchIterator rpmdbInitIterator(rpmdb db, rpmTag rpmtag,
+rpmdbMatchIterator rpmdbInitIterator(rpmdb db, rpmDbiTagVal rpmtag,
 			const void * keyp, size_t keylen);
 
 /** \ingroup rpmdb
@@ -246,39 +160,53 @@ int rpmdbCheckTerminate(int terminate);
 rpmdbMatchIterator rpmdbFreeIterator(rpmdbMatchIterator mi);
 
 /** \ingroup rpmdb
- * Add package header to rpm database and indices.
+ * Get an iterator for an index
  * @param db		rpm database
- * @param iid		install transaction id (iid = 0 or -1 to skip)
- * @param h		header
- * @param ts		(unused) transaction set (or NULL)
- * @param (*hdrchk)	(unused) headerCheck() vector (or NULL)
- * @return		0 on success
+ * @param rpmtag	the index to iterate over
+ * @return		the index iterator
  */
-int rpmdbAdd(rpmdb db, int iid, Header h, rpmts ts,
-	     rpmRC (*hdrchk) (rpmts ts, const void *uh, size_t uc, char ** msg));
+rpmdbIndexIterator rpmdbIndexIteratorInit(rpmdb db, rpmDbiTag rpmtag);
 
 /** \ingroup rpmdb
- * Remove package header from rpm database and indices.
- * @param db		rpm database
- * @param rid		(unused) remove transaction id (rid = 0 or -1 to skip)
- * @param hdrNum	package instance number in database
- * @param ts		(unused) transaction set (or NULL)
- * @param (*hdrchk)	(unused) headerCheck() vector (or NULL)
- * @return		0 on success
+ * Get the next key - Warning! Keys are not zero terminated!
+ * Binary tags may even contain zero bytes
+ * @param ii		index iterator
+ * @param key		address to save the pointer to the key
+ * @param keylen	address to save the length of the key to
+ * @return 		0 on success; != 0 on error or end of index
  */
-int rpmdbRemove(rpmdb db, int rid, unsigned int hdrNum,
-		rpmts ts,
-		rpmRC (*hdrchk) (rpmts ts, const void *uh, size_t uc, char ** msg));
+int rpmdbIndexIteratorNext(rpmdbIndexIterator ii, const void ** key, size_t * keylen);
 
 /** \ingroup rpmdb
- * Rebuild database indices from package headers.
- * @param prefix	path to top of install tree
- * @param ts		transaction set (or NULL)
- * @param (*hdrchk)	headerCheck() vector (or NULL)
- * @return		0 on success
+ * Get number of entries for current key
+ * @param ii            index iterator
+ * @return		number of entries. 0 on error.
  */
-int rpmdbRebuild(const char * prefix, rpmts ts,
-		rpmRC (*hdrchk) (rpmts ts, const void *uh, size_t uc, char ** msg));
+unsigned int rpmdbIndexIteratorNumPkgs(rpmdbIndexIterator ii);
+
+/** \ingroup rpmdb
+ * Get package offset of entry
+ * @param ii            index iterator
+ * @param nr		number of the entry
+ * @return		db offset of pkg
+ */
+unsigned int rpmdbIndexIteratorPkgOffset(rpmdbIndexIterator ii, unsigned int nr);
+
+/** \ingroup rpmdb
+ * Get tag number of entry
+ * @param ii            index iterator
+ * @param nr		number of the entry
+ * @return		number of tag within the package
+ */
+unsigned int rpmdbIndexIteratorTagNum(rpmdbIndexIterator ii, unsigned int nr);
+
+/** \ingroup rpmdb
+ * Free index iterator
+ * @param ii            index iterator
+ * return 		NULL
+ */
+rpmdbIndexIterator rpmdbIndexIteratorFree(rpmdbIndexIterator ii);
+
 
 #ifdef __cplusplus
 }

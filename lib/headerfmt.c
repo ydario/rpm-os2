@@ -8,6 +8,7 @@
 #include <rpm/rpmtag.h>
 #include <rpm/rpmstring.h>
 #include <rpm/rpmpgp.h>
+#include "lib/misc.h"		/* format function protos */
 
 #include "debug.h"
 
@@ -16,40 +17,29 @@
 #define PARSER_IN_EXPR  2
 
 /** \ingroup header
- * HEADER_EXT_FORMAT format function prototype.
- * This will only ever be passed RPM_INT32_TYPE or RPM_STRING_TYPE to
- * help keep things simple.
- *
- * @param td		tag data container
- * @param formatPrefix
- * @return		formatted string
- */
-typedef char * (*headerTagFormatFunction) (rpmtd td, char * formatPrefix);
-
-extern void *rpmHeaderFormatFuncByName(const char *fmt);
-
-/** \ingroup header
  */
 typedef struct sprintfTag_s * sprintfTag;
 struct sprintfTag_s {
     headerTagFormatFunction fmt;
-    rpmTag tag;
+    rpmTagVal tag;
     int justOne;
     char * format;
     char * type;
 };
 
+typedef enum {
+    PTOK_NONE = 0,
+    PTOK_TAG,
+    PTOK_ARRAY,
+    PTOK_STRING,
+    PTOK_COND
+} ptokType;
+
 /** \ingroup header
  */
 typedef struct sprintfToken_s * sprintfToken;
 struct sprintfToken_s {
-    enum {
-	PTOK_NONE = 0,
-	PTOK_TAG,
-	PTOK_ARRAY,
-	PTOK_STRING,
-	PTOK_COND
-    } type;
+    ptokType type;
     union {
 	struct sprintfTag_s tag;	/*!< PTOK_TAG */
 	struct {
@@ -71,13 +61,22 @@ struct sprintfToken_s {
     } u;
 };
 
+#define HASHTYPE tagCache
+#define HTKEYTYPE rpmTagVal
+#define HTDATATYPE rpmtd
+#include "lib/rpmhash.H"
+#include "lib/rpmhash.C"
+#undef HASHTYPE
+#undef HTKEYTYPE
+#undef HTDATATYPE
+
 /**
  */
 typedef struct headerSprintfArgs_s {
     Header h;
     char * fmt;
     const char * errmsg;
-    rpmtd *cache;
+    tagCache cache;
     sprintfToken format;
     HeaderIterator hi;
     char * val;
@@ -138,7 +137,7 @@ freeFormat( sprintfToken format, int num)
 	    break;
 	}
     }
-    format = _free(format);
+    free(format);
     return NULL;
 }
 
@@ -182,13 +181,9 @@ static sprintfToken hsaNext(headerSprintfArgs hsa)
 	if (hsa->hi == NULL) {
 	    hsa->i++;
 	} else {
-	    struct rpmtd_s td;
-
-	    /* hmm, cache the data from here too? */
-	    if (!headerNext(hsa->hi, &td))
+	    tag->tag = headerNextTag(hsa->hi);
+	    if (tag->tag == RPMTAG_NOT_FOUND)
 		fmt = NULL;
-	    tag->tag = td.tag;
-	    rpmtdFreeData(&td);
 	}
     }
 
@@ -236,25 +231,19 @@ static int findTag(headerSprintfArgs hsa, sprintfToken token, const char * name)
 	? &token->u.cond.tag : &token->u.tag);
 
     stag->fmt = NULL;
-    stag->tag = -1;
+    stag->tag = RPMTAG_NOT_FOUND;
 
-    if (rstreq(tagname, "*")) {
-	stag->tag = -2;
-	goto bingo;
-    }
+    if (!rstreq(tagname, "*")) {
+	if (rstreqn("RPMTAG_", tagname, sizeof("RPMTAG_")-1)) {
+	    tagname += sizeof("RPMTAG");
+	}
 
-    if (rstreqn("RPMTAG_", tagname, sizeof("RPMTAG_")-1)) {
-	tagname += sizeof("RPMTAG");
-    }
+	/* Search tag names. */
+	stag->tag = rpmTagGetValue(tagname);
+	if (stag->tag == RPMTAG_NOT_FOUND) return 1;
 
-    /* Search tag names. */
-    stag->tag = rpmTagGetValue(tagname);
-    if (stag->tag != RPMTAG_NOT_FOUND)
-	goto bingo;
+    } else stag->tag = -2;
 
-    return 1;
-
-bingo:
     /* Search extensions for specific format. */
     if (stag->type != NULL)
 	stag->fmt = rpmHeaderFormatFuncByName(stag->type);
@@ -342,7 +331,13 @@ static int parseFormat(headerSprintfArgs hsa, char * str,
 	    token->u.tag.justOne = 0;
 
 	    chptr = start;
-	    while (*chptr && *chptr != '{' && *chptr != '%') chptr++;
+	    while (*chptr && *chptr != '{' && *chptr != '%') {
+		if (!risdigit(*chptr) && *chptr != '-') {
+		    hsa->errmsg = _("invalid field width");
+		    goto errxit;
+		}
+		chptr++;
+	    }
 	    if (!*chptr || *chptr == '%') {
 		hsa->errmsg = _("missing { after %");
 		goto errxit;
@@ -580,14 +575,10 @@ static int parseExpression(headerSprintfArgs hsa, sprintfToken token,
     return 0;
 }
 
-static rpmtd getCached(rpmtd *cache, rpmTag tag)
+static rpmtd getCached(tagCache cache, rpmTagVal tag)
 {
-    rpmtd td = NULL;
-
-    if (tag >= HEADER_IMAGE && tag < RPMTAG_FIRSTFREE_TAG && cache[tag]) {
-	td = cache[tag];
-    }
-    return td;
+    rpmtd *res = NULL;
+    return tagCacheGetEntry(cache, tag, &res, NULL, NULL) ? res[0] : NULL;
 }
 
 /**
@@ -599,7 +590,7 @@ static rpmtd getCached(rpmtd *cache, rpmTag tag)
  * @retval *countptr
  * @return		1 on success, 0 on failure
  */
-static rpmtd getData(headerSprintfArgs hsa, rpmTag tag)
+static rpmtd getData(headerSprintfArgs hsa, rpmTagVal tag)
 {
     rpmtd td = NULL;
 
@@ -609,7 +600,7 @@ static rpmtd getData(headerSprintfArgs hsa, rpmTag tag)
 	    rpmtdFree(td);
 	    return NULL;
 	}
-	hsa->cache[tag] = td;
+	tagCacheAddEntry(hsa->cache, tag, td);
     }
 
     return td;
@@ -627,19 +618,27 @@ static char * formatValue(headerSprintfArgs hsa, sprintfTag tag, int element)
     char * val = NULL;
     size_t need = 0;
     char * t, * te;
-    char buf[20];
     rpmtd td;
 
-    memset(buf, 0, sizeof(buf));
     if ((td = getData(hsa, tag->tag))) {
 	td->ix = element; /* Ick, use iterators instead */
-	stpcpy(stpcpy(buf, "%"), tag->format);
-	val = tag->fmt(td, buf);
+	val = tag->fmt(td);
     } else {
-	stpcpy(buf, "%s");
 	val = xstrdup("(none)");
     }
 
+    /* Handle field width + justification formatting if specified */
+    if (tag->format && *tag->format) {
+	char *tval = NULL;
+	/* user string + extra for '%', format char and trailing '\0' */
+	char fmtbuf[strlen(tag->format) + 3];
+
+	sprintf(fmtbuf, "%%%ss", tag->format);
+	rasprintf(&tval, fmtbuf, val);
+	free(val);
+	val = tval;
+    }
+	
     need = strlen(val);
 
     if (val && need > 0) {
@@ -792,30 +791,20 @@ static char * singleSprintf(headerSprintfArgs hsa, sprintfToken token,
     return (hsa->val + hsa->vallen);
 }
 
-/**
- * Create tag data cache.
- * This allocates much more space than necessary but playing it
- * simple and stupid for now.
- */
-static rpmtd *cacheCreate(void)
+static int tagCmp(rpmTagVal a, rpmTagVal b)
 {
-    rpmtd *cache = xcalloc(RPMTAG_FIRSTFREE_TAG, sizeof(*cache));
-    return cache;
+    return (a != b);
 }
 
-/**
- * Free tag data cache contents and destroy cache.
- */
-static void *cacheFree(rpmtd *cache)
+static unsigned int tagId(rpmTagVal tag)
 {
-    rpmtd *td = cache;
-    for (int i = 0; i < RPMTAG_FIRSTFREE_TAG; i++, td++) {
-	if (*td) {
-	    rpmtdFreeData(*td);
-	    rpmtdFree(*td);
-	}
-    }
-    free(cache);
+    return tag;
+}
+
+static rpmtd tagFree(rpmtd td)
+{
+    rpmtdFreeData(td);
+    rpmtdFree(td);
     return NULL;
 }
 
@@ -836,7 +825,7 @@ char * headerFormat(Header h, const char * fmt, errmsg_t * errmsg)
     if (parseFormat(&hsa, hsa.fmt, &hsa.format, &hsa.numTokens, NULL, PARSER_BEGIN))
 	goto exit;
 
-    hsa.cache = cacheCreate();
+    hsa.cache = tagCacheCreate(128, tagId, tagCmp, NULL, tagFree);
     hsa.val = xstrdup("");
 
     tag =
@@ -874,7 +863,7 @@ char * headerFormat(Header h, const char * fmt, errmsg_t * errmsg)
     if (hsa.val != NULL && hsa.vallen < hsa.alloced)
 	hsa.val = xrealloc(hsa.val, hsa.vallen+1);	
 
-    hsa.cache = cacheFree(hsa.cache);
+    hsa.cache = tagCacheFree(hsa.cache);
     hsa.format = freeFormat(hsa.format, hsa.numTokens);
 
 exit:

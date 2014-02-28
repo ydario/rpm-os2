@@ -45,13 +45,11 @@ static struct poptOption optionsTable[] = {
 int
 main(int argc, char *argv[])
 {
-    poptContext optCon;
+    poptContext optCon = NULL;
     ARGV_t av = NULL;
-    rpmfc fc;
-    int ac = 0;
+    rpmfc fc = NULL;
     int ec = 1;
-    int xx;
-char buf[BUFSIZ];
+    char buf[BUFSIZ];
 
     if ((progname = strrchr(argv[0], '/')) != NULL)
 	progname++;
@@ -62,46 +60,41 @@ char buf[BUFSIZ];
     if (optCon == NULL)
 	goto exit;
 
-    av = (ARGV_t) poptGetArgs(optCon);
-    ac = argvCount(av);
-
-    if (ac == 0) {
-	char * b, * be;
-	av = NULL;
-	while ((b = fgets(buf, sizeof(buf), stdin)) != NULL) {
-	    buf[sizeof(buf)-1] = '\0';
-	    be = b + strlen(buf) - 1;
+    /* normally files get passed through stdin but also accept files as args */
+    if (poptPeekArg(optCon)) {
+	const char *arg;
+	while ((arg = poptGetArg(optCon)) != NULL) {
+	    argvAdd(&av, arg);
+	}
+    } else {
+	while (fgets(buf, sizeof(buf), stdin) != NULL) {
+	    char *be = buf + strlen(buf) - 1;
 	    while (strchr("\r\n", *be) != NULL)
 		*be-- = '\0';
-	    xx = argvAdd(&av, b);
+	    argvAdd(&av, buf);
 	}
-	ac = argvCount(av);
     }
-
     /* Make sure file names are sorted. */
-    xx = argvSort(av, NULL);
+    argvSort(av, NULL);
 
-    /* Build file class dictionary. */
-    fc = rpmfcNew();
-    xx = rpmfcClassify(fc, av, NULL);
+    /* Build file/package class and dependency dictionaries. */
+    fc = rpmfcCreate(getenv("RPM_BUILD_ROOT"), 0);
+    if (rpmfcClassify(fc, av, NULL) || rpmfcApply(fc))
+	goto exit;
 
-    /* Build file/package dependency dictionary. */
-    xx = rpmfcApply(fc);
-
-if (_rpmfc_debug) {
-rpmfcPrint(buf, fc, NULL);
-}
+    if (_rpmfc_debug)
+	rpmfcPrint(buf, fc, NULL);
 
     if (print_provides)
 	rpmdsPrint(NULL, rpmfcProvides(fc), stdout);
     if (print_requires)
 	rpmdsPrint(NULL, rpmfcRequires(fc), stdout);
 
-    fc = rpmfcFree(fc);
-
     ec = 0;
 
 exit:
-    optCon = rpmcliFini(optCon);
+    argvFree(av);
+    rpmfcFree(fc);
+    rpmcliFini(optCon);
     return ec;
 }

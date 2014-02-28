@@ -32,7 +32,8 @@ rpmbuild \- Build RPM Package(s)
 
 
  [\fB--buildroot \fIDIRECTORY\fB\fR] [\fB--clean\fR] [\fB--nobuild\fR]
- [\fB--rmsource\fR] [\fB--rmspec\fR] [\fB--short-circuit\fR] [\fB--sign\fR]
+ [\fB--rmsource\fR] [\fB--rmspec\fR] [\fB--short-circuit\fR]
+ [\fB--noclean\fR] [\fB--nocheck\fR]
  [\fB--target \fIPLATFORM\fB\fR]
 
 .SH "DESCRIPTION"
@@ -100,6 +101,9 @@ will be used for dependency checks and any scriptlet(s) (e.g.
 \fB%prep\fR if building, a package)
 will be run after a chroot(2) to
 \fIDIRECTORY\fR.
+.TP
+\fB-D, --define='\fIMACRO EXPR\fB'\fR
+Defines \fIMACRO\fR with value \fIEXPR\fR.
 .SS "BUILD OPTIONS"
 .PP
 The general form of an rpm build command is 
@@ -157,6 +161,12 @@ Remove the build tree after the packages are made.
 \fB--nobuild\fR
 Do not execute any build stages. Useful for testing out spec files.
 .TP
+\fB--noclean\fR
+Do not execute %clean build stage even if present in spec.
+.TP
+\fB--nocheck\fR
+Do not execute %check build stage even if present in spec.
+.TP
 \fB--nodeps\fR
 Do not verify build dependencies.
 .TP
@@ -170,15 +180,10 @@ used standalone, eg. "\fBrpmbuild\fR \fB--rmspec foo.spec\fR").
 .TP
 \fB--short-circuit\fR
 Skip straight to specified stage (i.e., skip all stages leading
-up to the specified stage).  Only valid with \fB-bc\fR
-and \fB-bi\fR.
-.TP
-\fB--sign\fR
-Embed a GPG signature in the package. This signature can be used
-to verify the integrity and the origin of the package.  See the
-section on GPG SIGNATURES in
-\fBrpm\fR(8)
-for configuration details.
+up to the specified stage).  Only valid with \fB-bc\fR, \fB-bi\fR,
+and \fB-bb\fR.  Useful for local testing only.  Packages built this
+way will be marked with an unsatisfiable dependency to prevent
+their accidental use.
 .TP
 \fB--target \fIPLATFORM\fB\fR
 When building the package, interpret \fIPLATFORM\fR
@@ -231,37 +236,19 @@ configuration file(s).
 \fI/etc/rpm/macros\fR
 \fI~/.rpmmacros\fR
 .fi
-.SS "Database"
-.PP
-.nf
-\fI/var/lib/rpm/Basenames\fR
-\fI/var/lib/rpm/Conflictname\fR
-\fI/var/lib/rpm/Dirnames\fR
-\fI/var/lib/rpm/Filemd5s\fR
-\fI/var/lib/rpm/Group\fR
-\fI/var/lib/rpm/Installtid\fR
-\fI/var/lib/rpm/Name\fR
-\fI/var/lib/rpm/Packages\fR
-\fI/var/lib/rpm/Providename\fR
-\fI/var/lib/rpm/Provideversion\fR
-\fI/var/lib/rpm/Pubkeys\fR
-\fI/var/lib/rpm/Removed\fR
-\fI/var/lib/rpm/Requirename\fR
-\fI/var/lib/rpm/Requireversion\fR
-\fI/var/lib/rpm/Sha1header\fR
-\fI/var/lib/rpm/Sigmd5\fR
-\fI/var/lib/rpm/Triggername\fR
-.fi
 .SS "Temporary"
 .PP
 \fI/var/tmp/rpm*\fR
 .SH "SEE ALSO"
 
 .nf
-\fBpopt\fR(3),
-\fBrpm2cpio\fR(8),
 \fBgendiff\fR(1),
+\fBpopt\fR(3),
 \fBrpm\fR(8),
+\fBrpm2cpio\fR(8),
+\fBrpmkeys\fR(8)
+\fBrpmspec\fR(8),
+\fBrpmsign\fR(8),
 .fi
 
 \fBrpmbuild --help\fR - as rpm supports customizing the options via popt 

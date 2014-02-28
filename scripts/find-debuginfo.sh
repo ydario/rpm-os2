@@ -2,7 +2,7 @@
 #find-debuginfo.sh - automagically generate debug info and file list
 #for inclusion in an rpm spec file.
 #
-# Usage: find-debuginfo.sh [--strict-build-id] [-g]
+# Usage: find-debuginfo.sh [--strict-build-id] [-g] [-r]
 #	 		   [-o debugfiles.list]
 #			   [[-l filelist]... [-p 'pattern'] -o debuginfo.list]
 #			   [builddir]
@@ -10,13 +10,14 @@
 # The -g flag says to use strip -g instead of full strip on DSOs.
 # The --strict-build-id flag says to exit with failure status if
 # any ELF binary processed fails to contain a build-id note.
+# The -r flag says to use eu-strip --reloc-debug-sections.
 #
 # A single -o switch before any -l or -p switches simply renames
 # the primary output file from debugfiles.list to something else.
 # A -o switch that follows a -p switch or some -l switches produces
 # an additional output file with the debuginfo for the files in
 # the -l filelist file, or whose names match the -p pattern.
-# The -p argument is an egrep-style regexp matching the a file name,
+# The -p argument is an grep -E -style regexp matching the a file name,
 # and must not use anchors (^ or $).
 #
 # All file names in switches are relative to builddir (. if not given).
@@ -24,6 +25,9 @@
 
 # With -g arg, pass it to strip on libraries.
 strip_g=false
+
+# with -r arg, pass --reloc-debug-sections to eu-strip.
+strip_r=false
 
 # Barf on missing build IDs.
 strict=false
@@ -55,6 +59,9 @@ while [ $# -gt 0 ]; do
   -p)
     ptns[$nout]=$2
     shift
+    ;;
+  -r)
+    strip_r=true
     ;;
   *)
     BUILDDIR=$1
@@ -89,10 +96,12 @@ debugdir="${RPM_BUILD_ROOT}/usr/lib/debug"
 strip_to_debug()
 {
   local g=
+  local r=
+  $strip_r && r=--reloc-debug-sections
   $strip_g && case "$(file -bi "$2")" in
   application/x-sharedlib*) g=-g ;;
   esac
-  eu-strip --remove-comment $g -f "$1" "$2" || exit
+  eu-strip --remove-comment $r $g -f "$1" "$2" || exit
   chmod 444 "$1" || exit
 }
 
@@ -127,6 +136,23 @@ debug_link()
   link_relative "$t" "$l" "$RPM_BUILD_ROOT"
 }
 
+# Provide .2, .3, ... symlinks to all filename instances of this build-id.
+make_id_dup_link()
+{
+  local id="$1" file="$2" idfile
+
+  local n=1
+  while true; do
+    idfile=".build-id/${id:0:2}/${id:2}.$n"
+    [ $# -eq 3 ] && idfile="${idfile}$3"
+    if [ ! -L "$RPM_BUILD_ROOT/usr/lib/debug/$idfile" ]; then
+      break
+    fi
+    n=$[$n+1]
+  done
+  debug_link "$file" "/$idfile"
+}
+
 # Make a build-id symlink for id $1 with suffix $3 to file $2.
 make_id_link()
 {
@@ -139,6 +165,8 @@ make_id_link()
     debug_link "$file" "/$idfile"
     return
   fi
+
+  make_id_dup_link "$@"
 
   [ $# -eq 3 ] && return 0
 
@@ -188,10 +216,13 @@ while read nlinks inum f; do
   if [ $nlinks -gt 1 ]; then
     eval linked=\$linked_$inum
     if [ -n "$linked" ]; then
+      eval id=\$linkedid_$inum
+      make_id_dup_link "$id" "$dn/$(basename $f)"
+      make_id_dup_link "$id" "/usr/lib/debug$dn/$bn" .debug
       link=$debugfn
       get_debugfn "$linked"
       echo "hard linked $link to $debugfn"
-      ln -nf "$debugfn" "$link"
+      mkdir -p "$(dirname "$link")" && ln -nf "$debugfn" "$link"
       continue
     else
       eval linked_$inum=\$f
@@ -202,10 +233,15 @@ while read nlinks inum f; do
   echo "extracting debug info from $f"
   id=$(/usr/lib/rpm/debugedit -b "$RPM_BUILD_DIR" -d /usr/src/debug \
 			      -i -l "$SOURCEFILE" "$f") || exit
+  if [ $nlinks -gt 1 ]; then
+    eval linkedid_$inum=\$id
+  fi
   if [ -z "$id" ]; then
     echo >&2 "*** ${strict_error}: No build ID note found in $f"
     $strict && exit 2
   fi
+
+  [ -x /usr/bin/gdb-add-index ] && /usr/bin/gdb-add-index "$f" > /dev/null 2>&1
 
   # A binary already copied into /usr/lib/debug doesn't get stripped,
   # just has its file names collected and adjusted.
@@ -232,7 +268,7 @@ done || exit
 
 # For each symlink whose target has a .debug file,
 # make a .debug symlink to that file.
-find $RPM_BUILD_ROOT ! -path "${debugdir}/*" -type l -print |
+find "$RPM_BUILD_ROOT" ! -path "${debugdir}/*" -type l -print |
 while read f
 do
   t=$(readlink -m "$f").debug
@@ -246,7 +282,7 @@ done
 
 if [ -s "$SOURCEFILE" ]; then
   mkdir -p "${RPM_BUILD_ROOT}/usr/src/debug"
-  LC_ALL=C sort -z -u "$SOURCEFILE" | egrep -v -z '(<internal>|<built-in>)$' |
+  LC_ALL=C sort -z -u "$SOURCEFILE" | grep -E -v -z '(<internal>|<built-in>)$' |
   (cd "$RPM_BUILD_DIR"; cpio -pd0mL "${RPM_BUILD_ROOT}/usr/src/debug")
   # stupid cpio creates new directories in mode 0700, fixup
   find "${RPM_BUILD_ROOT}/usr/src/debug" -type d -print0 |
@@ -268,7 +304,7 @@ fi
 # Append to $1 only the lines from stdin not already in the file.
 append_uniq()
 {
-  fgrep -f "$1" -x -v >> "$1"
+  grep -F -f "$1" -x -v >> "$1"
 }
 
 # Helper to generate list of corresponding .debug files from a file list.
@@ -288,7 +324,7 @@ filtered_list()
   local out="$1"
   shift
   test $# -gt 0 || return
-  fgrep -f <(filelist_debugfiles 's,^.*$,/usr/lib/debug&.debug,' "$@") \
+  grep -F -f <(filelist_debugfiles 's,^.*$,/usr/lib/debug&.debug,' "$@") \
   	-x $LISTFILE >> $out
   sed -n -f <(filelist_debugfiles 's/[\\.*+#]/\\&/g
 h
@@ -298,12 +334,12 @@ s,^.*$,s# /usr/lib/debug&.debug$##p,p
 ' "$@") "$LINKSFILE" | append_uniq "$out"
 }
 
-# Write an output debuginfo file list based on an egrep-style regexp.
+# Write an output debuginfo file list based on an grep -E -style regexp.
 pattern_list()
 {
   local out="$1" ptn="$2"
   test -n "$ptn" || return
-  egrep -x -e "$ptn" "$LISTFILE" >> "$out"
+  grep -E -x -e "$ptn" "$LISTFILE" >> "$out"
   sed -n -r "\#^$ptn #s/ .*\$//p" "$LINKSFILE" | append_uniq "$out"
 }
 
@@ -315,7 +351,7 @@ while ((i < nout)); do
   > ${outs[$i]}
   filtered_list ${outs[$i]} ${lists[$i]}
   pattern_list ${outs[$i]} "${ptns[$i]}"
-  fgrep -vx -f ${outs[$i]} "$LISTFILE" > "${LISTFILE}.new"
+  grep -Fvx -f ${outs[$i]} "$LISTFILE" > "${LISTFILE}.new"
   mv "${LISTFILE}.new" "$LISTFILE"
   ((++i))
 done

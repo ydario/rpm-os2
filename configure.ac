@@ -1,17 +1,21 @@
 AC_PREREQ(2.61)
-AC_INIT(rpm, 4.8.1, rpm-maint@lists.rpm.org)
+AC_INIT(rpm, 4.11.1, rpm-maint@lists.rpm.org)
 
 AC_CONFIG_SRCDIR([rpmqv.c])
 AC_CONFIG_HEADERS([config.h])
 AC_CONFIG_MACRO_DIR([m4])
 
 AM_INIT_AUTOMAKE([1.10 foreign tar-ustar dist-bzip2 subdir-objects nostdinc])
+dnl Allow silent build on automake versions that support it
+m4_ifdef([AM_SILENT_RULES], [AM_SILENT_RULES])
 
 AC_CONFIG_TESTDIR(tests)
 
 AC_USE_SYSTEM_EXTENSIONS
 
 AC_DISABLE_STATIC
+
+PKG_PROG_PKG_CONFIG
 
 dnl Checks for programs.
 AC_PROG_CXX
@@ -33,22 +37,19 @@ fi
 AS=${AS-as}
 AC_SUBST(AS)
 if test "$GCC" = yes; then
-    CFLAGS="$CFLAGS -fPIC -DPIC -D_REENTRANT -Wall -Wpointer-arith -Wmissing-prototypes -Wno-char-subscripts"
-    # XXX disabled for now due to noise from NSPR headers
-    # CFLAGS="$CFLAGS -Wstrict-prototypes"
     cflags_to_try="-fno-strict-aliasing -fstack-protector -Wempty-body"
     AC_MSG_CHECKING([supported compiler flags])
     old_cflags=$CFLAGS
     echo
     for flag in $cflags_to_try; do
-        CFLAGS="$CFLAGS $flag"
+        CFLAGS="$CFLAGS $flag -Werror"
         AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[]], [[return 0;]])],[
                 echo "   $flag"
                 RPMCFLAGS="$RPMCFLAGS $flag"
         ],[])
         CFLAGS=$old_cflags
     done
-    CFLAGS="$CFLAGS $RPMCFLAGS"
+    CFLAGS="$CFLAGS -fPIC -DPIC -D_REENTRANT -Wall -Wpointer-arith -Wmissing-prototypes -Wstrict-prototypes $RPMCFLAGS"
 fi
 export CFLAGS
 
@@ -72,45 +73,6 @@ else
 fi
 AC_SUBST(FIXPERMS)
 
-dnl
-dnl see if we have a mkdir that supports `-p'.
-dnl
-AC_PATH_PROGS(RPM_MKDIR, mkdir, mkdir)
-AC_MSG_CHECKING(if $RPM_MKDIR supports -p)
-rm -rf conftest
-$RPM_MKDIR -p conftest/a 2>/dev/null
-if test $? = 0 ; then
-	rmdir conftest/a 2>/dev/null
-	if test $? = 0  ; then
-		:
-	else
-		RPM_MKDIR_P=0
-	fi
-
-	rmdir conftest 2>/dev/null
-	if test $? = 0 ; then
-		RPM_MKDIR_P="$RPM_MKDIR -p"
-	else
-		RPM_MKDIR_P=0
-	fi
-else
-	RPM_MKDIR_P=0
-fi
-
-if test X"$RPM_MKDIR_P" = X0 ; then
-	AC_MSG_RESULT(no)
-	RPM_MKDIR_P="`echo ${prefix}/lib/rpm/mkinstalldirs`"
-else
-	AC_MSG_RESULT(yes)
-fi
-dnl
-dnl substitute this into config.h, so the C source picks it up.
-dnl
-AC_DEFINE_UNQUOTED(RPM_MKDIR_P, "${RPM_MKDIR_P}",
-[A full path to a program, possibly with arguments, that will create a
-   directory and all necessary parent directories, ala 'mkdir -p'])
-AC_SUBST(RPM_MKDIR_P)
-
 dnl AM_DISABLE_SHARED
 AM_PROG_LIBTOOL
 
@@ -128,6 +90,7 @@ fi
 dnl
 dnl Find some common programs
 dnl
+AC_PATH_PROG(__7ZIP, 7zip, /usr/bin/7za, $MYPATH)
 AC_PATH_PROG(__BZIP2, bzip2, /usr/bin/bzip2, $MYPATH)
 AC_PATH_PROG(__CAT, cat, /bin/cat, $MYPATH)
 AC_PATH_PROG(__CHGRP, chgrp, /bin/chgrp, $MYPATH)
@@ -141,24 +104,16 @@ AC_PATH_PROG(__GPG, gpg, /usr/bin/gpg, $MYPATH)
 AC_PATH_PROG(__GREP, grep, /bin/grep, $MYPATH)
 AC_PATH_PROG(__GZIP, gzip, /bin/gzip, $MYPATH)
 AC_PATH_PROG(__UNZIP, unzip, /usr/bin/unzip, $MYPATH)
-
 AC_PATH_PROG(__ID, id, /usr/bin/id, $MYPATH)
-AC_MSG_CHECKING(checking whether id supports -u)
-    if ${__ID} -u 2>&1 > /dev/null ; then
-	__ID_U="%{__id} -u"
-	AC_MSG_RESULT(yes)
-    else
-	__ID_U="%{__id} | %{__sed} 's/[[^=]]*=\\\\([[0-9]][[0-9]]*\\\\).*$/\\\\1/'"
-	AC_MSG_RESULT(no)
-    fi
-AC_SUBST(__ID_U)
-
 AC_PATH_PROG(__INSTALL, install, /usr/bin/install, $MYPATH)
+AC_PATH_PROG(__LRZIP, lrzip, /usr/bin/lrzip, $MYPATH)
+AC_PATH_PROG(__LZIP, lzip, /usr/bin/lzip, $MYPATH)
 AC_PATH_PROG(__XZ, xz, /usr/bin/xz, $MYPATH)
 AC_PATH_PROG(__MAKE, make, /usr/bin/make, $MYPATH)
 AC_PATH_PROG(__MKDIR, mkdir, /bin/mkdir, $MYPATH)
 AC_PATH_PROG(__MV, mv, /bin/mv, $MYPATH)
 AC_PATH_PROG(__PATCH, patch, /usr/bin/patch, $MYPATH)
+AC_PATH_PROG(__RESTORECON, restorecon, /sbin/restorecon, $MYPATH)
 AC_MSG_CHECKING(old version of patch)
     PATCHVERSION=`patch --version 2>&1`
 
@@ -176,6 +131,7 @@ AC_PATH_PROG(__PYTHON, python, /usr/bin/python, $MYPATH)
 AC_PATH_PROG(__RM, rm, /bin/rm, $MYPATH)
 AC_PATH_PROG(__RSH, rsh, /usr/bin/rsh, $MYPATH)
 AC_PATH_PROG(__SED, sed, /bin/sed, $MYPATH)
+AC_PATH_PROG(__SEMODULE, semodule, /usr/bin/semodule, $MYPATH)
 AC_PATH_PROG(__SSH, ssh, /usr/bin/ssh, $MYPATH)
 AC_PATH_PROG(__TAR, tar, /bin/tar, $MYPATH)
 
@@ -184,7 +140,26 @@ AC_PATH_PROG(__NM, nm, /usr/bin/nm, $MYPATH)
 AC_PATH_PROG(__OBJCOPY, objcopy, /usr/bin/objcopy, $MYPATH)
 AC_PATH_PROG(__OBJDUMP, objdump, /usr/bin/objdump, $MYPATH)
 AC_PATH_PROG(__STRIP, strip, /usr/bin/strip, $MYPATH)
-AC_PATH_PROG(__FAKECHROOT, fakechroot, /usr/bin/fakechroot, $MYPATH)
+
+AC_PATH_PROG(__GIT, git, /usr/bin/git, $MYPATH)
+AC_PATH_PROG(__HG, hg, /usr/bin/hg, $MYPATH)
+AC_PATH_PROG(__BZR, bzr, /usr/bin/bzr, $MYPATH)
+AC_PATH_PROG(__QUILT, quilt, /usr/bin/quilt, $MYPATH)
+
+AC_PATH_PROG(__FAKECHROOT, fakechroot, no, $MYPATH)
+AM_CONDITIONAL(HAVE_FAKECHROOT, [test "$__FAKECHROOT" != "no"])
+
+dnl see if we have a mkdir that supports `-p' for rpmbuild's purposes
+AC_PROG_MKDIR_P
+if ! echo $MKDIR_P | grep -q mkdir; then 
+  __MKDIR_P="`echo ${prefix}/lib/rpm/mkinstalldirs`"
+else
+  __MKDIR_P=$MKDIR_P
+fi
+AC_DEFINE_UNQUOTED(__MKDIR_P, "${__MKDIR_P}",
+[A full path to a program, possibly with arguments, that will create a
+   directory and all necessary parent directories, ala 'mkdir -p'])
+AC_SUBST(__MKDIR_P)
 
 #=================
 # Check for zlib library. 
@@ -202,6 +177,8 @@ AC_CHECK_HEADERS([zlib.h],[
 dnl zlib-1.0.4 has not gzseek
     AC_CHECK_LIB(${zlib}, gzseek, [AC_DEFINE(HAVE_GZSEEK, 1, [Define as 1 if your zlib has gzseek()])])
   ])
+],[
+  AC_MSG_ERROR([missing required header zlib.h])
 ])
 
 AC_SUBST(WITH_ZLIB_INCLUDE)
@@ -211,13 +188,7 @@ AC_SUBST(WITH_ZLIB_LIB)
 # Check for bzip2 library.
 
 AC_CHECK_HEADERS([bzlib.h],[
-  AC_CHECK_LIB(bz2, bzread, [WITH_BZ2_LIB=-lbz2],
-  [
-    AC_CHECK_LIB(bz2, BZ2_bzread,[ 
-      WITH_BZ2_LIB="-lbz2"
-      AC_DEFINE(HAVE_BZ2_1_0, 1, [Define as 1 if you bzip2 1.0])
-    ]) 
-  ])
+  AC_CHECK_LIB(bz2, BZ2_bzread, [WITH_BZ2_LIB=-lbz2])
 ])
 AC_SUBST(WITH_BZ2_LIB)
 
@@ -237,25 +208,9 @@ dnl
 
 dnl Checks for libraries.
 
-AC_CHECK_FUNC(setreuid, [], [
-    AC_CHECK_LIB(ucb, setreuid, [if echo $LIBS | grep -- -lucb >/dev/null ;then :; else LIBS="$LIBS -lc -lucb" USEUCB=y;fi])
+AC_CHECK_FUNC(gethostname, [], [
+    AC_CHECK_LIB(nsl, gethostname)
 ])
-
-AC_CHECK_FUNC(rand, [], [
-    AC_CHECK_LIB(rand, rand, [])
-])
-
-AC_CHECK_FUNC(getdomainname, [], [
-    AC_CHECK_LIB(nsl, getdomainname)
-])
-AC_CHECK_FUNC(socket, [], [
-    AC_CHECK_LIB(socket, socket)
-])
-
-AC_CHECK_HEADERS(error.h)
-AC_CHECK_FUNCS(error)
-
-AC_CHECK_HEADERS(poll.h)
 
 AC_CHECK_HEADERS(pthread.h)
 
@@ -266,20 +221,10 @@ AC_CHECK_LIB(pthread, pthread_mutex_trylock, [], [
   ])
 ])
 
-AC_SEARCH_LIBS(aio_read, [c rt aio posix4])
-
-AC_CHECK_FUNCS(vsnprintf snprintf)
-
-dnl Temporary hack for MiNT.  Some functions (writev, snprintf) are
-dnl not in the libc but in libport (for political reasons).  This check
-dnl can hopefully be removed soon.  Please use the default action
-dnl for this macro (not LIBS=...), otherwise the check for dbopen
-dnl will fail.
-AC_CHECK_LIB(port, writev)
+AC_SEARCH_LIBS(dlopen, [dl])
 
 #=================
 # Check for libelf library. Prefer external, otherwise none.
-WITH_LIBELF_INCLUDE=
 WITH_LIBELF_LIB=
 AC_CHECK_HEADER([libelf.h])
 AC_CHECK_HEADERS([gelf.h], [
@@ -289,7 +234,6 @@ AC_CHECK_HEADERS([gelf.h], [
 	    WITH_LIBELF=yes
 	])
 ])
-AC_SUBST(WITH_LIBELF_INCLUDE)
 AC_SUBST(WITH_LIBELF_LIB)
 AM_CONDITIONAL(LIBELF,[test "$WITH_LIBELF" = yes])
 
@@ -299,20 +243,56 @@ AC_CHECK_HEADERS([dwarf.h], [
 AM_CONDITIONAL(LIBDWARF,[test "$WITH_LIBDWARF" = yes])
 
 #=================
+# Check for beecrypt library if requested.
+AC_ARG_WITH(beecrypt, [  --with-beecrypt         build with beecrypt support ],,[with_beecrypt=no])
+AC_ARG_WITH(internal_beecrypt, [  --with-internal-beecrypt build with internal beecrypt library ],,[with_internal_beecrypt=no])
+AM_CONDITIONAL([WITH_INTERNAL_BEECRYPT],[test "$with_internal_beecrypt" = yes])
+if test "$with_internal_beecrypt" = yes ; then
+  with_beecrypt=yes
+fi
+AM_CONDITIONAL([WITH_BEECRYPT],[test "$with_beecrypt" = yes])
+
+WITH_BEECRYPT_INCLUDE=
+WITH_BEECRYPT_LIB=
+if test "$with_beecrypt" = yes ; then
+  AC_DEFINE(WITH_BEECRYPT, 1, [Build with beecrypt instead of nss3 support?])
+  if test "$with_internal_beecrypt" = yes ; then
+    WITH_BEECRYPT_INCLUDE="-I\$(top_srcdir)/beecrypt"
+    AC_DEFINE(HAVE_BEECRYPT_API_H, 1, [Define to 1 if you have the <beecrypt/api.h> header file.])
+  else
+    AC_CHECK_LIB(beecrypt, mpfprintln, [
+      WITH_BEECRYPT_LIB="-lbeecrypt"
+    ],[
+      AC_MSG_ERROR([missing required library 'beecrypt']) 
+    ])
+    AC_CHECK_HEADER([beecrypt/api.h], [AC_DEFINE(HAVE_BEECRYPT_API_H, 1, [Define to 1 if you have the <beecrypt/api.h> header file.])
+    ])
+  fi
+fi
+AC_SUBST(WITH_BEECRYPT_LIB)
+AC_SUBST(WITH_BEECRYPT_INCLUDE)
+
+#=================
 # Check for NSS library.
 # We need nss.h from NSS which needs nspr.h. Unfortunately both glibc and NSS 
 # have a header named nss.h... so make extra check for NSS's sechash.h 
 # which we use too and hopefully is slightly more unique to NSS.
 WITH_NSS_INCLUDE=
 WITH_NSS_LIB=
+if test "$with_beecrypt" != yes ; then
 AC_CHECK_HEADERS([nspr.h nss.h sechash.h], [], [
   AC_MSG_ERROR([missing required NSPR / NSS header])
 ])
-AC_CHECK_LIB(nss3, NSS_NoDB_Init, [
+AC_CHECK_LIB(nss3, VFY_VerifyDigestDirect, [
   WITH_NSS_LIB=-lnss3
+  AC_CHECK_LIB(nss3, NSS_InitContext, [
+    AC_DEFINE(HAVE_NSS_INITCONTEXT, 1, [Define to 1 if NSS has NSS_InitContext])
+    AC_SUBST(HAVE_NSS_INITCONTEXT, [1])
+  ])
 ], [
-  AC_MSG_ERROR([missing required NSS library 'nss3'])
+  AC_MSG_ERROR([required NSS library 'nss3' missing or too old])
 ])
+fi
 AC_SUBST(WITH_NSS_INCLUDE)
 AC_SUBST(WITH_NSS_LIB)
 
@@ -366,24 +346,16 @@ esac],
 case "$with_external_db" in
 yes )
   AC_CHECK_HEADERS([db.h],[
-    AC_CHECK_TYPE([db_threadid_t],[],
-      [AC_MSG_WARN([missing type db_threadid_t])],
-      [#include <db.h>])
-    save_LIBS="$LIBS"
-    AC_CHECK_LIB([db],[db_create],[],[
-      AC_MSG_ERROR([missing db_create in libdb])
+    AC_PREPROC_IFELSE([
+      AC_LANG_SOURCE([
+	#include <db.h>
+	#if ((DB_VERSION_MAJOR < 4) || (DB_VERSION_MAJOR == 4 && DB_VERSION_MINOR < 5))
+	#error Berkeley DB too old
+	#endif
       ])
-    AC_CHECK_LIB([db],[db_env_create],[],[
-      AC_MSG_ERROR([missing db_env_create in libdb])
-      ])
-    AC_CHECK_LIB([db],[db_env_set_func_fsync],[],[
-      AC_MSG_ERROR([missing db_env_set_func_fsync in libdb])
-      ])
-    AC_CHECK_LIB([db],[db_strerror],[],[
-      AC_MSG_ERROR([missing db_strerror in libdb])
-      ])
-    WITH_DB_LIB=-ldb
-    LIBS="$save_LIBS"
+    ],[ WITH_DB_LIB=-ldb ], 
+      [ AC_MSG_ERROR([Berkeley DB version >= 4.5 required])
+    ])
   ],[
     AC_MSG_ERROR([missing required header db.h])
   ])
@@ -399,71 +371,21 @@ esac
 
 AC_SUBST([WITH_DB_LIB])
 
-#=================
-# Check for sqlite3 library.
-AC_ARG_ENABLE(sqlite3, [AS_HELP_STRING([--enable-sqlite3],[enable sqlite3 support])],
-[case "$enable_sqlite3" in
-yes|no) ;;
-*) AC_MSG_ERROR([invalid argument to --enable-sqlite3])
-  ;;
-esac],
-[enable_sqlite3=no])
-
-WITH_SQLITE3_INCLUDE=
-WITH_SQLITE3_LIB=
-WITH_SQLITE3=no
-AS_IF([test "$enable_sqlite3" = yes],[
-  AC_CHECK_HEADERS([sqlite3.h],
-  [ AC_CHECK_LIB(sqlite3, sqlite3_open, [
-      WITH_SQLITE3_INCLUDE=
-      WITH_SQLITE3_LIB="-lsqlite3"
-      WITH_SQLITE3=yes
-    ],[
-      AC_MSG_ERROR([missing libsqlite3])
-    ])
-  ],[
-    AC_MSG_ERROR([missing sqlite3.h])
-  ])
-])
-
-AC_SUBST(WITH_SQLITE3_INCLUDE)
-AC_SUBST(WITH_SQLITE3_LIB)
-AM_CONDITIONAL([SQLITE3],[test "$WITH_SQLITE3" = yes])
-
-#=================
-
-dnl AmigaOS and IXEmul have a fork() dummy
-  case "$host" in
-    m68k-*-amigaos ) 
-	echo "Building for AmigaOS: using vfork() instead of fork()"; 
-	CFLAGS="$CFLAGS -Dfork=vfork" 
-	;;
-  esac
-
 AM_GNU_GETTEXT_VERSION([0.16.1])
 AM_GNU_GETTEXT([external])
 
 dnl Checks for header files we can live without.
 AC_HEADER_STDC
 AC_HEADER_MAJOR
-AC_HEADER_DIRENT
-AC_HEADER_TIME
+AC_STRUCT_DIRENT_D_TYPE
 
-AC_CHECK_HEADERS(locale.h)
 AC_CHECK_HEADERS(limits.h)
-AC_CHECK_HEADERS(fcntl.h getopt.h grp.h memory.h netdb.h pwd.h utime.h)
+AC_CHECK_HEADERS(fcntl.h getopt.h)
 
-AC_CHECK_HEADERS(sys/ipc.h sys/socket.h sys/select.h)
-AC_CHECK_HEADERS(sys/types.h sys/stdtypes.h)
-AC_CHECK_HEADERS(sys/mman.h sys/resource.h sys/utsname.h sys/wait.h)
+AC_CHECK_HEADERS(sys/utsname.h)
 
-AC_CHECK_HEADERS(netinet/in_systm.h)
-AC_CHECK_HEADERS(mntent.h sys/mnttab.h sys/systemcfg.h)
-AC_CHECK_HEADERS(sys/mount.h sys/mntctl.h sys/param.h sys/vmount.h)
-AC_CHECK_HEADERS(libio.h)
-AC_CHECK_HEADERS(err.h mcheck.h)
-
-AC_CHECK_HEADERS(glob.h)
+AC_CHECK_HEADERS(sys/systemcfg.h)
+AC_CHECK_HEADERS(sys/param.h)
 
 dnl statfs portability fiddles.
 dnl
@@ -584,40 +506,7 @@ main() {
 ])
 fi
 
-AC_C_INLINE
-
 dnl look for libc features
-PROVIDES_ERRNO=no
-AC_MSG_CHECKING(if <netdb.h> defines h_errno)
-AC_LINK_IFELSE([AC_LANG_PROGRAM([[#include <netdb.h>]], [[printf("%d",h_errno)]])],[PROVIDES_ERRNO=yes],[])
-AC_MSG_RESULT($PROVIDES_ERRNO)
-if test $PROVIDES_ERRNO = yes; then
-	AC_DEFINE(HAVE_HERRNO, 1, [ Define as 1 if <netdb.h> defines h_errno])
-fi
-
-dnl If a system doesn't have S_IFSOCK, define it as 0 which will
-dnl make S_ISSOCK always return false (nice, eh?)
-AC_MSG_CHECKING(if <sys/stat.h> defines S_IFSOCK)
-AC_LINK_IFELSE([AC_LANG_PROGRAM([[#include <sys/stat.h>]], [[printf("%d", S_IFSOCK)]])],[HAS_S_IFSOCK=yes],[HAS_S_IFSOCK=no])
-AC_MSG_RESULT($HAS_S_IFSOCK)
-if test $HAS_S_IFSOCK = yes; then
-	AC_DEFINE(HAVE_S_IFSOCK, 1, [Define as 1 if <sys/stat.h> defines S_IFSOCK])
-fi
-
-dnl Some Unix's are missing S_ISLNK, S_ISSOCK
-AC_MSG_CHECKING(if <sys/stat.h> defines S_ISLNK)
-AC_LINK_IFELSE([AC_LANG_PROGRAM([[#include <sys/stat.h>]], [[printf("%d", S_ISLNK(0755))]])],[HAS_S_ISLNK=yes],[HAS_S_ISLNK=no])
-AC_MSG_RESULT($HAS_S_ISLNK)
-if test $HAS_S_ISLNK = yes; then
-	AC_DEFINE(HAVE_S_ISLNK, 1, [Define as 1 if <sys/stat.h> defines S_ISLNK])
-fi
-
-AC_MSG_CHECKING(if <sys/stat.h> defines S_ISSOCK)
-AC_LINK_IFELSE([AC_LANG_PROGRAM([[#include <sys/stat.h>]], [[printf("%d", S_ISSOCK(0755))]])],[HAS_S_ISSOCK=yes],[HAS_S_ISSOCK=no])
-AC_MSG_RESULT($HAS_S_ISSOCK)
-if test $HAS_S_ISSOCK = yes; then
-	AC_DEFINE(HAVE_S_ISSOCK, 1, [Define as 1 if <sys/stat.h> defines S_ISSOCK])
-fi
 
 dnl Check for missing typedefs
 AC_TYPE_MODE_T
@@ -626,38 +515,18 @@ AC_TYPE_PID_T
 AC_TYPE_SIZE_T
 
 dnl Checks for library functions.
-AC_FUNC_VPRINTF
-dnl XXX don't want to re-enable code that's been unused for years at this
-dnl point, but should offer good performance improvements, check after
-dnl 4.4.2.1...
-dnl AC_FUNC_MMAP
+AC_CHECK_FUNCS(putenv)
+AC_CHECK_FUNCS(mempcpy)
+AC_CHECK_FUNCS(fdatasync)
 
-AC_CHECK_FUNCS(getaddrinfo getnameinfo inet_aton)
-AC_CHECK_FUNCS(mtrace)
-AC_CHECK_FUNCS(strerror)
+AC_REPLACE_FUNCS(stpcpy stpncpy)
 
-AC_REPLACE_FUNCS(basename getcwd getwd)
-AC_REPLACE_FUNCS(putenv realpath setenv)
-AC_REPLACE_FUNCS(stpcpy stpncpy strcspn)
-AC_REPLACE_FUNCS(strdup strtol strtoul strspn strstr)
+AC_CHECK_FUNCS([secure_getenv __secure_getenv])
 
-AC_CHECK_FUNCS(__secure_getenv)
+AC_CHECK_FUNCS(
+   [mkstemp getcwd basename dirname realpath setenv unsetenv regcomp lchown],
+   [], [AC_MSG_ERROR([function required by rpm])])
 
-AC_CHECK_FUNCS(regcomp)
-
-AC_CHECK_FUNCS(ftok)
-
-AC_CHECK_FUNCS([mkstemp], [], [AC_MSG_ERROR([mkstemp() is required by rpm])])
-
-dnl XXX Glob *is* broken on linux with libc5, solaris and possibly aix when
-dnl %files gets something like
-dnl	/usr/*/locale/*/LC_MESSAGES/*.mo
-dnl (Note: more than one asterisk in glob pattern.)
-dnl
-dnl XXX Glob is "fixed" in glibc-2.3.3-61, but the cost is that
-dnl dangling symlinks are no longer globbed. Always use the internal glob.
-AC_DEFINE(USE_GNU_GLOB, 1, [Use the included glob.c?])
-AC_LIBOBJ(glob)
 AC_LIBOBJ(fnmatch)
 
 dnl check if python is requested
@@ -695,7 +564,7 @@ AS_IF([test "$enable_python" = yes],[
 AC_SUBST(WITH_PYTHON_INCLUDE)
 AC_SUBST(WITH_PYTHON_LIB)
 
-AM_CONDITIONAL(PYTHON,[test "$WITH_PYTHON_SUBPACKAGE" = 1])
+AM_CONDITIONAL(ENABLE_PYTHON,[test "$WITH_PYTHON_SUBPACKAGE" = 1])
 
 AC_PATH_PROG(DOXYGEN, doxygen, no)
 dnl
@@ -725,18 +594,75 @@ esac],
 
 AS_IF([test "$with_selinux" = yes],[
   AC_CHECK_HEADER([selinux/selinux.h],[
-    AC_CHECK_LIB(selinux,[is_selinux_enabled],[with_selinux=yes],[
-      AC_MSG_ERROR([--with-selinux given, but libselinux not found])])
+    save_LIBS="$LIBS"
+    AC_CHECK_LIB([selinux],[is_selinux_enabled],[],[
+      AC_MSG_ERROR([--with-selinux given, but is_selinux_enabled not found in libselinux])])
+    AC_CHECK_LIB([selinux],[selinux_getpolicytype],[],[
+      AC_MSG_ERROR([--with-selinux given, but selinux_getpolicytype not found in libselinux])])
+    AC_CHECK_LIB([selinux],[selinux_reset_config],[],[
+      AC_MSG_ERROR([--with-selinux given, but selinux_reset_config not found in libselinux])])
+    LIBS="$save_LIBS"
   ],[
     AC_MSG_ERROR([--with-selinux given, but selinux/selinux.h not found])
+  ])
+
+  AC_CHECK_HEADER([selinux/label.h],[
+    save_LIBS="$LIBS"
+    AC_CHECK_LIB([selinux],[selabel_close],[],[
+      AC_MSG_ERROR([--with-selinux given, but selabel_close not found in libselinux])])
+    AC_CHECK_LIB([selinux],[selabel_lookup_raw],[],[
+      AC_MSG_ERROR([--with-selinux given, but selabel_lookup_raw not found in libselinux])])
+    AC_CHECK_LIB([selinux],[selabel_open],[],[
+      AC_MSG_ERROR([--with-selinux given, but selabel_open not found in libselinux])])
+    LIBS="$save_LIBS"
+  ],[
+    AC_MSG_ERROR([--with-selinux given, but selinux/label.h not found])
+  ])
+
+  dnl FIXME: semanage is only needed for the sepolicy plugin
+  AC_CHECK_HEADER([semanage/semanage.h],[
+    save_LIBS="$LIBS"
+    AC_CHECK_LIB([semanage],[semanage_begin_transaction],[],[
+      AC_MSG_ERROR([--with-selinux given, but semanage_begin_transaction missing in libsemanage])])
+    AC_CHECK_LIB([semanage],[semanage_commit],[],[
+      AC_MSG_ERROR([--with-selinux given, but semanage_commit missing in libsemanage])])
+    AC_CHECK_LIB([semanage],[semanage_connect],[],[
+      AC_MSG_ERROR([--with-selinux given, but semanage_connect missing in libsemanage])])
+    AC_CHECK_LIB([semanage],[semanage_disconnect],[],[
+      AC_MSG_ERROR([--with-selinux given, but semanage_disconnect missing in libsemanage])])
+    AC_CHECK_LIB([semanage],[semanage_handle_create],[],[
+      AC_MSG_ERROR([--with-selinux given, but semanage_handle_create missing in libsemanage])])
+    AC_CHECK_LIB([semanage],[semanage_handle_destroy],[],[
+      AC_MSG_ERROR([--with-selinux given, but semanage_handle_destroy missing in libsemanage])])
+    AC_CHECK_LIB([semanage],[semanage_is_connected],[],[
+      AC_MSG_ERROR([--with-selinux given, but semanage_is_connected missing in libsemanage])])
+    AC_CHECK_LIB([semanage],[semanage_module_install_base_file],[],[
+      AC_MSG_ERROR([--with-selinux given, but semanage_module_install_base_file missing in libsemanage])])
+    AC_CHECK_LIB([semanage],[semanage_module_install_file],[],[
+      AC_MSG_ERROR([--with-selinux given, but semanage_module_install_file missing in libsemanage])])
+    AC_CHECK_LIB([semanage],[semanage_module_remove],[],[
+      AC_MSG_ERROR([--with-selinux given, but semanage_module_remove missing in libsemanage])])
+    AC_CHECK_LIB([semanage],[semanage_select_store],[],[
+      AC_MSG_ERROR([--with-selinux given, but semanage_select_store missing in libsemanage])])
+    AC_CHECK_LIB([semanage],[semanage_set_check_contexts],[],[
+      AC_MSG_ERROR([--with-selinux given, but semanage_set_check_contexts missing in libsemanage])])
+    AC_CHECK_LIB([semanage],[semanage_set_create_store],[],[
+      AC_MSG_ERROR([--with-selinux given, but semanage_set_create_store missing in libsemanage])])
+    AC_CHECK_LIB([semanage],[semanage_set_reload],[],[
+      AC_MSG_ERROR([--with-selinux given, but semanage_set_reload missing in libsemanage])])
+    LIBS="$save_LIBS"
+  ],[
+    AC_MSG_ERROR([--with-selinux given, but semanage/semanage.h not found])
   ])
 ])
 
 AS_IF([test "$with_selinux" = yes],[
   AC_DEFINE(WITH_SELINUX, 1, [Build with selinux support?])
   WITH_SELINUX_LIB="-lselinux"
+  WITH_SEMANAGE_LIB="-lsemanage"
 ])
 AC_SUBST(WITH_SELINUX_LIB)
+AC_SUBST(WITH_SEMANAGE_LIB)
 AM_CONDITIONAL(SELINUX,[test "$with_selinux" = yes])
 
 # libcap
@@ -798,28 +724,26 @@ AS_IF([test "$with_acl" = yes],[
 AC_SUBST(WITH_ACL_LIB)
 AM_CONDITIONAL(ACL,[test "$with_acl" = yes])
 
-WITH_LUA_LIB=
-WITH_LUA_INCLUDE=
-AC_ARG_WITH(lua, [AS_HELP_STRING([--with-lua],[build with lua support])],,[with_lua=yes])
-AS_IF([test "$with_lua" = yes],[
-  AC_CHECK_HEADER([lua.h],[
-    AC_CHECK_LIB(lua,[luaL_openlibs],[with_lua=yes],[
-      AC_MSG_ERROR([--with-lua given, but liblua not found])
-    ], 
-    [-lm])
-  ],[
-      AC_MSG_ERROR([--with-lua given, but lua.h not found])
-  ])
-])
+AC_ARG_WITH([lua], [AS_HELP_STRING([--with-lua], [build with lua support])],
+            [],
+            [with_lua=yes])
 
-AS_IF([test "$with_lua" = yes],[
-  AC_DEFINE(WITH_LUA, 1, [Build with lua support?])
-  WITH_LUA_INCLUDE=
-  WITH_LUA_LIB="-llua -lm" 
+AS_IF([test "$with_lua" != no],[
+  PKG_CHECK_MODULES([LUA],
+    [lua >= 5.1],
+    [AC_DEFINE(WITH_LUA, 1, [Build with lua support?])],
+    [AC_MSG_ERROR([lua not present (--without-lua to disable)])])
+  AC_SUBST(LUA_CFLAGS)
+  AC_SUBST(LUA_LIBS)
 ])
-AC_SUBST(WITH_LUA_LIB)
-AC_SUBST(WITH_LUA_INCLUDE)
-AM_CONDITIONAL(WITH_LUAEXT,[test "$with_lua" = yes])
+AM_CONDITIONAL(WITH_LUA,[test "$with_lua" = yes])
+
+AC_ARG_ENABLE(plugins, [AS_HELP_STRING([--disable-plugins],[build without plugin support])],,[enable_plugins=yes])
+AS_IF([test "$enable_plugins" = yes],[
+  AC_DEFINE(ENABLE_PLUGINS, 1, [Build with plugin support?])
+])
+AM_CONDITIONAL(ENABLE_PLUGINS,[test "$enable_plugins" = yes])
+
 
 with_dmalloc=no
 AC_ARG_WITH(dmalloc, [AS_HELP_STRING([--with-dmalloc],[build with dmalloc debugging support])])
@@ -828,76 +752,7 @@ if test "$with_dmalloc" = yes ; then
   LIBS="$LIBS -ldmalloc"
 fi
 
-AC_CHECK_FUNCS(setlocale)
-
 AC_CHECK_FUNCS(getpassphrase)
-
-AC_CHECK_FUNC(getmntent, AC_DEFINE(HAVE_GETMNTENT, 1, [Define if you have the getmntent() function]), [
-  AC_CHECK_FUNC(mntctl, AC_DEFINE(HAVE_MNTCTL, 1, [Define as 1 if you have mntctl() (only aix?)]),[
-    AC_CHECK_FUNC(getmntinfo, AC_DEFINE(HAVE_GETMNTINFO, 1, [Define as 1 if you have getmntinfo() (Mac OS X)]), [
-      AC_CHECK_FUNC(getmntinfo_r, AC_DEFINE(HAVE_GETMNTINFO_R, 1, [Define as 1 if you have getmntinfo_r() (only osf?)]), [
-        AC_CHECK_LIB(c_r, getmntinfo_r, [LIBS="$LIBS -lc_r"; 
-					AC_DEFINE(HAVE_GETMNTINFO_R, 1, [Define as 1 if you have getmntinfo_r() (only osf?)])], [
-		 AC_DEFINE([USE_GETMNTENT], 1, [Defined if getmntent replacement is used])
-                 AC_LIBOBJ(getmntent)])
-      ])
-    ])
-  ])
-])
-
-AC_CHECK_FUNC(lchown,
-   [__CHOWN_RHF="%{__chown} -Rhf"
-    __CHGRP_RHF="%{__chgrp} -Rhf"
-    AC_DEFINE(HAVE_LCHOWN, 1, [Define as 1 if you have lchown()])],
-   [__CHOWN_RHF="%{__chown} -Rf"
-    __CHGRP_RHF="%{__chgrp} -Rf"
-    dnl Does chown() follow symlinks? This should be a good enough test.
-    AC_MSG_CHECKING(whether chown() follows symlinks)
-    AC_ARG_ENABLE([broken-chown],
-            [AS_HELP_STRING([--enable-broken-chown],[this system's chown follows symbolic links])], 
-	    result=$enableval, result=unknown)
-    if echo "$build" | ${EGREP} "(aix)|(hpux)|(linux)" > /dev/null ; then
-	result=yes
-    elif echo "$build" | ${EGREP} "(nextstep)" > /dev/null ; then
-	result=no
-    fi
-    if test $result = unknown; then
-	if test `${__ID} | cut -f2 -d\= | cut -f1 -d\(` = 0; then
-	    rm -f foo bar
-	    touch foo
-	    ln -s foo bar
-	    ${__CHOWN} 10 bar
-	    if test `ls -l foo | awk '{print $3}'` != "root"; then
-		result=yes
-	    else
-		result=no
-	    fi
-	    ${__RM} -f foo bar
-	else
-	    AC_MSG_CHECKING((cannot check by non-root user))
-	    result=no
-	fi
-    fi
-
-    AC_MSG_RESULT($result)
-    if test $result = yes; then
-	    AC_DEFINE(CHOWN_FOLLOWS_SYMLINK, 1, [Define as 1 if chown() follows symlinks and you don't have lchown()])
-    fi])
-AC_SUBST(__CHOWN_RHF)
-AC_SUBST(__CHGRP_RHF)
-
-if echo "$host_os" | grep sco > /dev/null; then
-	echo "hacking things up for sco"
-	AC_DEFINE(NEED_STRINGS_H, 1, [Define as one if we need to include <strings.h> (along with <string.h>)])
-	AC_DEFINE(HAVE_STRUCT_MNTTAB, 1,
-	[Define as 1 if you have "struct mnttab" (only sco?)])
-elif echo "$host_os" | grep sunos > /dev/null; then
-	echo "hacking things up for sunos"
-	CFLAGS="$CFLAGS -D__USE_FIXED_PROTOTYPES__"
-	AC_DEFINE(NEED_STRINGS_H, 1, [Define as one if we need to include <strings.h> (along with <string.h>)])
-	AC_DEFINE(NEED_MYREALLOC, 1, [Define as 1 if we need myrealloc])
-	AC_LIBOBJ(myrealloc)
-fi
 
 #
 # get rid of the 4-th tuple, if config.guess returned "linux-gnu" for host_os
@@ -920,88 +775,43 @@ host_os_major=`echo "${host_os}" | sed 's/\..*$//'`
 host_os_noversion=`echo "${host_os}" | sed 's/[0-9]*\..*$//'`
 changequote([, ])
 
-rm -f ./find-provides
-if test -f ${srcdir}/autodeps/${host_cpu}-${host_os_exact}.prov ; then
-	echo "using ${srcdir}/autodeps/${host_cpu}-${host_os_exact}.prov for automatic provides generation"
-    ln -s ${srcdir}/autodeps/${host_cpu}-${host_os_exact}.prov ./find-provides
-elif test -f ${srcdir}/autodeps/${host_os_exact}.prov ; then
-	echo "using ${srcdir}/autodeps/${host_os_exact}.prov for automatic provides generation"
-    ln -s ${srcdir}/autodeps/${host_os_exact}.prov ./find-provides
-elif test -f ${srcdir}/autodeps/${host_os_major}.prov ; then
-	echo "using ${srcdir}/autodeps/${host_os_major}.prov for automatic provides generation"
-    ln -s ${srcdir}/autodeps/${host_os_major}.prov ./find-provides
-elif test -f ${srcdir}/autodeps/${host_os_noversion}.prov ; then
-	echo "using ${srcdir}/autodeps/${host_os_noversion}.prov for automatic provides generation"
-    ln -s ${srcdir}/autodeps/${host_os_noversion}.prov ./find-provides
-else
-    echo "*** no default provides information is available for ${host_os_noversion}"
-    ln -s ${srcdir}/autodeps/none ./find-provides
-fi
+for provscript in ${host_cpu}-${host_os_exact}.prov ${host_os_exact}.prov ${host_os_major}.prov ${host_os_noversion}.prov none ; do {
+    if test -f ${srcdir}/autodeps/${provscript} ; then
+       if [[ ${provscript} == none ]] ; then
+           echo "*** no default provides information is available for ${host_os_noversion}"
+       else
+           echo "using ${srcdir}/autodeps/${provscript} for automatic provides generation"
+       fi
+       ln -sf ${provscript} ${srcdir}/autodeps/find-provides
+       break
+    fi
+}; done
 
-rm -f ./find-requires
-if test -f ${srcdir}/autodeps/${host_cpu}-${host_os_exact}.req ; then
-	echo "using ${srcdir}/autodeps/${host_cpu}-${host_os_exact}.req for automatic requires generation"
-    ln -s ${srcdir}/autodeps/${host_cpu}-${host_os_exact}.req ./find-requires
-elif test -f ${srcdir}/autodeps/${host_os_exact}.req ; then
-	echo "using ${srcdir}/autodeps/${host_os_exact}.req for automatic requires generation"
-    ln -s ${srcdir}/autodeps/${host_os_exact}.req ./find-requires
-elif test -f ${srcdir}/autodeps/${host_os_major}.req ; then
-	echo "using ${srcdir}/autodeps/${host_os_major}.req for automatic requires generation"
-    ln -s ${srcdir}/autodeps/${host_os_major}.req ./find-requires
-elif test -f ${srcdir}/autodeps/${host_os_noversion}.req ; then
-	echo "using ${srcdir}/autodeps/${host_os_noversion}.req for automatic requires generation"
-    ln -s ${srcdir}/autodeps/${host_os_noversion}.req ./find-requires
-else
-    echo "*** no default requires information is available for ${host_os_noversion}"
-    ln -s ${srcdir}/autodeps/none ./find-requires
-fi
 
-dnl Determine the canonical arch-vendor-os for the host machine
-case "${host_cpu}" in
-*86)		RPMCANONCOLOR=0; RPMCANONARCH=i386 ;;
-ia32e*)		RPMCANONCOLOR=3; RPMCANONARCH=ia32e ;;
-amd64*)		RPMCANONCOLOR=3; RPMCANONARCH=amd64 ;;
-x86_64*)	RPMCANONCOLOR=3; RPMCANONARCH=x86_64 ;;
-alpha*)		RPMCANONCOLOR=0; RPMCANONARCH=alpha ;;
-sparc64*)	RPMCANONCOLOR=3; RPMCANONARCH=sparc64 ;;
-sparc*)		RPMCANONCOLOR=3; RPMCANONARCH=sparc ;;
-ia64*)		RPMCANONCOLOR=2; RPMCANONARCH=ia64 ;;
-s390x*)		RPMCANONCOLOR=3; RPMCANONARCH=s390x ;;
-s390*)		RPMCANONCOLOR=0; RPMCANONARCH=s390 ;;
-powerpc64*|ppc64*)	RPMCANONCOLOR=3; RPMCANONARCH=ppc64 ;;
-powerpc*|ppc*)	RPMCANONCOLOR=0; RPMCANONARCH=ppc ;;
-arm*)		RPMCANONCOLOR=0; RPMCANONARCH=arm ;;
-mipsel*)	RPMCANONCOLOR=0; RPMCANONARCH=mipsel ;;
-mips*)		RPMCANONCOLOR=0; RPMCANONARCH=mips ;;
-m68k*)		RPMCANONCOLOR=0; RPMCANONARCH=m68k ;;
-sh3*)		RPMCANONCOLOR=0; RPMCANONARCH=sh3 ;;
-sh4*)		RPMCANONCOLOR=0; RPMCANONARCH=sh4 ;;
-*)		RPMCANONCOLOR=0; RPMCANONARCH=unknown ;;
-esac
-case "${host_os_noversion}" in
-mint)		RPMCANONARCH=m68kmint ;;
-esac
+for reqscript in ${host_cpu}-${host_os_exact}.req ${host_os_exact}.req ${host_os_major}.req ${host_os_noversion}.req none ; do {
+    if test -f ${srcdir}/autodeps/${reqscript} ; then
+       if [[ ${reqscript} == none ]] ; then
+           echo "*** no default requires information is available for ${host_os_noversion}"
+       else
+	  echo "using ${srcdir}/autodeps/${reqscript} for automatic requires generation"
+       fi
+       ln -sf ${reqscript} ${srcdir}/autodeps/find-requires
+       break
+    fi
+} done
+
+dnl permit overriding build_vendor for "canonical rpm vendor"
 RPMCANONVENDOR="$build_vendor"
-case "${build_vendor}" in
-unknown|pc|ibm|redhat|pld|mandrake|conectiva|lvr|yellowdog|caos|suse)
-	test -f /etc/redhat-release &&		RPMCANONVENDOR=redhat
-	test -f /etc/SuSE-release &&		RPMCANONVENDOR=suse
-	test -f /etc/pld-release &&		RPMCANONVENDOR=pld
-	test -f /etc/mandrake-release &&	RPMCANONVENDOR=mandrake
-	test -f /etc/conectiva-release &&	RPMCANONVENDOR=conectiva
-	test -f /etc/lvr-release &&		RPMCANONVENDOR=lvr
-	test -f /etc/yellowdog-release &&	RPMCANONVENDOR=yellowdog
-	test -f /etc/caos-release &&		RPMCANONVENDOR=caos
-	;;
-esac
+AC_ARG_WITH([vendor], 
+  AS_HELP_STRING([--with-vendor=VENDOR], [specify rpm vendor name]),
+  [RPMCANONVENDOR=$withval])
+AC_DEFINE_UNQUOTED([RPMCANONVENDOR],["${RPMCANONVENDOR}"],[canonical vendor])
+	   
 RPMCANONOS="$host_os_noversion"
 RPMCANONGNU="$host_os_gnu"
-AC_SUBST(RPMCANONCOLOR)
-AC_SUBST(RPMCANONARCH)
 AC_SUBST(RPMCANONVENDOR)
 AC_SUBST(RPMCANONOS)
 AC_SUBST(RPMCANONGNU)
-AC_DEFINE_UNQUOTED([RPMCANONVENDOR],["${RPMCANONVENDOR}"],[canonical vendor])
 
 if test X"$prefix" = XNONE ; then
     usrprefix="$ac_default_prefix"
@@ -1024,19 +834,17 @@ AM_CONDITIONAL([HACKINGDOCS],[test "$with_hackingdocs" = yes])
 
 AC_PATH_PROG(AUTOM4TE,autom4te,:)
 
-AS_IF([test "$ac_cv_header_stdint_h" = "yes"],[
-AC_DEFINE([__RPM_USES_STDINT_H__],[1],[if rpm uses stdint.h])
-])
-
 AC_SUBST([dirstamp],[\${am__leading_dot}dirstamp])
 
 AC_CONFIG_FILES([Makefile
-	rpmio/Makefile lib/Makefile build/Makefile
-	po/Makefile.in scripts/Makefile 
+	rpmio/Makefile lib/Makefile build/Makefile sign/Makefile
+	po/Makefile.in scripts/Makefile fileattrs/Makefile
 	misc/Makefile 
 	doc/Makefile
 	python/Makefile
  	luaext/Makefile
  	tests/Makefile
+ 	plugins/Makefile
+	python/setup.py
   ])
 AC_OUTPUT

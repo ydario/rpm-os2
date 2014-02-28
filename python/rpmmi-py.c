@@ -5,8 +5,6 @@
 #include "rpmmi-py.h"
 #include "header-py.h"
 
-#include "debug.h"
-
 /** \ingroup python
  * \class Rpmmi
  * \brief A python rpm.mi match iterator object represents the result of a
@@ -80,7 +78,7 @@ rpmmi_iternext(rpmmiObject * s)
 }
 
 static PyObject *
-rpmmi_Instance(rpmmiObject * s)
+rpmmi_Instance(rpmmiObject * s, PyObject * unused)
 {
     int rc = 0;
 
@@ -91,7 +89,7 @@ rpmmi_Instance(rpmmiObject * s)
 }
 
 static PyObject *
-rpmmi_Count(rpmmiObject * s)
+rpmmi_Count(rpmmiObject * s, PyObject * unused)
 {
     DEPRECATED_METHOD("use len(mi) instead");
     return Py_BuildValue("i", PyMapping_Size((PyObject *)s));
@@ -101,8 +99,8 @@ static PyObject *
 rpmmi_Pattern(rpmmiObject * s, PyObject * args, PyObject * kwds)
 {
     int type;
-    char * pattern;
-    rpmTag tag;
+    const char * pattern;
+    rpmTagVal tag;
     char * kwlist[] = {"tag", "type", "patern", NULL};
 
     if (!PyArg_ParseTupleAndKeywords(args, kwds, "O&is:Pattern", kwlist,

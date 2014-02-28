@@ -8,12 +8,13 @@ AT_SETUP([missing dependency])
 AT_KEYWORDS([install])
 AT_CHECK([
 RPMDB_CLEAR
+RPMDB_INIT
 rm -rf "${TOPDIR}"
 
-run rpmbuild --quiet -bb \
+runroot rpmbuild --quiet -bb \
 	--define "pkg one" \
 	--define "reqs deptest-two" \
-	  ${RPMDATA}/SPECS/deptest.spec
+	  /data/SPECS/deptest.spec
 
 runroot rpm -U "${TOPDIR}"/RPMS/noarch/deptest-one-1.0-1.noarch.rpm
 ],
@@ -30,17 +31,18 @@ AT_SETUP([cross-depending packages])
 AT_KEYWORDS([install])
 AT_CHECK([
 RPMDB_CLEAR
+RPMDB_INIT
 rm -rf "${TOPDIR}"
 
-run rpmbuild --quiet -bb \
+runroot rpmbuild --quiet -bb \
 	--define "pkg one" \
 	--define "reqs deptest-two" \
-	  ${RPMDATA}/SPECS/deptest.spec
+	  /data/SPECS/deptest.spec
 
-run rpmbuild --quiet -bb \
+runroot rpmbuild --quiet -bb \
 	--define "pkg two" \
 	--define "reqs deptest-one" \
-	  ${RPMDATA}/SPECS/deptest.spec
+	  /data/SPECS/deptest.spec
 
 runroot rpm -U "${TOPDIR}"/RPMS/noarch/deptest-one-1.0-1.noarch.rpm "${TOPDIR}"/RPMS/noarch/deptest-two-1.0-1.noarch.rpm
 ],
@@ -55,17 +57,18 @@ AT_SETUP([unsatisfied versioned require])
 AT_KEYWORDS([install])
 AT_CHECK([
 RPMDB_CLEAR
+RPMDB_INIT
 rm -rf "${TOPDIR}"
 
-run rpmbuild --quiet -bb \
+runroot rpmbuild --quiet -bb \
 	--define "pkg one" \
 	--define "reqs deptest-two >= 2.0" \
-	  ${RPMDATA}/SPECS/deptest.spec
+	  /data/SPECS/deptest.spec
 
-run rpmbuild --quiet -bb \
+runroot rpmbuild --quiet -bb \
 	--define "pkg two" \
 	--define "provs deptest-foo = 1.0" \
-	  ${RPMDATA}/SPECS/deptest.spec
+	  /data/SPECS/deptest.spec
 
 runroot rpm -U "${TOPDIR}"/RPMS/noarch/deptest-one-1.0-1.noarch.rpm "${TOPDIR}"/RPMS/noarch/deptest-two-1.0-1.noarch.rpm
 ],
@@ -82,17 +85,18 @@ AT_SETUP([satisfied versioned require])
 AT_KEYWORDS([install])
 AT_CHECK([
 RPMDB_CLEAR
+RPMDB_INIT
 rm -rf "${TOPDIR}"
 
-run rpmbuild --quiet -bb \
+runroot rpmbuild --quiet -bb \
 	--define "pkg one" \
 	--define "reqs deptest-foo >= 2.0" \
-	  ${RPMDATA}/SPECS/deptest.spec
+	  /data/SPECS/deptest.spec
 
-run rpmbuild --quiet -bb \
+runroot rpmbuild --quiet -bb \
 	--define "pkg two" \
 	--define "provs deptest-foo = 2.0" \
-	  ${RPMDATA}/SPECS/deptest.spec
+	  /data/SPECS/deptest.spec
 
 runroot rpm -U "${TOPDIR}"/RPMS/noarch/deptest-one-1.0-1.noarch.rpm "${TOPDIR}"/RPMS/noarch/deptest-two-1.0-1.noarch.rpm
 ],
@@ -107,16 +111,17 @@ AT_SETUP([versioned conflict in transaction])
 AT_KEYWORDS([install])
 AT_CHECK([
 RPMDB_CLEAR
+RPMDB_INIT
 rm -rf "${TOPDIR}"
 
-run rpmbuild --quiet -bb \
+runroot rpmbuild --quiet -bb \
 	--define "pkg one" \
 	--define "cfls deptest-two < 2.0" \
-	  ${RPMDATA}/SPECS/deptest.spec
+	  /data/SPECS/deptest.spec
 
-run rpmbuild --quiet -bb \
+runroot rpmbuild --quiet -bb \
 	--define "pkg two" \
-	  ${RPMDATA}/SPECS/deptest.spec
+	  /data/SPECS/deptest.spec
 
 runroot rpm -U "${TOPDIR}"/RPMS/noarch/deptest-one-1.0-1.noarch.rpm "${TOPDIR}"/RPMS/noarch/deptest-two-1.0-1.noarch.rpm
 ],
@@ -133,16 +138,17 @@ AT_SETUP([versioned conflict in database])
 AT_KEYWORDS([install])
 AT_CHECK([
 RPMDB_CLEAR
+RPMDB_INIT
 rm -rf "${TOPDIR}"
 
-run rpmbuild --quiet -bb \
+runroot rpmbuild --quiet -bb \
 	--define "pkg one" \
 	--define "cfls deptest-two < 2.0" \
-	  ${RPMDATA}/SPECS/deptest.spec
+	  /data/SPECS/deptest.spec
 
-run rpmbuild --quiet -bb \
+runroot rpmbuild --quiet -bb \
 	--define "pkg two" \
-	  ${RPMDATA}/SPECS/deptest.spec
+	  /data/SPECS/deptest.spec
 
 runroot rpm -U "${TOPDIR}"/RPMS/noarch/deptest-one-1.0-1.noarch.rpm
 runroot rpm -U "${TOPDIR}"/RPMS/noarch/deptest-two-1.0-1.noarch.rpm
@@ -153,23 +159,63 @@ runroot rpm -U "${TOPDIR}"/RPMS/noarch/deptest-two-1.0-1.noarch.rpm
 	deptest-two < 2.0 conflicts with (installed) deptest-one-1.0-1.noarch
 ])
 AT_CLEANUP
+
+# explicit file conflicts
+AT_SETUP([explicit file conflicts])
+AT_KEYWORDS([install])
+AT_CHECK([
+RPMDB_CLEAR
+RPMDB_INIT
+rm -rf "${TOPDIR}"
+
+runroot rpmbuild --quiet -bb \
+	--define "pkg one" \
+	--define "cfls /opt/bar" \
+	  /data/SPECS/deptest.spec
+
+runroot rpmbuild --quiet -bb \
+	--define "pkg two" \
+	  /data/SPECS/deptest.spec
+
+runroot rpm -U --test \
+	"${TOPDIR}"/RPMS/noarch/deptest-one-1.0-1.noarch.rpm \
+	"${TOPDIR}"/RPMS/noarch/deptest-two-1.0-1.noarch.rpm
+runroot rpm -U "${TOPDIR}"/RPMS/noarch/deptest-one-1.0-1.noarch.rpm
+runroot rpm -U "${TOPDIR}"/RPMS/noarch/deptest-two-1.0-1.noarch.rpm
+runroot rpm -e deptest-one
+# XXX FIXME: rpm's problem message for this case is higly bogus.
+runroot rpm -U "${TOPDIR}"/RPMS/noarch/deptest-two-1.0-1.noarch.rpm
+runroot rpm -U "${TOPDIR}"/RPMS/noarch/deptest-one-1.0-1.noarch.rpm
+runroot rpm -e deptest-two
+],
+[],
+[],
+[error: Failed dependencies:
+	/opt/bar conflicts with deptest-one-1.0-1.noarch
+error: Failed dependencies:
+	/opt/bar conflicts with (installed) deptest-one-1.0-1.noarch
+error: Failed dependencies:
+	/opt/bar conflicts with deptest-one-1.0-1.noarch
+])
+AT_CLEANUP
 # ------------------------------
 # 
 AT_SETUP([erase to break dependencies])
 AT_KEYWORDS([install])
 AT_CHECK([
 RPMDB_CLEAR
+RPMDB_INIT
 rm -rf "${TOPDIR}"
 
-run rpmbuild --quiet -bb \
+runroot rpmbuild --quiet -bb \
 	--define "pkg one" \
 	--define "reqs deptest-foo >= 2.0" \
-	  ${RPMDATA}/SPECS/deptest.spec
+	  /data/SPECS/deptest.spec
 
-run rpmbuild --quiet -bb \
+runroot rpmbuild --quiet -bb \
 	--define "pkg two" \
 	--define "provs deptest-foo = 2.0" \
-	  ${RPMDATA}/SPECS/deptest.spec
+	  /data/SPECS/deptest.spec
 
 runroot rpm -U "${TOPDIR}"/RPMS/noarch/deptest-one-1.0-1.noarch.rpm "${TOPDIR}"/RPMS/noarch/deptest-two-1.0-1.noarch.rpm
 runroot rpm -e deptest-two
@@ -179,4 +225,60 @@ runroot rpm -e deptest-two
 [error: Failed dependencies:
 	deptest-foo >= 2.0 is needed by (installed) deptest-one-1.0-1.noarch
 ])
+AT_CLEANUP
+
+# ------------------------------
+AT_SETUP([erase to break colored file dependency])
+AT_KEYWORDS([install])
+AT_CHECK([
+RPMDB_CLEAR
+RPMDB_INIT
+rm -rf "${TOPDIR}"
+
+runroot rpmbuild --quiet -bb \
+	--define "pkg hello" \
+	--define "reqs /usr/bin/hello" \
+	  /data/SPECS/deptest.spec
+
+runroot rpm -U --ignoreos --ignorearch --nodeps \
+	--define "_transaction_color 3" \
+	--define "_prefer_color 2" \
+	/data/RPMS/hello-2.0-1.i686.rpm \
+	/data/RPMS/hello-2.0-1.x86_64.rpm \
+	"${TOPDIR}"/RPMS/noarch/deptest-hello-1.0-1.noarch.rpm
+
+runroot rpm -e hello.x86_64
+],
+[1],
+[],
+[error: Failed dependencies:
+	/usr/bin/hello is needed by (installed) deptest-hello-1.0-1.noarch
+])
+AT_CLEANUP
+
+# ------------------------------
+AT_SETUP([erase on wrong-colored file dependency])
+AT_KEYWORDS([install])
+AT_CHECK([
+RPMDB_CLEAR
+RPMDB_INIT
+rm -rf "${TOPDIR}"
+
+runroot rpmbuild --quiet -bb \
+	--define "pkg hello" \
+	--define "reqs /usr/bin/hello" \
+	  /data/SPECS/deptest.spec
+
+runroot rpm -U --ignoreos --ignorearch --nodeps \
+	--define "_transaction_color 3" \
+	--define "_prefer_color 2" \
+	/data/RPMS/hello-2.0-1.i686.rpm \
+	/data/RPMS/hello-2.0-1.x86_64.rpm \
+	"${TOPDIR}"/RPMS/noarch/deptest-hello-1.0-1.noarch.rpm
+
+runroot rpm -e hello.i686
+],
+[0],
+[],
+[])
 AT_CLEANUP

@@ -9,17 +9,20 @@
 #include <fcntl.h>
 #endif
 
-#include <rpm/rpmbuild.h>
+#include <errno.h>
+#include <sys/wait.h>
+
 #include <rpm/rpmlog.h>
 #include <rpm/rpmfileutil.h>
+#include "build/rpmbuild_internal.h"
+#include "build/rpmbuild_misc.h"
+#include "lib/rpmug.h"
 
 #include "debug.h"
 
-static int _build_debug = 0;
-
 /**
  */
-rpmRC doRmSource(rpmSpec spec)
+static rpmRC doRmSource(rpmSpec spec)
 {
     struct Source *p;
     Package pkg;
@@ -29,7 +32,7 @@ rpmRC doRmSource(rpmSpec spec)
 	if (! (p->flags & RPMBUILD_ISNO)) {
 	    char *fn = rpmGetPath("%{_sourcedir}/", p->source, NULL);
 	    rc = unlink(fn);
-	    fn = _free(fn);
+	    free(fn);
 	    if (rc) goto exit;
 	}
     }
@@ -39,7 +42,7 @@ rpmRC doRmSource(rpmSpec spec)
 	    if (! (p->flags & RPMBUILD_ISNO)) {
 		char *fn = rpmGetPath("%{_sourcedir}/", p->source, NULL);
 		rc = unlink(fn);
-		fn = _free(fn);
+		free(fn);
 	        if (rc) goto exit;
 	    }
 	}
@@ -51,11 +54,11 @@ exit:
 /*
  * @todo Single use by %%doc in files.c prevents static.
  */
-rpmRC doScript(rpmSpec spec, rpmBuildFlags what, const char *name, StringBuf sb, int test)
+rpmRC doScript(rpmSpec spec, rpmBuildFlags what, const char *name,
+		const char *sb, int test)
 {
-    const char * rootDir = spec->rootDir;
     char *scriptName = NULL;
-    char * buildDir = rpmGenPath(rootDir, "%{_builddir}", "");
+    char * buildDir = rpmGenPath(spec->rootDir, "%{_builddir}", "");
     char * buildCmd = NULL;
     char * buildTemplate = NULL;
     char * buildPost = NULL;
@@ -66,8 +69,7 @@ rpmRC doScript(rpmSpec spec, rpmBuildFlags what, const char *name, StringBuf sb,
     const char **argv = NULL;
     FILE * fp = NULL;
 
-    FD_t fd;
-    FD_t xfd;
+    FD_t fd = NULL;
     pid_t pid;
     pid_t child;
     int status;
@@ -75,42 +77,31 @@ rpmRC doScript(rpmSpec spec, rpmBuildFlags what, const char *name, StringBuf sb,
     
     switch (what) {
     case RPMBUILD_PREP:
-	name = "%prep";
-	sb = spec->prep;
 	mTemplate = "%{__spec_prep_template}";
 	mPost = "%{__spec_prep_post}";
 	mCmd = "%{__spec_prep_cmd}";
 	break;
     case RPMBUILD_BUILD:
-	name = "%build";
-	sb = spec->build;
 	mTemplate = "%{__spec_build_template}";
 	mPost = "%{__spec_build_post}";
 	mCmd = "%{__spec_build_cmd}";
 	break;
     case RPMBUILD_INSTALL:
-	name = "%install";
-	sb = spec->install;
 	mTemplate = "%{__spec_install_template}";
 	mPost = "%{__spec_install_post}";
 	mCmd = "%{__spec_install_cmd}";
 	break;
     case RPMBUILD_CHECK:
-	name = "%check";
-	sb = spec->check;
 	mTemplate = "%{__spec_check_template}";
 	mPost = "%{__spec_check_post}";
 	mCmd = "%{__spec_check_cmd}";
 	break;
     case RPMBUILD_CLEAN:
-	name = "%clean";
-	sb = spec->clean;
 	mTemplate = "%{__spec_clean_template}";
 	mPost = "%{__spec_clean_post}";
 	mCmd = "%{__spec_clean_cmd}";
 	break;
     case RPMBUILD_RMBUILD:
-	name = "--clean";
 	mTemplate = "%{__spec_clean_template}";
 	mPost = "%{__spec_clean_post}";
 	mCmd = "%{__spec_clean_cmd}";
@@ -122,32 +113,27 @@ rpmRC doScript(rpmSpec spec, rpmBuildFlags what, const char *name, StringBuf sb,
 	mCmd = "%{___build_cmd}";
 	break;
     }
-    if (name == NULL)	/* XXX shouldn't happen */
-	name = "???";
 
     if ((what != RPMBUILD_RMBUILD) && sb == NULL) {
 	rc = RPMRC_OK;
 	goto exit;
     }
     
-    fd = rpmMkTempFile(rootDir, &scriptName);
-    if (fd == NULL || Ferror(fd)) {
-	rpmlog(RPMLOG_ERR, _("Unable to open temp file.\n"));
+    fd = rpmMkTempFile(spec->rootDir, &scriptName);
+    if (Ferror(fd)) {
+	rpmlog(RPMLOG_ERR, _("Unable to open temp file: %s\n"), Fstrerror(fd));
 	rc = RPMRC_FAIL;
 	goto exit;
     }
 
-    if (fdGetFILE(fd) == NULL)
-	xfd = Fdopen(fd, "w.fpio");
-    else
-	xfd = fd;
-
-    if ((fp = fdGetFILE(xfd)) == NULL) {
+    if ((fp = fdopen(Fileno(fd), "w")) == NULL) {
+	rpmlog(RPMLOG_ERR, _("Unable to open stream: %s\n"), strerror(errno));
 	rc = RPMRC_FAIL;
 	goto exit;
     }
-    
-    if (*rootDir == '\0') rootDir = "/@unixroot";
+
+//CHECKME    
+    if (*spec->rootDir == '\0') spec->rootDir = "/@unixroot";
 
     buildTemplate = rpmExpand(mTemplate, NULL);
     buildPost = rpmExpand(mPost, NULL);
@@ -161,19 +147,16 @@ rpmRC doScript(rpmSpec spec, rpmBuildFlags what, const char *name, StringBuf sb,
 	if (spec->buildSubdir)
 	    fprintf(fp, "rm -rf '%s'\n", spec->buildSubdir);
     } else if (sb != NULL)
-	fprintf(fp, "%s", getStringBuf(sb));
+	fprintf(fp, "%s", sb);
 
     (void) fputs(buildPost, fp);
-    
-    (void) Fclose(xfd);
+    (void) fclose(fp);
 
     if (test) {
 	rc = RPMRC_OK;
 	goto exit;
     }
     
-if (_build_debug)
-fprintf(stderr, "*** rootDir %s buildDir %s\n", rootDir, buildDir);
     if (buildDir && buildDir[0] != '/'
 #ifdef __EMX__
 	 && buildDir[1] != ':'
@@ -195,7 +178,8 @@ fprintf(stderr, "*** rootDir %s buildDir %s\n", rootDir, buildDir);
 		scriptName, name, strerror(errno));
 #else
     if (!(child = fork())) {
-
+	/* NSPR messes with SIGPIPE, reset to default for the kids */
+	signal(SIGPIPE, SIG_DFL);
 	errno = 0;
 	(void) execvp(argv[0], (char *const *)argv);
 
@@ -208,6 +192,13 @@ fprintf(stderr, "*** rootDir %s buildDir %s\n", rootDir, buildDir);
 
     pid = waitpid(child, &status, 0);
 
+    if (pid == -1) {
+	rpmlog(RPMLOG_ERR, _("Error executing scriptlet %s (%s)\n"),
+		 scriptName, name);
+	rc = RPMRC_FAIL;
+	goto exit;
+    }
+
     if (!WIFEXITED(status) || WEXITSTATUS(status)) {
 	rpmlog(RPMLOG_ERR, _("Bad exit status from %s (%s)\n"),
 		 scriptName, name);
@@ -216,77 +207,93 @@ fprintf(stderr, "*** rootDir %s buildDir %s\n", rootDir, buildDir);
 	rc = RPMRC_OK;
     
 exit:
+    Fclose(fd);
     if (scriptName) {
 	if (rc == RPMRC_OK)
 	    (void) unlink(scriptName);
-	scriptName = _free(scriptName);
+	free(scriptName);
     }
-    argv = _free(argv);
-    buildCmd = _free(buildCmd);
-    buildTemplate = _free(buildTemplate);
-    buildPost = _free(buildPost);
-    buildDir = _free(buildDir);
+    free(argv);
+    free(buildCmd);
+    free(buildTemplate);
+    free(buildPost);
+    free(buildDir);
 
     return rc;
 }
 
-rpmRC buildSpec(rpmts ts, rpmSpec spec, int what, int test)
+static rpmRC buildSpec(BTA_t buildArgs, rpmSpec spec, int what)
 {
     rpmRC rc = RPMRC_OK;
+    int test = (what & RPMBUILD_NOBUILD);
+    char *cookie = buildArgs->cookie ? xstrdup(buildArgs->cookie) : NULL;
 
+    /* XXX TODO: rootDir is only relevant during build, eliminate from spec */
+    spec->rootDir = buildArgs->rootdir;
     if (!spec->recursing && spec->BACount) {
 	int x;
 	/* When iterating over BANames, do the source    */
 	/* packaging on the first run, and skip RMSOURCE altogether */
 	if (spec->BASpecs != NULL)
 	for (x = 0; x < spec->BACount; x++) {
-	    if ((rc = buildSpec(ts, spec->BASpecs[x],
+	    if ((rc = buildSpec(buildArgs, spec->BASpecs[x],
 				(what & ~RPMBUILD_RMSOURCE) |
-				(x ? 0 : (what & RPMBUILD_PACKAGESOURCE)),
-				test))) {
+				(x ? 0 : (what & RPMBUILD_PACKAGESOURCE))))) {
 		goto exit;
 	    }
 	}
     } else {
+	int didBuild = (what & (RPMBUILD_PREP|RPMBUILD_BUILD|RPMBUILD_INSTALL));
+
 	if ((what & RPMBUILD_PREP) &&
-	    (rc = doScript(spec, RPMBUILD_PREP, NULL, NULL, test)))
+	    (rc = doScript(spec, RPMBUILD_PREP, "%prep",
+			   getStringBuf(spec->prep), test)))
 		goto exit;
 
 	if ((what & RPMBUILD_BUILD) &&
-	    (rc = doScript(spec, RPMBUILD_BUILD, NULL, NULL, test)))
+	    (rc = doScript(spec, RPMBUILD_BUILD, "%build",
+			   getStringBuf(spec->build), test)))
 		goto exit;
 
 	if ((what & RPMBUILD_INSTALL) &&
-	    (rc = doScript(spec, RPMBUILD_INSTALL, NULL, NULL, test)))
+	    (rc = doScript(spec, RPMBUILD_INSTALL, "%install",
+			   getStringBuf(spec->install), test)))
 		goto exit;
 
 	if ((what & RPMBUILD_CHECK) &&
-	    (rc = doScript(spec, RPMBUILD_CHECK, NULL, NULL, test)))
+	    (rc = doScript(spec, RPMBUILD_CHECK, "%check",
+			   getStringBuf(spec->check), test)))
 		goto exit;
 
 	if ((what & RPMBUILD_PACKAGESOURCE) &&
-	    (rc = processSourceFiles(spec)))
+	    (rc = processSourceFiles(spec, buildArgs->pkgFlags)))
 		goto exit;
 
 	if (((what & RPMBUILD_INSTALL) || (what & RPMBUILD_PACKAGEBINARY) ||
 	    (what & RPMBUILD_FILECHECK)) &&
-	    (rc = processBinaryFiles(spec, what & RPMBUILD_INSTALL, test)))
+	    (rc = processBinaryFiles(spec, buildArgs->pkgFlags,
+				     what & RPMBUILD_INSTALL, test)))
+		goto exit;
+
+	if (((what & RPMBUILD_INSTALL) || (what & RPMBUILD_PACKAGEBINARY)) &&
+	    (rc = processBinaryPolicies(spec, test)))
 		goto exit;
 
 	if (((what & RPMBUILD_PACKAGESOURCE) && !test) &&
-	    (rc = packageSources(spec)))
+	    (rc = packageSources(spec, &cookie)))
 		return rc;
 
 	if (((what & RPMBUILD_PACKAGEBINARY) && !test) &&
-	    (rc = packageBinaries(spec)))
+	    (rc = packageBinaries(spec, cookie, (didBuild == 0))))
 		goto exit;
 	
 	if ((what & RPMBUILD_CLEAN) &&
-	    (rc = doScript(spec, RPMBUILD_CLEAN, NULL, NULL, test)))
+	    (rc = doScript(spec, RPMBUILD_CLEAN, "%clean",
+			   getStringBuf(spec->clean), test)))
 		goto exit;
 
 	if ((what & RPMBUILD_RMBUILD) &&
-	    (rc = doScript(spec, RPMBUILD_RMBUILD, NULL, NULL, test)))
+	    (rc = doScript(spec, RPMBUILD_RMBUILD, "--clean", NULL, test)))
 		goto exit;
     }
 
@@ -297,10 +304,19 @@ rpmRC buildSpec(rpmts ts, rpmSpec spec, int what, int test)
 	(void) unlink(spec->specFile);
 
 exit:
+    free(cookie);
+    spec->rootDir = NULL;
     if (rc != RPMRC_OK && rpmlogGetNrecs() > 0) {
 	rpmlog(RPMLOG_NOTICE, _("\n\nRPM build errors:\n"));
 	rpmlogPrint(NULL);
     }
+    rpmugFree();
 
     return rc;
+}
+
+rpmRC rpmSpecBuild(rpmSpec spec, BTA_t buildArgs)
+{
+    /* buildSpec() can recurse with different buildAmount, pass it separately */
+    return buildSpec(buildArgs, spec, buildArgs->buildAmount);
 }

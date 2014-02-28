@@ -2,12 +2,27 @@
 #define _RPMTS_INTERNAL_H
 
 #include <rpm/rpmts.h>
+#include <rpm/rpmstrpool.h>
 
 #include "lib/rpmal.h"		/* XXX availablePackage */
-#include "lib/rpmhash.h"	/* XXX hashTable */
 #include "lib/fprint.h"
+#include "lib/rpmlock.h"
+#include "lib/rpmdb_internal.h"
 
 typedef struct diskspaceInfo_s * rpmDiskSpaceInfo;
+
+/* Transaction set elements information */
+typedef struct tsMembers_s {
+    rpmstrPool pool;		/*!< Global string pool */
+    removedHash removedPackages;	/*!< Set of packages being removed. */
+    rpmal addedPackages;	/*!< Set of packages being installed. */
+
+    rpmds rpmlib;		/*!< rpmlib() dependency set. */
+    rpmte * order;		/*!< Packages sorted by dependencies. */
+    int orderCount;		/*!< No. of transaction elements. */
+    int orderAlloced;		/*!< No. of allocated transaction elements. */
+    int delta;			/*!< Delta for reallocation. */
+} * tsMembers;
 
 /** \ingroup rpmts
  * The set of packages to be installed/removed atomically.
@@ -22,7 +37,6 @@ struct rpmts_s {
     rpmCallbackFunction notify;	/*!< Callback function. */
     rpmCallbackData notifyData;	/*!< Callback private data. */
 
-    rpmps probs;		/*!< Current problems in transaction. */
     rpmprobFilterFlags ignoreSet;
 				/*!< Bits to filter current problems. */
 
@@ -31,25 +45,13 @@ struct rpmts_s {
     rpmdb rdb;			/*!< Install database handle. */
     int dbmode;			/*!< Install database open mode. */
 
-    int * removedPackages;	/*!< Set of packages being removed. */
-    int numRemovedPackages;	/*!< No. removed package instances. */
-    int allocedRemovedPackages;	/*!< Size of removed packages array. */
+    tsMembers members;		/*!< Transaction set member info (order etc) */
 
-    rpmal addedPackages;	/*!< Set of packages being installed. */
-    int numAddedPackages;	/*!< No. added package instances. */
+    struct selabel_handle * selabelHandle;	/*!< Handle to selabel */
 
-    rpmte * order;		/*!< Packages sorted by dependencies. */
-    int orderCount;		/*!< No. of transaction elements. */
-    int orderAlloced;		/*!< No. of allocated transaction elements. */
-    int ntrees;			/*!< No. of dependency trees. */
-    int maxDepth;		/*!< Maximum depth of dependency tree(s). */
-
-    int selinuxEnabled;		/*!< Is SE linux enabled? */
-    int chrootDone;		/*!< Has chroot(2) been been done? */
     char * rootDir;		/*!< Path to top of install tree. */
-    char * currDir;		/*!< Current working directory. */
+    char * lockPath;		/*!< Transaction lock path */
     FD_t scriptFd;		/*!< Scriptlet stdout/stderr. */
-    int delta;			/*!< Delta for reallocation. */
     rpm_tid_t tid;		/*!< Transaction id. */
 
     rpm_color_t color;		/*!< Transaction color bits. */
@@ -64,9 +66,59 @@ struct rpmts_s {
 
     struct rpmop_s ops[RPMTS_OP_MAX];
 
-    rpmSpec spec;		/*!< Spec file control structure. */
+    rpmPlugins plugins;		/*!< Transaction plugins */
 
     int nrefs;			/*!< Reference count. */
 };
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/** \ingroup rpmts
+ * Return transaction global string pool handle, creating the pool if needed.
+ * @param ts		transaction set
+ * @return		string pool handle (weak ref)
+ */
+RPM_GNUC_INTERNAL
+rpmstrPool rpmtsPool(rpmts ts);
+
+RPM_GNUC_INTERNAL
+tsMembers rpmtsMembers(rpmts ts);
+
+RPM_GNUC_INTERNAL
+rpmal rpmtsCreateAl(rpmts ts, rpmElementTypes types);
+
+/* returns -1 for retry, 0 for ignore and 1 for not found */
+RPM_GNUC_INTERNAL
+int rpmtsSolve(rpmts ts, rpmds key);
+
+RPM_GNUC_INTERNAL
+rpmlock rpmtsAcquireLock(rpmts ts);
+
+/** \ingroup rpmts
+ * Get the selabel handle from the transaction set
+ * @param ts		transaction set
+ * @return		rpm selabel handle, or NULL if it hasn't been initialized yet
+ */
+struct selabel_handle * rpmtsSELabelHandle(rpmts ts);
+
+/** \ingroup rpmts
+ * Initialize selabel
+ * @param ts		transaction set
+ * @param open_status   if the func should open selinux status or just check it
+ * @return		RPMRC_OK on success, RPMRC_FAIL otherwise
+ */
+rpmRC rpmtsSELabelInit(rpmts ts, int open_status);
+
+/** \ingroup rpmts
+ * Clean up selabel
+ * @param ts		transaction set
+ * @param close_status  whether we should close selinux status
+ */
+void rpmtsSELabelFini(rpmts ts, int close_status);
+
+#ifdef __cplusplus
+}
+#endif
 #endif /* _RPMTS_INTERNAL_H */

@@ -5,27 +5,22 @@
 #include "system.h"
 
 #include <inttypes.h>
-#include <popt.h>
+#include <netinet/in.h>
 
 #include <rpm/rpmtypes.h>
-#include <rpm/rpmmacro.h>	/* XXX for rpmExpand() */
 #include <rpm/rpmstring.h>
 #include <rpm/rpmfileutil.h>
 #include <rpm/rpmlog.h>
 #include <rpm/rpmkeyring.h>
 
-#include "rpmio/digest.h"
 #include "lib/rpmlead.h"
 #include "lib/signature.h"
 #include "lib/header_internal.h"
 
 #include "debug.h"
 
-#if !defined(__GLIBC__) && !defined(__APPLE__)
-char ** environ = NULL;
-#endif
-
-static int sighdrPut(Header h, rpmSigTag tag, rpmTagType type,
+/* Dumb wrapper around headerPut() for signature header */
+static int sighdrPut(Header h, rpmTagVal tag, rpmTagType type,
                      rpm_data_t p, rpm_count_t c)
 {
     struct rpmtd_s sigtd;
@@ -35,39 +30,6 @@ static int sighdrPut(Header h, rpmSigTag tag, rpmTagType type,
     sigtd.data = p;
     sigtd.count = c;
     return headerPut(h, &sigtd, HEADERPUT_DEFAULT);
-}
-
-int rpmLookupSignatureType(int action)
-{
-    static int disabled = 0;
-    int rc = 0;
-
-    switch (action) {
-    case RPMLOOKUPSIG_DISABLE:
-	disabled = -2;
-	break;
-    case RPMLOOKUPSIG_ENABLE:
-	disabled = 0;
-    case RPMLOOKUPSIG_QUERY:
-	if (disabled)
-	    break;	/* Disabled */
-      { char *name = rpmExpand("%{?_signature}", NULL);
-	if (!(name && *name != '\0'))
-	    rc = 0;
-	else if (!rstrcasecmp(name, "none"))
-	    rc = 0;
-	else if (!rstrcasecmp(name, "pgp"))
-	    rc = RPMSIGTAG_PGP;
-	else if (!rstrcasecmp(name, "pgp5"))	/* XXX legacy */
-	    rc = RPMSIGTAG_PGP;
-	else if (!rstrcasecmp(name, "gpg"))
-	    rc = RPMSIGTAG_GPG;
-	else
-	    rc = -1;	/* Invalid %_signature spec in macro file */
-	name = _free(name);
-      }	break;
-    }
-    return rc;
 }
 
 /**
@@ -106,7 +68,7 @@ rpmRC rpmReadSignature(FD_t fd, Header * sighp, sigType sig_type, char ** msg)
     int32_t dl;
     int32_t * ei = NULL;
     entryInfo pe;
-    size_t nb;
+    unsigned int nb, uc;
     int32_t ril = 0;
     struct indexEntry_s entry;
     struct entryInfo_s info;
@@ -124,7 +86,7 @@ rpmRC rpmReadSignature(FD_t fd, Header * sighp, sigType sig_type, char ** msg)
 	goto exit;
 
     memset(block, 0, sizeof(block));
-    if ((xx = timedRead(fd, (void *)block, sizeof(block))) != sizeof(block)) {
+    if ((xx = Freadall(fd, block, sizeof(block))) != sizeof(block)) {
 	rasprintf(&buf, _("sigh size(%d): BAD, read returned %d\n"), 
 		  (int)sizeof(block), xx);
 	goto exit;
@@ -150,12 +112,13 @@ rpmRC rpmReadSignature(FD_t fd, Header * sighp, sigType sig_type, char ** msg)
     memset(&info, 0, sizeof(info));
 
     nb = (il * sizeof(struct entryInfo_s)) + dl;
-    ei = xmalloc(sizeof(il) + sizeof(dl) + nb);
+    uc = sizeof(il) + sizeof(dl) + nb;
+    ei = xmalloc(uc);
     ei[0] = block[2];
     ei[1] = block[3];
     pe = (entryInfo) &ei[2];
     dataStart = (unsigned char *) (pe + il);
-    if ((xx = timedRead(fd, (void *)pe, nb)) != nb) {
+    if ((xx = Freadall(fd, pe, nb)) != nb) {
 	rasprintf(&buf,
 		  _("sigh blob(%d): BAD, read returned %d\n"), (int)nb, xx);
 	goto exit;
@@ -171,12 +134,19 @@ rpmRC rpmReadSignature(FD_t fd, Header * sighp, sigType sig_type, char ** msg)
     }
 
     /* Is there an immutable header region tag? */
-    if (entry.info.tag == RPMTAG_HEADERSIGNATURES
-       && entry.info.type == RPM_BIN_TYPE
-       && entry.info.count == REGION_TAG_COUNT)
-    {
-
-	if (entry.info.offset >= dl) {
+    if (entry.info.tag == RPMTAG_HEADERSIGNATURES) {
+	/* Is the region tag sane? */
+	if (!(entry.info.type == REGION_TAG_TYPE &&
+	      entry.info.count == REGION_TAG_COUNT)) {
+	    rasprintf(&buf,
+		_("region tag: BAD, tag %d type %d offset %d count %d\n"),
+		entry.info.tag, entry.info.type,
+		entry.info.offset, entry.info.count);
+	    goto exit;
+	}
+	
+	/* Is the trailer within the data area? */
+	if (entry.info.offset + REGION_TAG_COUNT > dl) {
 	    rasprintf(&buf, 
 		_("region offset: BAD, tag %d type %d offset %d count %d\n"),
 		entry.info.tag, entry.info.type,
@@ -189,16 +159,16 @@ rpmRC rpmReadSignature(FD_t fd, Header * sighp, sigType sig_type, char ** msg)
 	(void) memcpy(&info, dataEnd, REGION_TAG_COUNT);
 	/* XXX Really old packages have HEADER_IMAGE, not HEADER_SIGNATURES. */
 	if (info.tag == htonl(RPMTAG_HEADERIMAGE)) {
-	    rpmSigTag stag = htonl(RPMTAG_HEADERSIGNATURES);
+	    rpmTagVal stag = htonl(RPMTAG_HEADERSIGNATURES);
 	    info.tag = stag;
 	    memcpy(dataEnd, &stag, sizeof(stag));
 	}
 	dataEnd += REGION_TAG_COUNT;
 
-	xx = headerVerifyInfo(1, dl, &info, &entry.info, 1);
+	xx = headerVerifyInfo(1, il * sizeof(*pe), &info, &entry.info, 1);
 	if (xx != -1 ||
 	    !((entry.info.tag == RPMTAG_HEADERSIGNATURES || entry.info.tag == RPMTAG_HEADERIMAGE)
-	   && entry.info.type == RPM_BIN_TYPE
+	   && entry.info.type == REGION_TAG_TYPE
 	   && entry.info.count == REGION_TAG_COUNT))
 	{
 	    rasprintf(&buf,
@@ -231,7 +201,7 @@ rpmRC rpmReadSignature(FD_t fd, Header * sighp, sigType sig_type, char ** msg)
     }
 
     /* OK, blob looks sane, load the header. */
-    sigh = headerLoad(ei);
+    sigh = headerImport(ei, uc, 0);
     if (sigh == NULL) {
 	rasprintf(&buf, _("sigh load: BAD\n"));
 	goto exit;
@@ -244,7 +214,7 @@ rpmRC rpmReadSignature(FD_t fd, Header * sighp, sigType sig_type, char ** msg)
 	rpm_loff_t archSize = 0;
 
 	/* Position at beginning of header. */
-	if (pad && (trc = timedRead(fd, (void *)block, pad)) != pad) {
+	if (pad && (trc = Freadall(fd, block, pad)) != pad) {
 	    rasprintf(&buf,
 		      _("sigh pad(%zd): BAD, read %zd bytes\n"), pad, trc);
 	    goto exit;
@@ -271,7 +241,7 @@ rpmRC rpmReadSignature(FD_t fd, Header * sighp, sigType sig_type, char ** msg)
 exit:
     if (sighp && sigh && rc == RPMRC_OK)
 	*sighp = headerLink(sigh);
-    sigh = headerFree(sigh);
+    headerFree(sigh);
     free(ei);
 
     if (msg != NULL) {
@@ -314,161 +284,10 @@ Header rpmFreeSignature(Header sigh)
     return headerFree(sigh);
 }
 
-/**
- * Generate GPG signature(s) for a header+payload file.
- * @param file		header+payload file name
- * @retval *sigTagp	signature tag
- * @retval *pktp	signature packet(s)
- * @retval *pktlenp	signature packet(s) length
- * @param passPhrase	private key pass phrase
- * @return		0 on success, 1 on failure
- */
-static int makeGPGSignature(const char * file, rpmSigTag * sigTagp,
-		uint8_t ** pktp, size_t * pktlenp,
-		const char * passPhrase)
-{
-    char * sigfile = NULL;
-    int pid, status;
-    int inpipe[2];
-    FILE * fpipe;
-    struct stat st;
-    const char * cmd;
-    char *const *av;
-    pgpDig dig = NULL;
-    pgpDigParams sigp = NULL;
-    int rc = 1; /* assume failure */
-
-    rasprintf(&sigfile, "%s.sig", file);
-
-    addMacro(NULL, "__plaintext_filename", NULL, file, -1);
-    addMacro(NULL, "__signature_filename", NULL, sigfile, -1);
-
-    inpipe[0] = inpipe[1] = 0;
-    if (pipe(inpipe) < 0) {
-	rpmlog(RPMLOG_ERR, _("Couldn't create pipe for signing: %m"));
-	goto exit;
-    }
-
-    if (!(pid = fork())) {
-	const char *gpg_path = rpmExpand("%{?_gpg_path}", NULL);
-
-	(void) dup2(inpipe[0], 3);
-	(void) close(inpipe[1]);
-
-	if (gpg_path && *gpg_path != '\0')
-	    (void) setenv("GNUPGHOME", gpg_path, 1);
-	(void) setenv("LC_ALL", "C", 1);
-
-	unsetenv("MALLOC_CHECK_");
-	cmd = rpmExpand("%{?__gpg_sign_cmd}", NULL);
-	rc = poptParseArgvString(cmd, NULL, (const char ***)&av);
-	if (!rc)
-	    rc = execve(av[0], av+1, environ);
-
-	rpmlog(RPMLOG_ERR, _("Could not exec %s: %s\n"), "gpg",
-			strerror(errno));
-	_exit(EXIT_FAILURE);
-    }
-
-    delMacro(NULL, "__plaintext_filename");
-    delMacro(NULL, "__signature_filename");
-
-    fpipe = fdopen(inpipe[1], "w");
-    (void) close(inpipe[0]);
-    if (fpipe) {
-	fprintf(fpipe, "%s\n", (passPhrase ? passPhrase : ""));
-	(void) fclose(fpipe);
-    }
-
-    (void) waitpid(pid, &status, 0);
-    if (!WIFEXITED(status) || WEXITSTATUS(status)) {
-	rpmlog(RPMLOG_ERR, _("gpg exec failed (%d)\n"), WEXITSTATUS(status));
-	goto exit;
-    }
-
-    if (stat(sigfile, &st)) {
-	/* GPG failed to write signature */
-	rpmlog(RPMLOG_ERR, _("gpg failed to write signature\n"));
-	goto exit;
-    }
-
-    *pktlenp = st.st_size;
-    rpmlog(RPMLOG_DEBUG, "GPG sig size: %zd\n", *pktlenp);
-    *pktp = xmalloc(*pktlenp);
-
-    {	FD_t fd;
-
-	rc = 0;
-	fd = Fopen(sigfile, "r.ufdio");
-	if (fd != NULL && !Ferror(fd)) {
-	    rc = Fread(*pktp, sizeof(**pktp), *pktlenp, fd);
-	    (void) Fclose(fd);
-	}
-	if (rc != *pktlenp) {
-	    *pktp = _free(*pktp);
-	    rpmlog(RPMLOG_ERR, _("unable to read the signature\n"));
-	    goto exit;
-	}
-    }
-
-    rpmlog(RPMLOG_DEBUG, "Got %zd bytes of GPG sig\n", *pktlenp);
-
-    /* Parse the signature, change signature tag as appropriate. */
-    dig = pgpNewDig();
-
-    (void) pgpPrtPkts(*pktp, *pktlenp, dig, 0);
-    sigp = &dig->signature;
-
-    switch (*sigTagp) {
-    case RPMSIGTAG_GPG:
-	/* XXX check MD5 hash too? */
-	if (sigp->pubkey_algo == PGPPUBKEYALGO_RSA)
-	    *sigTagp = RPMSIGTAG_PGP;
-	break;
-    case RPMSIGTAG_PGP5:	/* XXX legacy */
-    case RPMSIGTAG_PGP:
-	if (sigp->pubkey_algo == PGPPUBKEYALGO_DSA)
-	    *sigTagp = RPMSIGTAG_GPG;
-	break;
-    case RPMSIGTAG_DSA:
-	/* XXX check MD5 hash too? */
-	if (sigp->pubkey_algo == PGPPUBKEYALGO_RSA)
-	    *sigTagp = RPMSIGTAG_RSA;
-	break;
-    case RPMSIGTAG_RSA:
-	if (sigp->pubkey_algo == PGPPUBKEYALGO_DSA)
-	    *sigTagp = RPMSIGTAG_DSA;
-	break;
-    default:
-	break;
-    }
-
-    dig = pgpFreeDig(dig);
-    rc = 0;
-
-exit:
-    (void) unlink(sigfile);
-    free(sigfile);
-
-    return rc;
-}
-
-/**
- * Generate header only signature(s) from a header+payload file.
- * @param sigh		signature header
- * @param file		header+payload file name
- * @param sigTag	type of signature(s) to add
- * @param passPhrase	private key pass phrase
- * @return		0 on success, -1 on failure
- */
-static int makeHDRSignature(Header sigh, const char * file, rpmSigTag sigTag,
-		const char * passPhrase)
+static int makeHDRDigest(Header sigh, const char * file, rpmTagVal sigTag)
 {
     Header h = NULL;
     FD_t fd = NULL;
-    uint8_t * pkt = NULL;
-    size_t pktlen;
-    char * fn = NULL;
     char * SHA1 = NULL;
     int ret = -1;	/* assume failure. */
 
@@ -480,7 +299,6 @@ static int makeHDRSignature(Header sigh, const char * file, rpmSigTag sigTag,
 	h = headerRead(fd, HEADER_MAGIC_YES);
 	if (h == NULL)
 	    goto exit;
-	(void) Fclose(fd);	fd = NULL;
 
 	if (headerIsEntry(h, RPMTAG_HEADERIMMUTABLE)) {
 	    DIGEST_CTX ctx;
@@ -492,7 +310,6 @@ static int makeHDRSignature(Header sigh, const char * file, rpmSigTag sigTag,
 		rpmlog(RPMLOG_ERR, 
 				_("Immutable header region could not be read. "
 				"Corrupted package?\n"));
-		h = headerFree(h);
 		goto exit;
 	    }
 	    ctx = rpmDigestInit(PGPHASHALGO_SHA1, RPMDIGEST_NONE);
@@ -500,8 +317,10 @@ static int makeHDRSignature(Header sigh, const char * file, rpmSigTag sigTag,
 	    (void) rpmDigestUpdate(ctx, utd.data, utd.count);
 	    (void) rpmDigestFinal(ctx, (void **)&SHA1, NULL, 1);
 	    rpmtdFreeData(&utd);
+	} else {
+	    rpmlog(RPMLOG_ERR, _("Cannot sign RPM v3 packages\n"));
+	    goto exit;
 	}
-	h = headerFree(h);
 
 	if (SHA1 == NULL)
 	    goto exit;
@@ -509,45 +328,18 @@ static int makeHDRSignature(Header sigh, const char * file, rpmSigTag sigTag,
 	    goto exit;
 	ret = 0;
 	break;
-    case RPMSIGTAG_DSA:
-    case RPMSIGTAG_RSA:
-	fd = Fopen(file, "r.fdio");
-	if (fd == NULL || Ferror(fd))
-	    goto exit;
-	h = headerRead(fd, HEADER_MAGIC_YES);
-	if (h == NULL)
-	    goto exit;
-	(void) Fclose(fd);
-	fd = rpmMkTempFile(NULL, &fn);
-	if (fd == NULL || Ferror(fd))
-	    goto exit;
-	if (headerWrite(fd, h, HEADER_MAGIC_YES))
-	    goto exit;
-	(void) Fclose(fd);	fd = NULL;
-	if (makeGPGSignature(fn, &sigTag, &pkt, &pktlen, passPhrase)
-	 || !sighdrPut(sigh, sigTag, RPM_BIN_TYPE, pkt, pktlen))
-	    goto exit;
-	ret = 0;
-	break;
     default:
-	goto exit;
 	break;
     }
 
 exit:
-    if (fn) {
-	(void) unlink(fn);
-	free(fn);
-    }
-    free(pkt);
     free(SHA1);
-    h = headerFree(h);
+    headerFree(h);
     if (fd != NULL) (void) Fclose(fd);
     return ret;
 }
 
-int rpmAddSignature(Header sigh, const char * file, rpmSigTag sigTag,
-		const char * passPhrase)
+int rpmGenDigest(Header sigh, const char * file, rpmTagVal sigTag)
 {
     struct stat st;
     uint8_t * pkt = NULL;
@@ -581,21 +373,8 @@ int rpmAddSignature(Header sigh, const char * file, rpmSigTag sigTag,
 	    break;
 	ret = 0;
 	break;
-    case RPMSIGTAG_PGP5:	/* XXX legacy */
-    case RPMSIGTAG_PGP:
-    case RPMSIGTAG_GPG: {
-	rpmSigTag hdrtag = (sigTag == RPMSIGTAG_GPG) ?
-			    RPMSIGTAG_DSA : RPMSIGTAG_RSA;
-	if (makeGPGSignature(file, &sigTag, &pkt, &pktlen, passPhrase)
-	 || !sighdrPut(sigh, sigTag, RPM_BIN_TYPE, pkt, pktlen))
-	    break;
-	/* XXX Piggyback a header-only DSA/RSA signature as well. */
-	ret = makeHDRSignature(sigh, file, hdrtag, passPhrase);
-	} break;
-    case RPMSIGTAG_RSA:
-    case RPMSIGTAG_DSA:
     case RPMSIGTAG_SHA1:
-	ret = makeHDRSignature(sigh, file, sigTag, passPhrase);
+	ret = makeHDRDigest(sigh, file, sigTag);
 	break;
     default:
 	break;
@@ -603,111 +382,6 @@ int rpmAddSignature(Header sigh, const char * file, rpmSigTag sigTag,
     free(pkt);
 
     return ret;
-}
-
-static int checkPassPhrase(const char * passPhrase, const rpmSigTag sigTag)
-{
-    int passPhrasePipe[2];
-    int pid, status;
-    int rc;
-    int xx;
-
-    passPhrasePipe[0] = passPhrasePipe[1] = 0;
-    xx = pipe(passPhrasePipe);
-    if (!(pid = fork())) {
-	const char * cmd;
-	char *const *av;
-	int fdno;
-
-	xx = close(STDIN_FILENO);
-	xx = close(STDOUT_FILENO);
-	xx = close(passPhrasePipe[1]);
-	if (! rpmIsVerbose())
-	    xx = close(STDERR_FILENO);
-	if ((fdno = open("/dev/null", O_RDONLY)) != STDIN_FILENO) {
-	    xx = dup2(fdno, STDIN_FILENO);
-	    xx = close(fdno);
-	}
-	if ((fdno = open("/dev/null", O_WRONLY)) != STDOUT_FILENO) {
-	    xx = dup2(fdno, STDOUT_FILENO);
-	    xx = close(fdno);
-	}
-	xx = dup2(passPhrasePipe[0], 3);
-
-	unsetenv("MALLOC_CHECK_");
-	switch (sigTag) {
-	case RPMSIGTAG_RSA:
-	case RPMSIGTAG_PGP5:	/* XXX legacy */
-	case RPMSIGTAG_PGP:
-	case RPMSIGTAG_DSA:
-	case RPMSIGTAG_GPG:
-	{   const char *gpg_path = rpmExpand("%{?_gpg_path}", NULL);
-
-	    if (gpg_path && *gpg_path != '\0')
-  		(void) setenv("GNUPGHOME", gpg_path, 1);
-
-	    cmd = rpmExpand("%{?__gpg_check_password_cmd}", NULL);
-	    rc = poptParseArgvString(cmd, NULL, (const char ***)&av);
-	    if (!rc)
-		rc = execve(av[0], av+1, environ);
-
-	    rpmlog(RPMLOG_ERR, _("Could not exec %s: %s\n"), "gpg",
-			strerror(errno));
-	    _exit(EXIT_FAILURE);
-	}   break;
-	default: /* This case should have been screened out long ago. */
-	    rpmlog(RPMLOG_ERR, _("Invalid %%_signature spec in macro file\n"));
-	    _exit(EXIT_FAILURE);
-	    break;
-	}
-    }
-
-    xx = close(passPhrasePipe[0]);
-    xx = write(passPhrasePipe[1], passPhrase, strlen(passPhrase));
-    xx = write(passPhrasePipe[1], "\n", 1);
-    xx = close(passPhrasePipe[1]);
-
-    (void) waitpid(pid, &status, 0);
-
-    return ((WIFEXITED(status) && WEXITSTATUS(status) == 0)) ? 0 : 1;
-}
-
-char * rpmGetPassPhrase(const char * prompt, const rpmSigTag sigTag)
-{
-    char *pass = NULL;
-    int aok = 0;
-
-    switch (sigTag) {
-    case RPMSIGTAG_RSA:
-    case RPMSIGTAG_PGP5: 	/* XXX legacy */
-    case RPMSIGTAG_PGP:
-    case RPMSIGTAG_DSA:
-    case RPMSIGTAG_GPG:
-      { char *name = rpmExpand("%{?_gpg_name}", NULL);
-	aok = (name && *name != '\0');
-	name = _free(name);
-      }
-	if (aok)
-	    break;
-	rpmlog(RPMLOG_ERR,
-		_("You must set \"%%_gpg_name\" in your macro file\n"));
-	break;
-    default:
-	/* Currently the calling function (rpm.c:main) is checking this and
-	 * doing a better job.  This section should never be accessed.
-	 */
-	rpmlog(RPMLOG_ERR, _("Invalid %%_signature spec in macro file\n"));
-	break;
-    }
-
-    if (aok) {
-	pass = getpass( (prompt ? prompt : "") );
-
-	if (checkPassPhrase(pass, sigTag))
-	    pass = NULL;
-    }
-
-    return pass;
 }
 
 static const char * rpmSigString(rpmRC res)
@@ -735,7 +409,7 @@ verifyMD5Digest(rpmtd sigtd, DIGEST_CTX md5ctx, char **msg)
     *msg = NULL;
     DIGEST_CTX ctx = rpmDigestDup(md5ctx);
 
-    if (ctx == NULL || sigtd->data == NULL) {
+    if (ctx == NULL) {
 	rasprintf(msg, "%s %s\n", title, rpmSigString(res));
 	goto exit;
     }
@@ -775,14 +449,14 @@ verifySHA1Digest(rpmtd sigtd, DIGEST_CTX sha1ctx, char **msg)
     *msg = NULL;
     DIGEST_CTX ctx = rpmDigestDup(sha1ctx);
 
-    if (ctx == NULL || sigtd->data == NULL) {
+    if (ctx == NULL) {
 	rasprintf(msg, "%s %s\n", title, rpmSigString(res));
 	goto exit;
     }
 
     (void) rpmDigestFinal(ctx, (void **)&SHA1, NULL, 1);
 
-    if (SHA1 == NULL || strlen(SHA1) != strlen(sig) || !rstreq(SHA1, sig)) {
+    if (SHA1 == NULL || !rstreq(SHA1, sig)) {
 	rasprintf(msg, "%s %s Expected(%s) != (%s)\n", title,
 		  rpmSigString(res), sig, SHA1 ? SHA1 : "(nil)");
     } else {
@@ -798,33 +472,20 @@ exit:
 /**
  * Verify DSA/RSA signature.
  * @param keyring	pubkey keyring
- * @param dig		OpenPGP container
+ * @param sig		OpenPGP signature parameters
  * @param hashctx	digest context
  * @param isHdr		header-only signature?
  * @retval msg		verbose success/failure text
  * @return 		RPMRC_OK on success
  */
 static rpmRC
-verifySignature(rpmKeyring keyring, pgpDig dig, DIGEST_CTX hashctx, int isHdr, 
-		char **msg)
+verifySignature(rpmKeyring keyring, pgpDigParams sig, DIGEST_CTX hashctx,
+		int isHdr, char **msg)
 {
-    pgpDigParams sigp = dig ? &dig->signature : NULL;
-    rpmRC res = RPMRC_FAIL; /* assume failure */
-    char *sigid = NULL;
-    *msg = NULL;
 
-    if (hashctx == NULL) {
-	goto exit;
-    }
+    rpmRC res = rpmKeyringVerifySig(keyring, sig, hashctx);
 
-    /* Retrieve the matching public key and verify. */
-    res = rpmKeyringLookup(keyring, dig);
-    if (res == RPMRC_OK) {
-	res = pgpVerifySig(dig, hashctx);
-    }
-
-exit:
-    sigid = pgpIdentItem(sigp);
+    char *sigid = pgpIdentItem(sig);
     rasprintf(msg, "%s%s: %s\n", isHdr ? _("Header ") : "", sigid, 
 		rpmSigString(res));
     free(sigid);
@@ -832,15 +493,15 @@ exit:
 }
 
 rpmRC
-rpmVerifySignature(rpmKeyring keyring, rpmtd sigtd, pgpDig dig, DIGEST_CTX ctx, char ** result)
+rpmVerifySignature(rpmKeyring keyring, rpmtd sigtd, pgpDigParams sig,
+		   DIGEST_CTX ctx, char ** result)
 {
     rpmRC res = RPMRC_NOTFOUND;
     char *msg = NULL;
+    int hdrsig = 0;
 
-    if (sigtd->data == NULL || sigtd->count <= 0 || dig == NULL) {
-	rasprintf(&msg, _("Verify signature: BAD PARAMETERS\n"));
+    if (sigtd->data == NULL || sigtd->count <= 0 || ctx == NULL)
 	goto exit;
-    }
 
     switch (sigtd->tag) {
     case RPMSIGTAG_MD5:
@@ -851,19 +512,26 @@ rpmVerifySignature(rpmKeyring keyring, rpmtd sigtd, pgpDig dig, DIGEST_CTX ctx, 
 	break;
     case RPMSIGTAG_RSA:
     case RPMSIGTAG_DSA:
-	res = verifySignature(keyring, dig, ctx, 1, &msg);
-	break;
+	hdrsig = 1;
+	/* fallthrough */
     case RPMSIGTAG_PGP5:	/* XXX legacy */
     case RPMSIGTAG_PGP:
     case RPMSIGTAG_GPG:
-	res = verifySignature(keyring, dig, ctx, 0, &msg);
+	if (sig != NULL)
+	    res = verifySignature(keyring, sig, ctx, hdrsig, &msg);
 	break;
     default:
-	rasprintf(&msg, _("Signature: UNKNOWN (%d)\n"), sigtd->tag);
 	break;
     }
 
 exit:
+    if (res == RPMRC_NOTFOUND) {
+	rasprintf(&msg,
+		  _("Verify signature: BAD PARAMETERS (%d %p %d %p %p)\n"),
+		  sigtd->tag, sigtd->data, sigtd->count, ctx, sig);
+	res = RPMRC_FAIL;
+    }
+
     if (result) {
 	*result = msg;
     } else {

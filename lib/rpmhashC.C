@@ -4,6 +4,7 @@
  */
 
 #include "system.h"
+#include <stdio.h>
 #include "debug.h"
 
 #define Bucket JOIN(HASHTYPE,Buket)
@@ -30,7 +31,10 @@ struct HASHSTRUCT {
     hashFunctionType fn;		/*!< generate hash value for key */
     hashEqualityType eq;		/*!< compare hash keys for equality */
     hashFreeKey freeKey;
+    int bucketCount;			/*!< number of used buckets */
+    int keyCount;			/*!< number of keys */
 #ifdef HTDATATYPE
+    int dataCount;			/*!< number of data entries */
     hashFreeData freeData;
 #endif
 };
@@ -39,16 +43,14 @@ struct HASHSTRUCT {
  * Find entry in hash table.
  * @param ht            pointer to hash table
  * @param key           pointer to key value
+ * @param keyHash	key hash
  * @return pointer to hash bucket of key (or NULL)
  */
 static
-Bucket HASHPREFIX(findEntry)(HASHTYPE ht, HTKEYTYPE key)
+Bucket HASHPREFIX(findEntry)(HASHTYPE ht, HTKEYTYPE key, unsigned int keyHash)
 {
-    unsigned int hash;
-    Bucket b;
-
-    hash = ht->fn(key) % ht->numBuckets;
-    b = ht->buckets[hash];
+    unsigned int hash = keyHash % ht->numBuckets;
+    Bucket b = ht->buckets[hash];
 
     while (b && ht->eq(b->key, key))
 	b = b->next;
@@ -72,32 +74,63 @@ HASHTYPE HASHPREFIX(Create)(int numBuckets,
     ht->freeKey = freeKey;
 #ifdef HTDATATYPE
     ht->freeData = freeData;
+    ht->dataCount = 0;
 #endif
     ht->fn = fn;
     ht->eq = eq;
+    ht->bucketCount = ht->keyCount = 0;
     return ht;
 }
 
-void HASHPREFIX(AddEntry)(HASHTYPE ht, HTKEYTYPE key
+static void HASHPREFIX(Resize)(HASHTYPE ht, int numBuckets) {
+    Bucket * buckets = xcalloc(numBuckets, sizeof(*ht->buckets));
+
+    for (int i=0; i<ht->numBuckets; i++) {
+	Bucket b = ht->buckets[i];
+	Bucket nextB;
+	while (b != NULL) {
+	    unsigned int hash = ht->fn(b->key) % numBuckets;
+	    nextB = b->next;
+	    b->next = buckets[hash];
+	    buckets[hash] = b;
+	    b = nextB;
+	}
+    }
+    free(ht->buckets);
+    ht->buckets = buckets;
+    ht->numBuckets = numBuckets;
+}
+
+unsigned int HASHPREFIX(KeyHash)(HASHTYPE ht, HTKEYTYPE key)
+{
+    return ht->fn(key);
+}
+
+void HASHPREFIX(AddHEntry)(HASHTYPE ht, HTKEYTYPE key, unsigned int keyHash
 #ifdef HTDATATYPE
 , HTDATATYPE data
 #endif
 )
 {
-    unsigned int hash;
-    Bucket b;
-    Bucket * b_addr;
+    unsigned int hash = keyHash % ht->numBuckets;
+    Bucket b = ht->buckets[hash];
+#ifdef HTDATATYPE
+    Bucket * b_addr = ht->buckets + hash;
+#endif
 
-    hash = ht->fn(key) % ht->numBuckets;
-    b = ht->buckets[hash];
-    b_addr = ht->buckets + hash;
+    if (b == NULL) {
+	ht->bucketCount += 1;
+    }
 
     while (b && ht->eq(b->key, key)) {
+#ifdef HTDATATYPE
 	b_addr = &(b->next);
+#endif
 	b = b->next;
     }
 
     if (b == NULL) {
+	ht->keyCount += 1;
 	b = xmalloc(sizeof(*b));
 	b->key = key;
 #ifdef HTDATATYPE
@@ -116,15 +149,33 @@ void HASHPREFIX(AddEntry)(HASHTYPE ht, HTKEYTYPE key
 	// though increasing dataCount after the resize
 	b->data[b->dataCount++] = data;
     }
+    ht->dataCount += 1;
+#endif
+    if (ht->keyCount > ht->numBuckets) {
+	HASHPREFIX(Resize)(ht, ht->numBuckets * 2);
+    }
+}
+
+void HASHPREFIX(AddEntry)(HASHTYPE ht, HTKEYTYPE key
+#ifdef HTDATATYPE
+, HTDATATYPE data
+#endif
+)
+{
+#ifdef HTDATATYPE
+    HASHPREFIX(AddHEntry)(ht, key, ht->fn(key), data);
+#else
+    HASHPREFIX(AddHEntry)(ht, key, ht->fn(key));
 #endif
 }
 
-HASHTYPE HASHPREFIX(Free)(HASHTYPE ht)
+void HASHPREFIX(Empty)( HASHTYPE ht)
 {
     Bucket b, n;
     int i;
-    if (ht==NULL)
-	return ht;
+
+    if (ht->bucketCount == 0) return;
+
     for (i = 0; i < ht->numBuckets; i++) {
 	b = ht->buckets[i];
 	if (b == NULL)
@@ -146,37 +197,88 @@ HASHTYPE HASHPREFIX(Free)(HASHTYPE ht)
 	    b = _free(b);
 	} while ((b = n) != NULL);
     }
+    ht->bucketCount = 0;
+    ht->keyCount = 0;
+#ifdef HTDATATYPE
+    ht->dataCount = 0;
+#endif
+}
 
+HASHTYPE HASHPREFIX(Free)(HASHTYPE ht)
+{
+    if (ht==NULL)
+        return ht;
+    HASHPREFIX(Empty)(ht);
     ht->buckets = _free(ht->buckets);
     ht = _free(ht);
 
     return NULL;
 }
 
-int HASHPREFIX(HasEntry)(HASHTYPE ht, HTKEYTYPE key)
+int HASHPREFIX(HasHEntry)(HASHTYPE ht, HTKEYTYPE key, unsigned int keyHash)
 {
     Bucket b;
 
-    if (!(b = HASHPREFIX(findEntry)(ht, key))) return 0; else return 1;
+    if (!(b = HASHPREFIX(findEntry)(ht, key, keyHash))) return 0; else return 1;
 }
 
-#ifdef HTDATATYPE
+int HASHPREFIX(HasEntry)(HASHTYPE ht, HTKEYTYPE key)
+{
+    return HASHPREFIX(HasHEntry)(ht, key, ht->fn(key));
+}
 
-int HASHPREFIX(GetEntry)(HASHTYPE ht, HTKEYTYPE key, HTDATATYPE** data,
-	       int * dataCount, HTKEYTYPE* tableKey)
+int HASHPREFIX(GetHEntry)(HASHTYPE ht, HTKEYTYPE key, unsigned int keyHash,
+#ifdef HTDATATYPE
+			 HTDATATYPE** data, int * dataCount,
+#endif
+			 HTKEYTYPE* tableKey)
 {
     Bucket b;
-    int rc = ((b = HASHPREFIX(findEntry)(ht, key)) != NULL);
+    int rc = ((b = HASHPREFIX(findEntry)(ht, key, keyHash)) != NULL);
 
+#ifdef HTDATATYPE
     if (data)
 	*data = rc ? b->data : NULL;
     if (dataCount)
 	*dataCount = rc ? b->dataCount : 0;
+#endif
     if (tableKey && rc)
 	*tableKey = b->key;
 
     return rc;
 }
+
+int HASHPREFIX(GetEntry)(HASHTYPE ht, HTKEYTYPE key,
+#ifdef HTDATATYPE
+			 HTDATATYPE** data, int * dataCount,
+#endif
+			 HTKEYTYPE* tableKey)
+{
+    return HASHPREFIX(GetHEntry)(ht, key, ht->fn(key),
+#ifdef HTDATATYPE
+				 data, dataCount,
+#endif
+				 tableKey);
+}
+
+unsigned int HASHPREFIX(NumBuckets)(HASHTYPE ht) {
+    return ht->numBuckets;
+}
+
+unsigned int HASHPREFIX(UsedBuckets)(HASHTYPE ht) {
+    return ht->bucketCount;
+}
+
+unsigned int HASHPREFIX(NumKeys)(HASHTYPE ht) {
+    return ht->keyCount;
+}
+
+#ifdef HTDATATYPE
+unsigned int HASHPREFIX(NumData)(HASHTYPE ht) {
+    return ht->dataCount;
+}
+#endif
+
 
 void HASHPREFIX(PrintStats)(HASHTYPE ht) {
     int i;
@@ -203,5 +305,3 @@ void HASHPREFIX(PrintStats)(HASHTYPE ht) {
     fprintf(stderr, "Values: %i\n", datacnt);
     fprintf(stderr, "Max Keys/Bucket: %i\n", maxbuckets);
 }
-
-#endif

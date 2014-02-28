@@ -6,16 +6,14 @@
 #include "system.h"
 
 #include <rpm/header.h>
-#include <rpm/rpmbuild.h>
 #include <rpm/rpmlog.h>
+#include "build/rpmbuild_internal.h"
 #include "debug.h"
-
-extern int noLang;
 
 int parseDescription(rpmSpec spec)
 {
     int nextPart = PART_ERROR;	/* assume error */
-    StringBuf sb;
+    StringBuf sb = NULL;
     int flag = PART_SUBNAME;
     Package pkg;
     int rc, argc;
@@ -24,7 +22,6 @@ int parseDescription(rpmSpec spec)
     const char *name = NULL;
     const char *lang = RPMBUILD_DEFAULT_LANG;
     poptContext optCon = NULL;
-    spectag t = NULL;
     struct poptOption optionsTable[] = {
 	{ NULL, 'n', POPT_ARG_STRING, &name, 'n', NULL, NULL},
 	{ NULL, 'l', POPT_ARG_STRING, &lang, 'l', NULL, NULL},
@@ -80,8 +77,6 @@ int parseDescription(rpmSpec spec)
     }
 #endif
 
-    t = stashSt(spec, pkg->header, RPMTAG_DESCRIPTION, lang);
-    
     sb = newStringBuf();
 
     if ((rc = readLine(spec, STRIP_TRAILINGSPACE | STRIP_COMMENTS)) > 0) {
@@ -92,7 +87,6 @@ int parseDescription(rpmSpec spec)
     } else {
 	while (! (nextPart = isPart(spec->line))) {
 	    appendLineStringBuf(sb, spec->line);
-	    if (t) t->t_nlines++;
 	    if ((rc =
 		readLine(spec, STRIP_TRAILINGSPACE | STRIP_COMMENTS)) > 0) {
 		nextPart = PART_NONE;
@@ -105,15 +99,15 @@ int parseDescription(rpmSpec spec)
     }
     
     stripTrailingBlanksStringBuf(sb);
-    if (!(noLang && !rstreq(lang, RPMBUILD_DEFAULT_LANG))) {
+    if (!((spec->flags & RPMSPEC_NOLANG) && !rstreq(lang, RPMBUILD_DEFAULT_LANG))) {
 	(void) headerAddI18NString(pkg->header, RPMTAG_DESCRIPTION,
 			getStringBuf(sb), lang);
     }
     
-    sb = freeStringBuf(sb);
      
 exit:
-    argv = _free(argv);
-    optCon = poptFreeContext(optCon);
+    freeStringBuf(sb);
+    free(argv);
+    poptFreeContext(optCon);
     return nextPart;
 }

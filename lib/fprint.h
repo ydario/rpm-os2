@@ -6,9 +6,7 @@
  * Identify a file name path by a unique "finger print".
  */
 
-#include <rpm/header.h>
-#include <rpm/rpmte.h>
-#include "lib/rpmdb_internal.h"
+#include <rpm/rpmtypes.h>
 
 /**
  */
@@ -19,70 +17,10 @@ typedef struct fprintCache_s * fingerPrintCache;
  */
 typedef struct fingerPrint_s fingerPrint;
 
-/**
- * Associates a trailing sub-directory and final base name with an existing
- * directory finger print.
- */
-struct fingerPrint_s {
-/*! directory finger print entry (the directory path is stat(2)-able */
-    const struct fprintCacheEntry_s * entry;
-/*! trailing sub-directory path (directories that are not stat(2)-able */
-const char * subDir;
-const char * baseName;	/*!< file base name */
-};
-
-/* Create new hash table data type */
-#define HASHTYPE rpmFpEntryHash
-#define HTKEYTYPE const char *
-#define HTDATATYPE const struct fprintCacheEntry_s *
-#include "lib/rpmhashC.H"
-
-/**
- * Finger print cache entry.
- * This is really a directory and symlink cache. We don't differentiate between
- * the two. We can prepopulate it, which allows us to easily conduct "fake"
- * installs of a system w/o actually mounting filesystems.
- */
-struct fprintCacheEntry_s {
-    const char * dirName;		/*!< path to existing directory */
-    dev_t dev;				/*!< stat(2) device number */
-    ino_t ino;				/*!< stat(2) inode number */
-};
-
-/**
- * Finger print cache.
- */
-struct fprintCache_s {
-    rpmFpEntryHash ht;			/*!< hashed by dirName */
-};
-
-/* Create new hash table data type */
-
 struct rpmffi_s {
   rpmte p;
   int   fileno;
 };
-
-#undef HASHTYPE
-#undef HTKEYTYPE
-#undef HTDATATYPE
-
-#define HASHTYPE rpmFpHash
-#define HTKEYTYPE const fingerPrint *
-#define HTDATATYPE struct rpmffi_s
-#include "lib/rpmhashC.H"
-
-/** */
-#define	FP_ENTRY_EQUAL(a, b) (((a)->dev == (b)->dev) && ((a)->ino == (b)->ino))
-
-/** */
-#define FP_EQUAL(a, b) ( \
-	FP_ENTRY_EQUAL((a).entry, (b).entry) && \
-	!strcmp((a).baseName, (b).baseName) && ( \
-	    ((a).subDir == (b).subDir) || \
-	    ((a).subDir && (b).subDir && !strcmp((a).subDir, (b).subDir)) \
-	) \
-    )
 
 #ifdef __cplusplus
 extern "C" {
@@ -91,10 +29,11 @@ extern "C" {
 /**
  * Create finger print cache.
  * @param sizeHint	number of elements expected
+ * @param pool		string pool (or NULL for private)
  * @return pointer to initialized fingerprint cache
  */
 RPM_GNUC_INTERNAL
-fingerPrintCache fpCacheCreate(int sizeHint);
+fingerPrintCache fpCacheCreate(int sizeHint, rpmstrPool pool);
 
 /**
  * Destroy finger print cache.
@@ -104,26 +43,37 @@ fingerPrintCache fpCacheCreate(int sizeHint);
 RPM_GNUC_INTERNAL
 fingerPrintCache fpCacheFree(fingerPrintCache cache);
 
+RPM_GNUC_INTERNAL
+fingerPrint * fpCacheGetByFp(fingerPrintCache cache,
+			     struct fingerPrint_s * fp, int ix,
+			     struct rpmffi_s ** recs, int * numRecs);
+
+RPM_GNUC_INTERNAL
+void fpCachePopulate(fingerPrintCache cache, rpmts ts, int fileCount);
+
+/* compare an existing fingerprint with a looked-up fingerprint for db/bn */
+RPM_GNUC_INTERNAL
+int fpLookupEquals(fingerPrintCache cache, fingerPrint * fp,
+	           const char * dirName, const char * baseName);
+
+RPM_GNUC_INTERNAL
+const char *fpEntryDir(fingerPrintCache cache, fingerPrint *fp);
+
+RPM_GNUC_INTERNAL
+dev_t fpEntryDev(fingerPrintCache cache, fingerPrint *fp);
+
 /**
  * Return finger print of a file path.
  * @param cache		pointer to fingerprint cache
  * @param dirName	leading directory name of file path
  * @param baseName	base name of file path
- * @param scareMemory
- * @return pointer to the finger print associated with a file path.
+ * @retval fp		pointer of fingerprint struct to fill out
+ * @return		0 on success
  */
 RPM_GNUC_INTERNAL
-fingerPrint fpLookup(fingerPrintCache cache, const char * dirName, 
-			const char * baseName, int scareMemory);
-
-/**
- * Return hash value for a finger print.
- * Hash based on dev and inode only!
- * @param key		pointer to finger print entry
- * @return hash value
- */
-RPM_GNUC_INTERNAL
-unsigned int fpHashFunction(const fingerPrint * key);
+int fpLookup(fingerPrintCache cache,
+	     const char * dirName, const char * baseName,
+	     fingerPrint **fp);
 
 /**
  * Compare two finger print entries.
@@ -137,30 +87,18 @@ int fpEqual(const fingerPrint * key1, const fingerPrint * key2);
 
 /**
  * Return finger prints of an array of file paths.
- * @warning: scareMemory is assumed!
  * @param cache		pointer to fingerprint cache
+ * @param pool		pointer to file name pool
  * @param dirNames	directory names
  * @param baseNames	file base names
  * @param dirIndexes	index into dirNames for each baseNames
  * @param fileCount	number of file entries
- * @retval fpList	pointer to array of finger prints
+ * @return		pointer to array of finger prints
  */
 RPM_GNUC_INTERNAL
-void fpLookupList(fingerPrintCache cache, const char ** dirNames, 
-		  const char ** baseNames, const uint32_t * dirIndexes, 
-		  int fileCount, fingerPrint * fpList);
-
-/**
- * Check file for to be installed symlinks in their path,
- *  correct their fingerprint and add it to newht.
- * @param ht            hash table containing all files fingerprints
- * @param newht         hash table to add the corrected fingerprints
- * @param fpc           fingerprint cache
- * @param fi            file iterator of the package
- * @param filenr        the number of the file we are dealing with
- */
-void fpLookupSubdir(rpmFpHash symlinks, rpmFpHash fphash, fingerPrintCache fpc, rpmte p, int filenr);
-
+fingerPrint * fpLookupList(fingerPrintCache cache, rpmstrPool pool,
+			   rpmsid * dirNames, rpmsid * baseNames,
+			   const uint32_t * dirIndexes, int fileCount);
 
 #ifdef __cplusplus
 }

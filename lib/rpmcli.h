@@ -21,18 +21,9 @@ extern "C" {
 #endif
 
 /** \ingroup rpmcli
- * Should version 3 packages be produced?
- */
-extern int _noDirTokens;
-
-/** \ingroup rpmcli
  * Popt option table for options shared by all modes and executables.
  */
 extern struct poptOption		rpmcliAllPoptTable[];
-
-extern int ftsOpts;
-
-extern struct poptOption		rpmcliFtsPoptTable[];
 
 extern const char * rpmcliPipeOutput;
 
@@ -84,7 +75,7 @@ rpmcliFini(poptContext optCon);
  * Query/Verify argument qualifiers.
  * @todo Reassign to tag values.
  */
-typedef enum rpmQVSources_e {
+enum rpmQVSources_e {
     RPMQV_PACKAGE = 0,	/*!< ... from package name db search. */
     RPMQV_PATH,		/*!< ... from file path db search. */
     RPMQV_ALL,		/*!< ... from each installed package. */
@@ -94,20 +85,21 @@ typedef enum rpmQVSources_e {
     RPMQV_WHATREQUIRES,	/*!< ... from requires db search. */
     RPMQV_TRIGGEREDBY,	/*!< ... from trigger db search. */
     RPMQV_DBOFFSET,	/*!< ... from database header instance. */
-    RPMQV_SPECFILE,	/*!< ... from spec file parse (query only). */
+    RPMQV_SPECRPMS,	/*!< ... from spec file binaries (query only). */
+    RPMQV_SPECFILE = RPMQV_SPECRPMS, /*!< ... backwards compatibility */
     RPMQV_PKGID,	/*!< ... from package id (header+payload MD5). */
     RPMQV_HDRID,	/*!< ... from header id (immutable header SHA1). */
-    RPMQV_FILEID,	/*!< ... from file id (file MD5). */
     RPMQV_TID,		/*!< ... from install transaction id (time stamp). */
-    RPMQV_HDLIST,	/*!< ... from system hdlist. */
-    RPMQV_FTSWALK	/*!< ... from fts(3) walk. */
-} rpmQVSources;
+    RPMQV_SPECSRPM,	/*!< ... from spec file source (query only). */
+};
+
+typedef rpmFlags rpmQVSources;
 
 /** \ingroup rpmcli
  * Bit(s) to control rpmQuery() operation, stored in qva_flags.
  * @todo Merge rpmQueryFlags, rpmVerifyFlags, and rpmVerifyAttrs?.
  */
-typedef enum rpmQueryFlags_e {
+enum rpmQueryFlags_e {
     QUERY_FOR_DEFAULT	= 0,		/*!< */
     QUERY_MD5		= (1 << 0),	/*!< from --nomd5 */
     QUERY_FILEDIGEST	= (1 << 0),	/*!< from --nofiledigest, same as --nomd5 */
@@ -131,12 +123,15 @@ typedef enum rpmQueryFlags_e {
     QUERY_FOR_STATE	= (1 << 24),	/*!< query:  from --state */
     QUERY_FOR_DOCS	= (1 << 25),	/*!< query:  from --docfiles */
     QUERY_FOR_CONFIG	= (1 << 26),	/*!< query:  from --configfiles */
-    QUERY_FOR_DUMPFILES	= (1 << 27)	/*!< query:  from --dump */
-} rpmQueryFlags;
+    QUERY_FOR_DUMPFILES	= (1 << 27),	/*!< query:  from --dump */
+    QUERY_FOR_LICENSE	= (1 << 28)	/*!< query:  from --licensefiles */
+};
+
+typedef rpmFlags rpmQueryFlags;
 
 #define	_QUERY_FOR_BITS	\
    (QUERY_FOR_LIST|QUERY_FOR_STATE|QUERY_FOR_DOCS|QUERY_FOR_CONFIG|\
-    QUERY_FOR_DUMPFILES)
+    QUERY_FOR_LICENSE|QUERY_FOR_DUMPFILES)
 
 /** \ingroup rpmcli
  * Bit(s) from common command line options.
@@ -175,28 +170,18 @@ struct rpmQVKArguments_s {
     int 	qva_sourceCount;/*!< Exclusive option check (>1 is error). */
     rpmQueryFlags qva_flags;	/*!< Bit(s) to control operation. */
     rpmfileAttrs qva_fflags;	/*!< Bit(s) to filter on attribute. */
-    rpmdbMatchIterator qva_mi;	/*!< Match iterator on selected headers. */
-    rpmgi qva_gi;		/*!< Generalized iterator on args. */
-    rpmRC qva_rc;		/*!< Current return code. */
 
     QVF_t qva_showPackage;	/*!< Function to display iterator matches. */
     QSpecF_t qva_specQuery;	/*!< Function to query spec file. */
-    int qva_verbose;		/*!< (unused) */
     char * qva_queryFormat;	/*!< Format for headerFormat(). */
-    int sign;			/*!< Is a passphrase needed? */
-    const char * passPhrase;	/*!< Pass phrase. */
-    const char * qva_prefix;	/*!< Path to top of install tree. */
     char	qva_mode;
 		/*!<
 		- 'q'	from --query, -q
 		- 'Q'	from --querytags
 		- 'V'	from --verify, -V
-		- 'A'	from --addsign
 		- 'I'	from --import
 		- 'K'	from --checksig, -K
-		- 'R'	from --resign
 		*/
-    char	qva_char;	/*!< (unused) always ' ' */
 };
 
 /** \ingroup rpmcli
@@ -216,37 +201,10 @@ extern struct poptOption rpmQueryPoptTable[];
 extern struct poptOption rpmVerifyPoptTable[];
 
 /** \ingroup rpmcli
- * Display query/verify information for each header in iterator.
- *
- * This routine uses:
- *	- qva->qva_mi		rpm database iterator
- *	- qva->qva_showPackage	query/verify display routine
- *
- * @param qva		parsed query/verify options
- * @param ts		transaction set
- * @return		result of last non-zero showPackage() return
- */
-int rpmcliShowMatches(QVA_t qva, rpmts ts);
-
-/** \ingroup rpmcli
  * Display list of tags that can be used in --queryformat.
  * @param fp	file handle to use for display
  */
 void rpmDisplayQueryTags(FILE * fp);
-
-/** \ingroup rpmcli
- * Common query/verify source interface, called once for each CLI arg.
- *
- * This routine uses:
- *	- qva->qva_mi		rpm database iterator
- *	- qva->qva_showPackage	query/verify display routine
- *
- * @param qva		parsed query/verify options
- * @param ts		transaction set
- * @param arg		name of source to query/verify
- * @return		showPackage() result, 1 if rpmdbInitIterator() is NULL
- */
-int rpmQueryVerify(QVA_t qva, rpmts ts, const char * arg);
 
 /** \ingroup rpmcli
  * Display results of package query.
@@ -307,49 +265,13 @@ int rpmVerifySignatures(QVA_t qva, rpmts ts, FD_t fd, const char * fn);
 int rpmcliVerify(rpmts ts, QVA_t qva, ARGV_const_t argv);
 
 /* ==================================================================== */
-/** \name RPMBT */
-
-/** \ingroup rpmcli
- * Describe build command line request.
- */
-struct rpmBuildArguments_s {
-    rpmQueryFlags qva_flags;	/*!< Bit(s) to control verification. */
-    int buildAmount;		/*!< Bit(s) to control operation. */
-    char * buildRootOverride; 	/*!< from --buildroot */
-    char * targets;		/*!< Target platform(s), comma separated. */
-    const char * passPhrase;	/*!< Pass phrase. */
-    char * cookie;		/*!< NULL for binary, ??? for source, rpm's */
-    int force;			/*!< from --force */
-    int noBuild;		/*!< from --nobuild */
-    int noDeps;			/*!< from --nodeps */
-    int noLang;			/*!< from --nolang */
-    int shortCircuit;		/*!< from --short-circuit */
-    int sign;			/*!< from --sign */
-    char buildMode;		/*!< Build mode (one of "btBC") */
-    char buildChar;		/*!< Build stage (one of "abcilps ") */
-    const char * rootdir;
-};
-
-/** \ingroup rpmcli
- */
-typedef	struct rpmBuildArguments_s *	BTA_t;
-
-/** \ingroup rpmcli
- */
-extern struct rpmBuildArguments_s	rpmBTArgs;
-
-/** \ingroup rpmcli
- */
-extern struct poptOption		rpmBuildPoptTable[];
-
-/* ==================================================================== */
 /** \name RPMEIU */
 /* --- install/upgrade/erase modes */
 
 /** \ingroup rpmcli
  * Bit(s) to control rpmInstall() operation.
  */
-typedef enum rpmInstallFlags_e {
+enum rpmInstallFlags_e {
     INSTALL_NONE	= 0,
     INSTALL_PERCENT	= (1 << 0),	/*!< from --percent */
     INSTALL_HASH	= (1 << 1),	/*!< from --hash */
@@ -361,7 +283,9 @@ typedef enum rpmInstallFlags_e {
     INSTALL_INSTALL	= (1 << 7),	/*!< from --install */
     INSTALL_ERASE	= (1 << 8),	/*!< from --erase */
     INSTALL_ALLMATCHES	= (1 << 9)	/*!< from --allmatches */
-} rpmInstallFlags;
+};
+
+typedef rpmFlags rpmInstallFlags;
 
 /** \ingroup rpmcli
  * Bit(s) to control rpmErase() operation.
@@ -369,12 +293,6 @@ typedef enum rpmInstallFlags_e {
 #define UNINSTALL_NONE INSTALL_NONE
 #define UNINSTALL_NODEPS INSTALL_NODEPS
 #define UNINSTALL_ALLMATCHES INSTALL_ALLMATCHES
-
-extern int rpmcliPackagesTotal;
-extern int rpmcliHashesCurrent;
-extern int rpmcliHashesTotal;
-extern int rpmcliProgressCurrent;
-extern int rpmcliProgressTotal;
 
 /** \ingroup rpmcli
  * The rpm CLI generic transaction callback handler.
@@ -417,13 +335,11 @@ struct rpmInstallArguments_s {
     rpmtransFlags transFlags;
     rpmprobFilterFlags probFilter;
     rpmInstallFlags installInterfaceFlags;
-    rpmQueryFlags qva_flags;	/*!< from --nodigest/--nosignature */
     int numRelocations;
     int noDeps;
     int incldocs;
     rpmRelocation * relocations;
     char * prefix;
-    const char * rootdir;
 };
 
 /** \ingroup rpmcli
@@ -456,53 +372,22 @@ extern struct rpmInstallArguments_s rpmIArgs;
 extern struct poptOption rpmInstallPoptTable[];
 
 /* ==================================================================== */
-/** \name RPMDB */
-/* --- database modes */
-
-/** \ingroup rpmcli
- * Describe database command line requests.
- */
-struct rpmDatabaseArguments_s {
-    int init;			/*!< from --initdb */
-    int rebuild;		/*!< from --rebuilddb */
-    int verify;			/*!< from --verifydb */
-};
-
-/** \ingroup rpmcli
- */
-extern struct rpmDatabaseArguments_s rpmDBArgs;
-
-/** \ingroup rpmcli
- */
-extern struct poptOption rpmDatabasePoptTable[];
-
-/* ==================================================================== */
 /** \name RPMK */
 
-/** \ingroup rpmcli
- * Bit(s) to control rpmReSign() operation.
- */
-typedef enum rpmSignFlags_e {
-    RPMSIGN_NONE		= 0,
-    RPMSIGN_CHK_SIGNATURE	= 'K',	/*!< from --checksig */
-    RPMSIGN_NEW_SIGNATURE	= 'R',	/*!< from --resign */
-    RPMSIGN_ADD_SIGNATURE	= 'A',	/*!< from --addsign */
-    RPMSIGN_DEL_SIGNATURE	= 'D',	/*!< from --delsign */
-    RPMSIGN_IMPORT_PUBKEY	= 'I',	/*!< from --import */
-} rpmSignFlags;
-
-/** \ingroup rpmcli
- */
-extern struct poptOption rpmSignPoptTable[];
-
-/** \ingroup rpmcli
- * Create/Modify/Check elements from signature header.
+/** Import public key(s) to rpm keyring
  * @param ts		transaction set
- * @param qva		mode flags and parameters
- * @param argv		array of arguments (NULL terminated)
+ * @param argv		array of pubkey path arguments (NULL terminated)
  * @return		0 on success
  */
-int rpmcliSign(rpmts ts, QVA_t qva, ARGV_const_t argv);
+int rpmcliImportPubkeys(rpmts ts, ARGV_const_t argv);
+
+/** \ingroup rpmcli
+ * Verify package signatures
+ * @param ts		transaction set
+ * @param argv		array of package path arguments (NULL terminated)
+ * @return		0 on success
+ */
+int rpmcliVerifySignatures(rpmts ts, ARGV_const_t argv);
 
 #ifdef __cplusplus
 }

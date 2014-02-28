@@ -4,6 +4,7 @@
 
 #include "system.h"
 
+#include <stdlib.h>
 #include <rpm/argv.h>
 #include <rpm/rpmstring.h>
 
@@ -34,20 +35,19 @@ ARGI_t argiFree(ARGI_t argi)
 {
     if (argi) {
 	argi->nvals = 0;
-	argi->vals = _free(argi->vals);
+	free(argi->vals);
+	free(argi);
     }
-    argi = _free(argi);
     return NULL;
 }
 
 ARGV_t argvFree(ARGV_t argv)
 {
-    ARGV_t av;
-    
-    if (argv)
-    for (av = argv; *av; av++)
-	*av = _free(*av);
-    argv = _free(argv);
+    if (argv) {
+	for (ARGV_t av = argv; *av; av++)
+	    free(*av);
+	free(argv);
+    }
     return NULL;
 }
 
@@ -169,13 +169,17 @@ int argvAppend(ARGV_t * argvp, ARGV_const_t av)
 
 ARGV_t argvSplitString(const char * str, const char * seps, argvFlags flags)
 {
-    char *dest = xmalloc(strlen(str) + 1);
+    char *dest = NULL;
     ARGV_t argv;
     int argc = 1;
     const char * s;
     char * t;
     int c;
 
+    if (str == NULL || seps == NULL)
+	return NULL;
+
+    dest = xmalloc(strlen(str) + 1);
     for (argc = 1, s = str, t = dest; (c = *s); s++, t++) {
 	if (strchr(seps, c)) {
 	    argc++;
@@ -209,12 +213,32 @@ int argvSplit(ARGV_t * argvp, const char * str, const char * seps)
 
 char *argvJoin(ARGV_const_t argv, const char *sep)
 {
+    int argc = 0;
+    size_t argvlen = 0;
     char *dest = NULL;
-    char * const *arg;
 
-    for (arg = argv; arg && *arg; arg++) {
-	rstrscat(&dest, *arg, *(arg+1) ? sep : "", NULL);
-    } 
+    if (argv) {
+	ARGV_const_t arg;
+	for (arg = argv; *arg; arg++)
+	    argvlen += strlen(*arg);
+	argc = arg - argv;
+    }
+
+    if (argc > 0) {
+	size_t seplen = (sep != NULL) ? strlen(sep) : 0;
+	char *p;
+
+	dest = xmalloc(argvlen + (seplen * (argc - 1)) + 1);
+
+	p = stpcpy(dest, argv[0]);
+	for (int i = 1; i < argc; i++) {
+	    if (seplen)
+		p = stpcpy(p, sep);
+	    p = stpcpy(p, argv[i]);
+	}
+	*p = '\0';
+    }
+
     return dest;
 }
     

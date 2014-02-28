@@ -13,7 +13,12 @@
 
 #endif
 
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <errno.h>
 #include <popt.h>
+#include <ctype.h>
 
 #include <rpm/rpmfileutil.h>
 #include <rpm/rpmurl.h>
@@ -26,6 +31,47 @@
 #include "debug.h"
 
 static const char *rpm_config_dir = NULL;
+
+static int is_prelinked(int fdno)
+{
+    int prelinked = 0;
+#if HAVE_GELF_H && HAVE_LIBELF
+    Elf *elf = NULL;
+    Elf_Scn *scn = NULL;
+    Elf_Data *data = NULL;
+    GElf_Ehdr ehdr;
+    GElf_Shdr shdr;
+    GElf_Dyn dyn;
+
+    (void) elf_version(EV_CURRENT);
+
+    if ((elf = elf_begin (fdno, ELF_C_READ, NULL)) == NULL ||
+	       elf_kind(elf) != ELF_K_ELF || gelf_getehdr(elf, &ehdr) == NULL ||
+	       !(ehdr.e_type == ET_DYN || ehdr.e_type == ET_EXEC))
+	goto exit;
+
+    while (!prelinked && (scn = elf_nextscn(elf, scn)) != NULL) {
+	(void) gelf_getshdr(scn, &shdr);
+	if (shdr.sh_type != SHT_DYNAMIC)
+	    continue;
+	while (!prelinked && (data = elf_getdata (scn, data)) != NULL) {
+	    int maxndx = data->d_size / shdr.sh_entsize;
+
+            for (int ndx = 0; ndx < maxndx; ++ndx) {
+		(void) gelf_getdyn (data, ndx, &dyn);
+		if (!(dyn.d_tag == DT_GNU_PRELINKED || dyn.d_tag == DT_GNU_LIBLIST))
+		    continue;
+		prelinked = 1;
+		break;
+	    }
+	}
+    }
+
+exit:
+    if (elf) (void) elf_end(elf);
+#endif
+    return prelinked;
+}
 
 static int open_dso(const char * path, pid_t * pidp, rpm_loff_t *fsizep)
 {
@@ -54,78 +100,47 @@ static int open_dso(const char * path, pid_t * pidp, rpm_loff_t *fsizep)
     if (!(cmd && *cmd))
 	return fdno;
 
-#if HAVE_GELF_H && HAVE_LIBELF
- {  Elf *elf = NULL;
-    Elf_Scn *scn = NULL;
-    Elf_Data *data = NULL;
-    GElf_Ehdr ehdr;
-    GElf_Shdr shdr;
-    GElf_Dyn dyn;
-    int bingo;
-
-    (void) elf_version(EV_CURRENT);
-
-    if ((elf = elf_begin (fdno, ELF_C_READ, NULL)) == NULL
-     || elf_kind(elf) != ELF_K_ELF
-     || gelf_getehdr(elf, &ehdr) == NULL
-     || !(ehdr.e_type == ET_DYN || ehdr.e_type == ET_EXEC))
-	goto exit;
-
-    bingo = 0;
-    while (!bingo && (scn = elf_nextscn(elf, scn)) != NULL) {
-	(void) gelf_getshdr(scn, &shdr);
-	if (shdr.sh_type != SHT_DYNAMIC)
-	    continue;
-	while (!bingo && (data = elf_getdata (scn, data)) != NULL) {
-	    int maxndx = data->d_size / shdr.sh_entsize;
-	    int ndx;
-
-            for (ndx = 0; ndx < maxndx; ++ndx) {
-		(void) gelf_getdyn (data, ndx, &dyn);
-		if (!(dyn.d_tag == DT_GNU_PRELINKED || dyn.d_tag == DT_GNU_LIBLIST))
-		    continue;
-		bingo = 1;
-		break;
-	    }
-	}
-    }
-
-    if (pidp != NULL && bingo) {
+    if (pidp != NULL && is_prelinked(fdno)) {
 	int pipes[2];
 	pid_t pid;
-	int xx;
 
-	xx = close(fdno);
+	close(fdno);
 	pipes[0] = pipes[1] = -1;
-	xx = pipe(pipes);
-	if (!(pid = fork())) {
+	if (pipe(pipes) < 0)
+	    return -1;
+
+	pid = fork();
+	if (pid < 0) {
+	    close(pipes[0]);
+	    close(pipes[1]);
+	    return -1;
+	}
+
+	if (pid == 0) {
 	    ARGV_t av, lib;
+	    int dfd;
 	    argvSplit(&av, cmd, " ");
 
-	    xx = close(pipes[0]);
-	    xx = dup2(pipes[1], STDOUT_FILENO);
-	    xx = close(pipes[1]);
-	    if ((lib = argvSearch(av, "library", NULL)) != NULL) {
+	    close(pipes[0]);
+	    dfd = dup2(pipes[1], STDOUT_FILENO);
+	    close(pipes[1]);
+	    if (dfd >= 0 && (lib = argvSearch(av, "library", NULL)) != NULL) {
 		*lib = (char *) path;
 		unsetenv("MALLOC_CHECK_");
-		xx = execve(av[0], av+1, environ);
+		execve(av[0], av+1, environ);
 	    }
-	    _exit(127);
+	    _exit(127); /* not normally reached */
+	} else {
+	    *pidp = pid;
+	    fdno = pipes[0];
+	    close(pipes[1]);
 	}
-	*pidp = pid;
-	fdno = pipes[0];
-	xx = close(pipes[1]);
     }
-
-exit:
-    if (elf) (void) elf_end(elf);
- }
-#endif
 
     return fdno;
 }
 
-int rpmDoDigest(pgpHashAlgo algo, const char * fn,int asAscii,
+int rpmDoDigest(int algo, const char * fn,int asAscii,
                 unsigned char * digest, rpm_loff_t * fsizep)
 {
     const char * path;
@@ -145,42 +160,9 @@ int rpmDoDigest(pgpHashAlgo algo, const char * fn,int asAscii,
 	goto exit;
     }
 
-    /* file to large (32 MB), do not mmap file */
-    if (fsize > (size_t) 32*1024*1024)
-      if (ut == URL_IS_PATH || ut == URL_IS_UNKNOWN)
-	ut = URL_IS_DASH; /* force fd io */
-
     switch(ut) {
     case URL_IS_PATH:
     case URL_IS_UNKNOWN:
-#ifdef HAVE_MMAP
-      if (pid == 0) {
-	DIGEST_CTX ctx;
-	void * mapped;
-
-	if (fsize) {
-	    mapped = mmap(NULL, fsize, PROT_READ, MAP_SHARED, fdno, 0);
-	    if (mapped == (void *)-1) {
-		xx = close(fdno);
-		rc = 1;
-		break;
-	    }
-
-#ifdef	MADV_SEQUENTIAL
-	    xx = madvise(mapped, fsize, MADV_SEQUENTIAL);
-#endif
-	}
-
-	ctx = rpmDigestInit(algo, RPMDIGEST_NONE);
-	if (fsize)
-	    xx = rpmDigestUpdate(ctx, mapped, fsize);
-	xx = rpmDigestFinal(ctx, (void **)&dig, &diglen, asAscii);
-	if (fsize)
-	    xx = munmap(mapped, fsize);
-	xx = close(fdno);
-	break;
-      }
-#endif
     case URL_IS_HTTPS:
     case URL_IS_HTTP:
     case URL_IS_FTP:
@@ -202,7 +184,7 @@ int rpmDoDigest(pgpHashAlgo algo, const char * fn,int asAscii,
 	while ((rc = Fread(buf, sizeof(buf[0]), sizeof(buf), fd)) > 0)
 	    fsize += rc;
 	fdFiniDigest(fd, algo, (void **)&dig, &diglen, asAscii);
-	if (Ferror(fd))
+	if (dig == NULL || Ferror(fd))
 	    rc = 1;
 
 	(void) Fclose(fd);
@@ -229,10 +211,14 @@ exit:
 
 FD_t rpmMkTemp(char *templ)
 {
+    mode_t mode;
     int sfd;
     FD_t tfd = NULL;
 
+    mode = umask(0077);
     sfd = mkstemp(templ);
+    umask(mode);
+
     if (sfd < 0) {
 	goto exit;
     }
@@ -357,14 +343,21 @@ int rpmFileIsCompressed(const char * file, rpmCompressedMagic * compressed)
 
     if ((magic[0] == 'B') && (magic[1] == 'Z')) {
 	*compressed = COMPRESSED_BZIP2;
-    } else if ((magic[0] == 0120) && (magic[1] == 0113) &&
-	 (magic[2] == 0003) && (magic[3] == 0004)) {	/* pkzip */
+    } else if ((magic[0] == 'P') && (magic[1] == 'K') &&
+	 (((magic[2] == 3) && (magic[3] == 4)) ||
+	  ((magic[2] == '0') && (magic[3] == '0')))) {	/* pkzip */
 	*compressed = COMPRESSED_ZIP;
     } else if ((magic[0] == 0xfd) && (magic[1] == 0x37) &&
 	       (magic[2] == 0x7a) && (magic[3] == 0x58) &&
 	       (magic[4] == 0x5a) && (magic[5] == 0x00)) {
 	/* new style xz (lzma) with magic */
 	*compressed = COMPRESSED_XZ;
+    } else if ((magic[0] == 'L') && (magic[1] == 'Z') &&
+	       (magic[2] == 'I') && (magic[3] == 'P')) {
+	*compressed = COMPRESSED_LZIP;
+    } else if ((magic[0] == 'L') && (magic[1] == 'R') &&
+	       (magic[2] == 'Z') && (magic[3] == 'I')) {
+	*compressed = COMPRESSED_LRZIP;
     } else if (((magic[0] == 0037) && (magic[1] == 0213)) || /* gzip */
 	((magic[0] == 0037) && (magic[1] == 0236)) ||	/* old gzip */
 	((magic[0] == 0037) && (magic[1] == 0036)) ||	/* pack */
@@ -372,6 +365,10 @@ int rpmFileIsCompressed(const char * file, rpmCompressedMagic * compressed)
 	((magic[0] == 0037) && (magic[1] == 0235))	/* compress */
 	) {
 	*compressed = COMPRESSED_OTHER;
+    } else if ((magic[0] == '7') && (magic[1] == 'z') &&
+               (magic[2] == 0xbc) && (magic[3] == 0xaf) &&
+               (magic[4] == 0x27) && (magic[5] == 0x1c)) {
+	*compressed = COMPRESSED_7ZIP;
     } else if (rpmFileHasSuffix(file, ".lzma")) {
 	*compressed = COMPRESSED_LZMA;
     }
@@ -546,9 +543,9 @@ char * rpmGenPath(const char * urlroot, const char * urlmdir,
 
     result = rpmGetPath(url, root, "/", mdir, "/", file, NULL);
 
-    xroot = _free(xroot);
-    xmdir = _free(xmdir);
-    xfile = _free(xfile);
+    free(xroot);
+    free(xmdir);
+    free(xfile);
     free(url);
     return result;
 }
@@ -574,144 +571,6 @@ char * rpmGetPath(const char *path, ...)
     free(dest);
 
     return rpmCleanPath(res);
-}
-
-int rpmGlob(const char * patterns, int * argcPtr, ARGV_t * argvPtr)
-{
-    int ac = 0;
-    const char ** av = NULL;
-    int argc = 0;
-    ARGV_t argv = NULL;
-    char * globRoot = NULL;
-    const char *home = getenv("HOME");
-    int gflags = 0;
-#ifdef ENABLE_NLS
-    char * old_collate = NULL;
-    char * old_ctype = NULL;
-    const char * t;
-#endif
-    size_t maxb, nb;
-    int i, j;
-    int rc;
-#ifdef __EMX__
-    char* _patterns, *_p;
-#endif
-
-    if (home != NULL && strlen(home) > 0) 
-	gflags |= GLOB_TILDE;
-
-#ifdef __EMX__
-    // hack to convert \\ into / but only for paths (X:\aa\bb\cc)
-    _patterns = _p = strdup(patterns);
-    if (_patterns[1]==':' && _patterns[2]=='\\')
-        do { if (*_p=='\\') *_p='/';} while(*_p++);
-    /* Can't use argvSplit() here, it doesn't handle whitespace etc escapes */
-    rc = poptParseArgvString(_patterns, &ac, &av);
-    free(_patterns);
-#else
-    /* Can't use argvSplit() here, it doesn't handle whitespace etc escapes */
-    rc = poptParseArgvString(patterns, &ac, &av);
-#endif
-    if (rc)
-	return rc;
-
-#ifdef ENABLE_NLS
-    t = setlocale(LC_COLLATE, NULL);
-    if (t)
-    	old_collate = xstrdup(t);
-    t = setlocale(LC_CTYPE, NULL);
-    if (t)
-    	old_ctype = xstrdup(t);
-    (void) setlocale(LC_COLLATE, "C");
-    (void) setlocale(LC_CTYPE, "C");
-#endif
-	
-    if (av != NULL)
-    for (j = 0; j < ac; j++) {
-	char * globURL;
-	const char * path;
-	int ut = urlPath(av[j], &path);
-	int local = (ut == URL_IS_PATH) || (ut == URL_IS_UNKNOWN);
-	glob_t gl;
-
-	if (!local || (!glob_pattern_p(av[j], 0) && strchr(path, '~') == NULL)) {
-	    argvAdd(&argv, av[j]);
-	    continue;
-	}
-	
-	gl.gl_pathc = 0;
-	gl.gl_pathv = NULL;
-	
-	rc = glob(av[j], gflags, NULL, &gl);
-	if (rc)
-	    goto exit;
-
-	/* XXX Prepend the URL leader for globs that have stripped it off */
-	maxb = 0;
-	for (i = 0; i < gl.gl_pathc; i++) {
-	    if ((nb = strlen(&(gl.gl_pathv[i][0]))) > maxb)
-		maxb = nb;
-	}
-	
-	nb = ((ut == URL_IS_PATH) ? (path - av[j]) : 0);
-	maxb += nb;
-	maxb += 1;
-	globURL = globRoot = xmalloc(maxb);
-
-	switch (ut) {
-	case URL_IS_PATH:
-	case URL_IS_DASH:
-	    strncpy(globRoot, av[j], nb);
-	    break;
-	case URL_IS_HTTPS:
-	case URL_IS_HTTP:
-	case URL_IS_FTP:
-	case URL_IS_HKP:
-	case URL_IS_UNKNOWN:
-	default:
-	    break;
-	}
-	globRoot += nb;
-	*globRoot = '\0';
-
-	for (i = 0; i < gl.gl_pathc; i++) {
-	    const char * globFile = &(gl.gl_pathv[i][0]);
-	    if (globRoot > globURL && globRoot[-1] == '/')
-		while (*globFile == '/') globFile++;
-	    strcpy(globRoot, globFile);
-	    argvAdd(&argv, globURL);
-	}
-	globfree(&gl);
-	globURL = _free(globURL);
-    }
-
-    argc = argvCount(argv);
-    if (argc > 0) {
-	if (argvPtr)
-	    *argvPtr = argv;
-	if (argcPtr)
-	    *argcPtr = argc;
-	rc = 0;
-    } else
-	rc = 1;
-
-
-exit:
-#ifdef ENABLE_NLS	
-    if (old_collate) {
-	(void) setlocale(LC_COLLATE, old_collate);
-	old_collate = _free(old_collate);
-    }
-    if (old_ctype) {
-	(void) setlocale(LC_CTYPE, old_ctype);
-	old_ctype = _free(old_ctype);
-    }
-#endif
-    av = _free(av);
-    if (rc || argvPtr == NULL) {
-	argvFree(argv);
-    }
-    return rc;
 }
 
 char * rpmEscapeSpaces(const char * s)

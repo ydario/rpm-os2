@@ -48,6 +48,7 @@ optflags: ppc32dy4 -O2 -g -fsigned-char
 optflags: ppciseries -O2 -g -fsigned-char
 optflags: ppcpseries -O2 -g -fsigned-char
 optflags: ppc64 -O2 -g -fsigned-char
+optflags: ppc64p7 -O3 -mtune=power7 -mcpu=power7 -g -fsigned-char
 
 optflags: parisc -O2 -g -mpa-risc-1-0
 optflags: hppa1.0 -O2 -g -mpa-risc-1-0
@@ -82,6 +83,43 @@ optflags: sh3 -O2 -g
 optflags: sh4 -O2 -g -mieee
 optflags: sh4a -O2 -g -mieee
 
+optflags: aarch64 -O2 -g
+
+#############################################################
+# Architecture colors
+
+archcolor: noarch 0
+archcolor: i386 1
+archcolor: alpha 2
+archcolor: sparc 1
+archcolor: sparc64 2
+archcolor: sparcv9 2
+archcolor: ppc 1
+archcolor: ppc64 2
+
+archcolor: armv3l 1
+archcolor: armv4b 1
+archcolor: armv4l 1
+archcolor: armv4tl 1
+archcolor: armv5tel 1
+archcolor: armv5tejl 1
+archcolor: armv6l 1
+archcolor: armv7l 1
+
+archcolor: m68kmint 1
+
+archcolor: s390 1
+archcolor: s390x 2
+
+archcolor: ia64 2
+
+archcolor: x86_64 2
+
+archcolor: sh3 1
+archcolor: sh4 1
+
+archcolor: aarch64 2
+
 #############################################################
 # Canonical arch names and numbers
 
@@ -96,6 +134,7 @@ arch_canon:	i386:	i386	1
 arch_canon:	x86_64:	x86_64	1
 arch_canon:	amd64:	amd64	1
 arch_canon:	ia32e:	ia32e	1
+arch_canon:	em64t:	em64t	1
 
 arch_canon:	alpha:	alpha	2
 arch_canon:	alphaev5: alphaev5	2
@@ -157,12 +196,14 @@ arch_canon:	s390x: s390x	15
 arch_canon:	ppc64:	ppc64	16
 arch_canon:    ppc64pseries: ppc64pseries  16
 arch_canon:    ppc64iseries: ppc64iseries  16
+arch_canon:    ppc64p7: ppc64p7  16
 
 arch_canon:	sh: sh		17
 arch_canon:	sh3: sh3	17
 arch_canon:	sh4: sh4	17
 arch_canon:	sh4a: sh4a	17
 arch_canon:	xtensa: xtensa	18
+arch_canon:	aarch64: aarch64 19
 
 #############################################################
 # Canonical OS names and numbers
@@ -241,6 +282,7 @@ buildarchtranslate: ppciseries: ppc
 buildarchtranslate: ppcpseries: ppc
 buildarchtranslate: ppc64iseries: ppc64
 buildarchtranslate: ppc64pseries: ppc64
+buildarchtranslate: ppc64p7: ppc64
 
 buildarchtranslate: armv3l: armv3l
 buildarchtranslate: armv4b: armv4b
@@ -271,6 +313,8 @@ buildarchtranslate: ia32e: x86_64
 buildarchtranslate: sh3: sh3
 buildarchtranslate: sh4: sh4
 buildarchtranslate: sh4a: sh4
+
+buildarchtranslate: aarch64: aarch64
 
 #############################################################
 # Architecture compatibility
@@ -309,6 +353,7 @@ arch_compat: ppc: rs6000
 arch_compat: rs6000: noarch fat
 arch_compat: ppc64pseries: ppc64
 arch_compat: ppc64iseries: ppc64
+arch_compat: ppc64p7: ppc64
 
 arch_compat: sun4c: sparc
 arch_compat: sun4d: sparc
@@ -353,13 +398,15 @@ arch_compat: s390x: s390 noarch
 
 arch_compat: ia64: noarch
 
-arch_compat: x86_64: amd64 athlon noarch
-arch_compat: amd64: x86_64 athlon noarch
-arch_compat: ia32e: x86_64 athlon noarch
+arch_compat: x86_64: amd64 em64t athlon noarch
+arch_compat: amd64: x86_64 em64t athlon noarch
+arch_compat: ia32e: x86_64 em64t athlon noarch
 
 arch_compat: sh3: noarch
 arch_compat: sh4: noarch
 arch_compat: sh4a: sh4
+
+arch_compat: aarch64: noarch
 
 os_compat:   IRIX64: IRIX
 os_compat: solaris2.7: solaris2.3 solaris2.4 solaris2.5 solaris2.6
@@ -391,6 +438,8 @@ os_compat: bsdi4.0: bsdi
 os_compat: Darwin: MacOSX
 
 buildarch_compat: ia64: noarch
+
+buildarch_compat: aarch64: noarch
 
 buildarch_compat: athlon: i686
 buildarch_compat: geode: i586
@@ -430,6 +479,7 @@ buildarch_compat: ppc: noarch fat
 buildarch_compat: ppc64: noarch fat
 buildarch_compat: ppc64pseries: ppc64
 buildarch_compat: ppc64iseries: ppc64
+buildarch_compat: ppc64p7: ppc64
 
 buildarch_compat: mips: noarch
 buildarch_compat: mipsel: noarch

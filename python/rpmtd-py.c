@@ -11,11 +11,11 @@
 /*
  * Convert single tag data item to python object of suitable type
  */
-static PyObject * rpmtd_ItemAsPyobj(rpmtd td, rpmTagClass class)
+static PyObject * rpmtd_ItemAsPyobj(rpmtd td, rpmTagClass tclass)
 {
     PyObject *res = NULL;
 
-    switch (class) {
+    switch (tclass) {
     case RPM_STRING_CLASS:
 	res = PyBytes_FromString(rpmtdGetString(td));
 	break;
@@ -35,23 +35,29 @@ static PyObject * rpmtd_ItemAsPyobj(rpmtd td, rpmTagClass class)
 PyObject *rpmtd_AsPyobj(rpmtd td)
 {
     PyObject *res = NULL;
-    rpmTagType type = rpmTagGetType(td->tag);
-    int array = ((type & RPM_MASK_RETURN_TYPE) == RPM_ARRAY_RETURN_TYPE);
-    rpmTagClass class = rpmtdClass(td);
+    int array = (rpmTagGetReturnType(td->tag) == RPM_ARRAY_RETURN_TYPE);
+    rpmTagClass tclass = rpmtdClass(td);
 
     if (!array && rpmtdCount(td) < 1) {
 	Py_RETURN_NONE;
     }
     
     if (array) {
-	res = PyList_New(0);
-	while (rpmtdNext(td) >= 0) {
-	    PyObject *item = rpmtd_ItemAsPyobj(td, class);
-	    PyList_Append(res, item);
-	    Py_DECREF(item);
+	int ix;
+	res = PyList_New(rpmtdCount(td));
+        if (!res) {
+            return NULL;
+        }
+	while ((ix = rpmtdNext(td)) >= 0) {
+	    PyObject *item = rpmtd_ItemAsPyobj(td, tclass);
+            if (!item) {
+                Py_DECREF(res);
+                return NULL;
+            }
+	    PyList_SET_ITEM(res, ix, item);
 	}
     } else {
-	res = rpmtd_ItemAsPyobj(td, class);
+	res = rpmtd_ItemAsPyobj(td, tclass);
     }
     return res;
 }
@@ -92,7 +98,7 @@ static PyObject *rpmtd_new(PyTypeObject * subtype, PyObject *args, PyObject *kwd
 {
     rpmtdObject *s = NULL;
     Header h = NULL;
-    rpmTag tag;
+    rpmTagVal tag;
     int raw = 0;
     int noext = 0;
     headerGetFlags flags = (HEADERGET_EXT | HEADERGET_ALLOC);
@@ -144,7 +150,7 @@ static PyObject *rpmtd_get_tag(rpmtdObject *s, void *closure)
 
 static int rpmtd_set_tag(rpmtdObject *s, PyObject *value, void *closure)
 {
-    rpmTag tag;
+    rpmTagVal tag;
     if (!tagNumFromPyObject(value, &tag)) return -1;
 
     if (!rpmtdSetTag(&(s->td), tag)) {

@@ -35,23 +35,6 @@ extern const char * const rpmEVR;
 
 extern const int rpmFLAGS;
 
-/** \ingroup header
- * Translate and merge legacy signature tags into header.
- * @todo Remove headerSort() through headerInitIterator() modifies sig.
- * @param h		header
- * @param sigh		signature header
- */
-void headerMergeLegacySigs(Header h, const Header sigh);
-
-/** \ingroup header
- * Regenerate signature header.
- * @todo Remove headerSort() through headerInitIterator() modifies h.
- * @param h		header
- * @param noArchiveSize	don't copy archive size tag (pre rpm-4.1)
- * @return		regenerated signature header
- */
-Header headerRegenSigHeader(const Header h, int noArchiveSize);
-
 /* ==================================================================== */
 /** \name RPMRC */
 
@@ -86,6 +69,13 @@ void rpmGetArchInfo( const char ** name,
 		int * num);
 
 /** \ingroup rpmrc
+ * Return color for an arch
+ * @param arch		name of an architecture
+ * @return color        color of arch, -1 if the arch couldn't be determined
+ */
+int rpmGetArchColor(const char *arch);
+
+/** \ingroup rpmrc
  * Return current os name and/or number.
  * @todo Generalize to extract os component from target_platform macro.
  * @retval name		address of os name (or NULL)
@@ -117,15 +107,6 @@ int rpmMachineScore(int type, const char * name);
 int rpmShowRC(FILE * fp);
 
 /** \ingroup rpmrc
- * @deprecated Use addMacro to set _target_* macros.
- * @todo Eliminate from API.
- # @note Only used by build code.
- * @param archTable
- * @param osTable
- */
-void rpmSetTables(int archTable, int osTable);
-
-/** \ingroup rpmrc
  * Destroy rpmrc arch/os compatibility tables.
  * @todo Eliminate from API.
  */
@@ -138,13 +119,6 @@ void rpmFreeRpmrc(void);
  * @return		result of comparison
  */
 int rpmVersionCompare(Header first, Header second);
-
-/** \ingroup header
- * Check for supported payload format in header.
- * @param h		header to check
- * @return		RPMRC_OK if supported, RPMRC_FAIL otherwise
- */
-rpmRC headerCheckPayloadFormat(Header h);
 
 /**  \ingroup header
  * Check header consistency, performing headerGetEntry() the hard way.
@@ -202,33 +176,6 @@ rpmRC rpmInstallSourcePackage(rpmts ts, FD_t fd,
  * @return		+1 if a is "newer", 0 if equal, -1 if b is "newer"
  */
 int rpmvercmp(const char * a, const char * b);
-
-/**
- * Release storage used by file system usage cache.
- */
-void rpmFreeFilesystems(void);
-
-/**
- * Return (cached) file system mount points.
- * @retval listptr		addess of file system names (or NULL)
- * @retval num			address of number of file systems (or NULL)
- * @return			0 on success, 1 on error
- */
-int rpmGetFilesystemList( const char *** listptr,
-		unsigned int * num);
-
-/**
- * Determine per-file system usage for a list of files.
- * @param fileList		array of absolute file names
- * @param fssizes		array of file sizes
- * @param numFiles		number of files in list
- * @retval usagesPtr		address of per-file system usage array (or NULL)
- * @param flags			(unused)
- * @return			0 on success, 1 on error
- */
-int rpmGetFilesystemUsage(const char ** fileList, rpm_loff_t * fssizes,
-		unsigned int numFiles, rpm_loff_t ** usagesPtr,
-		int flags);
 
 #ifdef __cplusplus
 }

@@ -1,13 +1,13 @@
 #!/bin/sh
 
 # note this works for both a.out and ELF executables
-# it also auto-generates requirment lines for shell scripts
+# it also auto-generates requirement lines for shell scripts
 
 ulimit -c 0
 
 filelist=`sed "s/['\"]/\\\&/g"`
 exelist=`if test "x$filelist" != x; then echo $filelist | xargs file | grep ":.*executable" | cut -d: -f1; fi`
-scriptlist=`if test "x$filelist" != x; then echo $filelist | xargs file | egrep ":.* (commands|script) " | cut -d: -f1; fi`
+scriptlist=`if test "x$filelist" != x; then echo $filelist | xargs file | grep -E ":.* (commands|script) " | cut -d: -f1; fi`
 liblist=`if test "x$filelist" != x; then echo $filelist | xargs file | grep ":.*shared object" | cut -d : -f1; fi`
 
 LDDLIST=`for f in $exelist; do

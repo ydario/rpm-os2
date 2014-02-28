@@ -5,391 +5,299 @@
 
 #include "system.h"
 
+#ifdef __KLIBC__
+#include <sys/wait.h>
+#endif
+#include <errno.h>
+#include <netdb.h>
+#include <time.h>
+
 #include <rpm/rpmlib.h>			/* RPMSIGTAG*, rpmReadPackageFile */
-#include <rpm/rpmts.h>
-#include <rpm/rpmbuild.h>
 #include <rpm/rpmfileutil.h>
 #include <rpm/rpmlog.h>
 
 #include "rpmio/rpmio_internal.h"	/* fdInitDigest, fdFiniDigest */
-#include "lib/cpio.h"
 #include "lib/fsm.h"
-#include "lib/rpmfi_internal.h"		/* rpmfiFSM() */
-#include "lib/rpmte_internal.h"		/* rpmfs */
+#include "lib/cpio.h"
 #include "lib/signature.h"
 #include "lib/rpmlead.h"
-#include "build/buildio.h"
+#include "build/rpmbuild_internal.h"
+#include "build/rpmbuild_misc.h"
 
 #include "debug.h"
 
 /**
  * @todo Create transaction set *much* earlier.
  */
-static rpmRC cpio_doio(FD_t fdo, Header h, CSA_t csa,
-		const char * fmodeMacro)
+static rpmRC cpio_doio(FD_t fdo, Package pkg, const char * fmodeMacro)
 {
-    rpmts ts = rpmtsCreate();
-    rpmfi fi = csa->cpioList;
-    rpmte te = NULL;
-    rpmfs fs = NULL;
     char *failedFile = NULL;
     FD_t cfd;
-    rpmRC rc = RPMRC_OK;
-    int xx, i;
+    int fsmrc;
 
-    {	char *fmode = rpmExpand(fmodeMacro, NULL);
-	if (!(fmode && fmode[0] == 'w'))
-	    fmode = xstrdup("w9.gzdio");
-	(void) Fflush(fdo);
-	cfd = Fdopen(fdDup(Fileno(fdo)), fmode);
-	fmode = _free(fmode);
-    }
+    (void) Fflush(fdo);
+    cfd = Fdopen(fdDup(Fileno(fdo)), fmodeMacro);
     if (cfd == NULL)
 	return RPMRC_FAIL;
 
-    /* make up a transaction element for passing to fsm */
-    rpmtsAddInstallElement(ts, h, NULL, 0, NULL);
-    te = rpmtsElement(ts, 0);
-    fs = rpmteGetFileStates(te);
+    fsmrc = rpmPackageFilesArchive(pkg->cpioList, headerIsSource(pkg->header),
+				   cfd, &pkg->cpioArchiveSize, &failedFile);
 
-    fi = rpmfiInit(fi, 0);
-    while ((i = rpmfiNext(fi)) >= 0) {
-	if (rpmfiFFlags(fi) & RPMFILE_GHOST)
-	    rpmfsSetAction(fs, i, FA_SKIP);
-	else
-	    rpmfsSetAction(fs, i, FA_COPYOUT);
-    }
-
-    xx = fsmSetup(rpmfiFSM(fi), FSM_PKGBUILD, ts, te, fi, cfd,
-		&csa->cpioArchiveSize, &failedFile);
-    if (xx)
-	rc = RPMRC_FAIL;
-    (void) Fclose(cfd);
-    xx = fsmTeardown(rpmfiFSM(fi));
-    if (rc == RPMRC_OK && xx) rc = RPMRC_FAIL;
-
-    if (rc) {
+    if (fsmrc) {
 	if (failedFile)
 	    rpmlog(RPMLOG_ERR, _("create archive failed on file %s: %s\n"),
-		failedFile, cpioStrerror(rc));
+		   failedFile, rpmcpioStrerror(fsmrc));
 	else
 	    rpmlog(RPMLOG_ERR, _("create archive failed: %s\n"),
-		cpioStrerror(rc));
-      rc = RPMRC_FAIL;
+		   rpmcpioStrerror(fsmrc));
     }
-    rpmtsEmpty(ts);
 
-    failedFile = _free(failedFile);
-    ts = rpmtsFree(ts);
+    free(failedFile);
+    Fclose(cfd);
 
-    return rc;
+    return (fsmrc == 0) ? RPMRC_OK : RPMRC_FAIL;
 }
 
-/**
- */
-static rpmRC cpio_copy(FD_t fdo, CSA_t csa)
+static rpmRC addFileToTag(rpmSpec spec, const char * file,
+			  Header h, rpmTagVal tag, int append)
 {
-    char buf[BUFSIZ];
-    size_t nb;
-
-    while((nb = Fread(buf, sizeof(buf[0]), sizeof(buf), csa->cpioFdIn)) > 0) {
-	if (Fwrite(buf, sizeof(buf[0]), nb, fdo) != nb) {
-	    rpmlog(RPMLOG_ERR, _("cpio_copy write failed: %s\n"),
-			Fstrerror(fdo));
-	    return RPMRC_FAIL;
-	}
-	csa->cpioArchiveSize += nb;
-    }
-    if (Ferror(csa->cpioFdIn)) {
-	rpmlog(RPMLOG_ERR, _("cpio_copy read failed: %s\n"),
-		Fstrerror(csa->cpioFdIn));
-	return RPMRC_FAIL;
-    }
-    return RPMRC_OK;
-}
-
-/**
- */
-static StringBuf addFileToTagAux(rpmSpec spec,
-		const char * file, StringBuf sb)
-{
+    StringBuf sb = NULL;
     char buf[BUFSIZ];
     char * fn;
     FILE * f;
+    rpmRC rc = RPMRC_FAIL; /* assume failure */
+
+    /* no script file is not an error */
+    if (file == NULL)
+	return RPMRC_OK;
 
     fn = rpmGetPath("%{_builddir}/%{?buildsubdir:%{buildsubdir}/}", file, NULL);
 
     f = fopen(fn, "r");
-    if (f == NULL || ferror(f)) {
-	sb = freeStringBuf(sb);
+    if (f == NULL) {
+	rpmlog(RPMLOG_ERR,_("Could not open %s file: %s\n"),
+			   rpmTagGetName(tag), file);
 	goto exit;
     }
+
+    sb = newStringBuf();
+    if (append) {
+	const char *s = headerGetString(h, tag);
+	if (s) {
+	    appendLineStringBuf(sb, s);
+	    headerDel(h, tag);
+	}
+    }
+
     while (fgets(buf, sizeof(buf), f)) {
 	if (expandMacros(spec, spec->macros, buf, sizeof(buf))) {
 	    rpmlog(RPMLOG_ERR, _("%s: line: %s\n"), fn, buf);
-	    sb = freeStringBuf(sb);
-	    break;
+	    goto exit;
 	}
 	appendStringBuf(sb, buf);
     }
-    (void) fclose(f);
+    headerPutString(h, tag, getStringBuf(sb));
+    rc = RPMRC_OK;
 
 exit:
+    if (f) fclose(f);
     free(fn);
+    freeStringBuf(sb);
 
-    return sb;
+    return rc;
 }
 
-/**
- */
-static int addFileToTag(rpmSpec spec, const char * file, Header h, rpmTag tag)
+static rpm_time_t * getBuildTime(void)
 {
-    StringBuf sb = newStringBuf();
-    const char *s = headerGetString(h, tag);
+    static rpm_time_t buildTime[1];
 
-    if (s) {
-	appendLineStringBuf(sb, s);
-	(void) headerDel(h, tag);
+    if (buildTime[0] == 0)
+	buildTime[0] = (int32_t) time(NULL);
+    return buildTime;
+}
+
+static const char * buildHost(void)
+{
+    static char hostname[1024];
+    static int oneshot = 0;
+    struct hostent *hbn;
+
+    if (! oneshot) {
+        (void) gethostname(hostname, sizeof(hostname));
+	hbn = gethostbyname(hostname);
+	if (hbn)
+	    strcpy(hostname, hbn->h_name);
+	else
+	    rpmlog(RPMLOG_WARNING,
+			_("Could not canonicalize hostname: %s\n"), hostname);
+	oneshot = 1;
     }
-
-    if ((sb = addFileToTagAux(spec, file, sb)) == NULL)
-	return 1;
-    
-    headerPutString(h, tag, getStringBuf(sb));
-
-    sb = freeStringBuf(sb);
-    return 0;
+    return(hostname);
 }
 
-/**
- */
-static int addFileToArrayTag(rpmSpec spec, const char *file, Header h, rpmTag tag)
-{
-    StringBuf sb = newStringBuf();
-    const char *s;
-
-    if ((sb = addFileToTagAux(spec, file, sb)) == NULL)
-	return 1;
-
-    s = getStringBuf(sb);
-    headerPutString(h, tag, s);
-
-    sb = freeStringBuf(sb);
-    return 0;
-}
-
-/**
- */
 static rpmRC processScriptFiles(rpmSpec spec, Package pkg)
 {
     struct TriggerFileEntry *p;
+    int addflags = 0;
+    rpmRC rc = RPMRC_FAIL;
+    Header h = pkg->header;
     
-    if (pkg->preInFile) {
-	if (addFileToTag(spec, pkg->preInFile, pkg->header, RPMTAG_PREIN)) {
-	    rpmlog(RPMLOG_ERR,
-		     _("Could not open PreIn file: %s\n"), pkg->preInFile);
-	    return RPMRC_FAIL;
-	}
+    if (addFileToTag(spec, pkg->preInFile, h, RPMTAG_PREIN, 1) ||
+	addFileToTag(spec, pkg->preUnFile, h, RPMTAG_PREUN, 1) ||
+	addFileToTag(spec, pkg->preTransFile, h, RPMTAG_PRETRANS, 1) ||
+	addFileToTag(spec, pkg->postInFile, h, RPMTAG_POSTIN, 1) ||
+	addFileToTag(spec, pkg->postUnFile, h, RPMTAG_POSTUN, 1) ||
+	addFileToTag(spec, pkg->postTransFile, h, RPMTAG_POSTTRANS, 1) ||
+	addFileToTag(spec, pkg->verifyFile, h, RPMTAG_VERIFYSCRIPT, 1))
+    {
+	goto exit;
     }
-    if (pkg->preUnFile) {
-	if (addFileToTag(spec, pkg->preUnFile, pkg->header, RPMTAG_PREUN)) {
-	    rpmlog(RPMLOG_ERR,
-		     _("Could not open PreUn file: %s\n"), pkg->preUnFile);
-	    return RPMRC_FAIL;
-	}
-    }
-    if (pkg->preTransFile) {
-	if (addFileToTag(spec, pkg->preTransFile, pkg->header, RPMTAG_PRETRANS)) {
-	    rpmlog(RPMLOG_ERR,
-		     _("Could not open PreTrans file: %s\n"), pkg->preTransFile);
-	    return RPMRC_FAIL;
-	}
-    }
-    if (pkg->postInFile) {
-	if (addFileToTag(spec, pkg->postInFile, pkg->header, RPMTAG_POSTIN)) {
-	    rpmlog(RPMLOG_ERR,
-		     _("Could not open PostIn file: %s\n"), pkg->postInFile);
-	    return RPMRC_FAIL;
-	}
-    }
-    if (pkg->postUnFile) {
-	if (addFileToTag(spec, pkg->postUnFile, pkg->header, RPMTAG_POSTUN)) {
-	    rpmlog(RPMLOG_ERR,
-		     _("Could not open PostUn file: %s\n"), pkg->postUnFile);
-	    return RPMRC_FAIL;
-	}
-    }
-    if (pkg->postTransFile) {
-	if (addFileToTag(spec, pkg->postTransFile, pkg->header, RPMTAG_POSTTRANS)) {
-	    rpmlog(RPMLOG_ERR,
-		     _("Could not open PostTrans file: %s\n"), pkg->postTransFile);
-	    return RPMRC_FAIL;
-	}
-    }
-    if (pkg->verifyFile) {
-	if (addFileToTag(spec, pkg->verifyFile, pkg->header,
-			 RPMTAG_VERIFYSCRIPT)) {
-	    rpmlog(RPMLOG_ERR,
-		     _("Could not open VerifyScript file: %s\n"), pkg->verifyFile);
-	    return RPMRC_FAIL;
+
+    /* if any trigger has flags, we need to add flags entry for all of them */
+    for (p = pkg->triggerFiles; p != NULL; p = p->next) {
+	if (p->flags) {
+	    addflags = 1;
+	    break;
 	}
     }
 
     for (p = pkg->triggerFiles; p != NULL; p = p->next) {
-	headerPutString(pkg->header, RPMTAG_TRIGGERSCRIPTPROG, p->prog);
+	headerPutString(h, RPMTAG_TRIGGERSCRIPTPROG, p->prog);
+	if (addflags) {
+	    headerPutUint32(h, RPMTAG_TRIGGERSCRIPTFLAGS, &p->flags, 1);
+	}
 
 	if (p->script) {
-	    headerPutString(pkg->header, RPMTAG_TRIGGERSCRIPTS, p->script);
+	    headerPutString(h, RPMTAG_TRIGGERSCRIPTS, p->script);
 	} else if (p->fileName) {
-	    if (addFileToArrayTag(spec, p->fileName, pkg->header,
-				  RPMTAG_TRIGGERSCRIPTS)) {
-		rpmlog(RPMLOG_ERR,
-			 _("Could not open Trigger script file: %s\n"),
-			 p->fileName);
-		return RPMRC_FAIL;
+	    if (addFileToTag(spec, p->fileName, h, RPMTAG_TRIGGERSCRIPTS, 0)) {
+		goto exit;
 	    }
 	} else {
 	    /* This is dumb.  When the header supports NULL string */
 	    /* this will go away.                                  */
-	    headerPutString(pkg->header, RPMTAG_TRIGGERSCRIPTS, "");
+	    headerPutString(h, RPMTAG_TRIGGERSCRIPTS, "");
+	}
+    }
+    rc = RPMRC_OK;
+
+exit:
+    return rc;
+}
+
+static rpmRC copyPayload(FD_t ifd, const char *ifn, FD_t ofd, const char *ofn)
+{
+    char buf[BUFSIZ];
+    size_t nb;
+    rpmRC rc = RPMRC_OK;
+
+    while ((nb = Fread(buf, 1, sizeof(buf), ifd)) > 0) {
+	if (Fwrite(buf, sizeof(buf[0]), nb, ofd) != nb) {
+	    rpmlog(RPMLOG_ERR, _("Unable to write payload to %s: %s\n"),
+		     ofn, Fstrerror(ofd));
+	    rc = RPMRC_FAIL;
+	    break;
 	}
     }
 
-    return RPMRC_OK;
+    if (nb < 0) {
+	rpmlog(RPMLOG_ERR, _("Unable to read payload from %s: %s\n"),
+		 ifn, Fstrerror(ifd));
+	rc = RPMRC_FAIL;
+    }
+
+    return rc;
 }
 
-rpmRC readRPM(const char *fileName, rpmSpec *specp, 
-		Header *sigs, CSA_t csa)
+static int depContainsTilde(Header h, rpmTagVal tagEVR)
 {
-    FD_t fdi;
-    rpmSpec spec;
-    rpmRC rc;
+    struct rpmtd_s evrs;
+    const char *evr = NULL;
 
-    fdi = (fileName != NULL)
-	? Fopen(fileName, "r.ufdio")
-	: fdDup(STDIN_FILENO);
-
-    if (fdi == NULL || Ferror(fdi)) {
-	rpmlog(RPMLOG_ERR, _("readRPM: open %s: %s\n"),
-		(fileName ? fileName : "<stdin>"),
-		Fstrerror(fdi));
-	if (fdi) (void) Fclose(fdi);
-	return RPMRC_FAIL;
+    if (headerGet(h, tagEVR, &evrs, HEADERGET_MINMEM)) {
+	while ((evr = rpmtdNextString(&evrs)) != NULL)
+	    if (strchr(evr, '~'))
+		break;
+	rpmtdFreeData(&evrs);
     }
-
-    /* XXX FIXME: EPIPE on <stdin> */
-    if (Fseek(fdi, 0, SEEK_SET) == -1) {
-	rpmlog(RPMLOG_ERR, _("%s: Fseek failed: %s\n"),
-			(fileName ? fileName : "<stdin>"), Fstrerror(fdi));
-	return RPMRC_FAIL;
-    }
-
-    /* Reallocate build data structures */
-    spec = newSpec();
-    spec->packages = newPackage(spec);
-
-    /* XXX the header just allocated will be allocated again */
-    spec->packages->header = headerFree(spec->packages->header);
-
-    /* Read the rpm lead, signatures, and header */
-    {	rpmts ts = rpmtsCreate();
-
-	/* XXX W2DO? pass fileName? */
-	rc = rpmReadPackageFile(ts, fdi, "readRPM",
-			 &spec->packages->header);
-
-	ts = rpmtsFree(ts);
-
-	if (sigs) *sigs = NULL;			/* XXX HACK */
-    }
-
-    switch (rc) {
-    case RPMRC_OK:
-    case RPMRC_NOKEY:
-    case RPMRC_NOTTRUSTED:
-	break;
-    case RPMRC_NOTFOUND:
-	rpmlog(RPMLOG_ERR, _("readRPM: %s is not an RPM package\n"),
-		(fileName ? fileName : "<stdin>"));
-	return RPMRC_FAIL;
-    case RPMRC_FAIL:
-    default:
-	rpmlog(RPMLOG_ERR, _("readRPM: reading header from %s\n"),
-		(fileName ? fileName : "<stdin>"));
-	return RPMRC_FAIL;
-	break;
-    }
-
-    if (specp)
-	*specp = spec;
-    else
-	spec = freeSpec(spec);
-
-    if (csa != NULL)
-	csa->cpioFdIn = fdi;
-    else
-	(void) Fclose(fdi);
-
-    return RPMRC_OK;
+    return evr != NULL;
 }
 
-rpmRC writeRPM(Header *hdrp, unsigned char ** pkgidp, const char *fileName,
-	     CSA_t csa, char *passPhrase, char **cookie)
+static rpmTagVal depevrtags[] = {
+    RPMTAG_PROVIDEVERSION,
+    RPMTAG_REQUIREVERSION,
+    RPMTAG_OBSOLETEVERSION,
+    RPMTAG_CONFLICTVERSION,
+    RPMTAG_ORDERVERSION,
+    RPMTAG_TRIGGERVERSION,
+    RPMTAG_SUGGESTSVERSION,
+    RPMTAG_ENHANCESVERSION,
+    0
+};
+
+static int haveTildeDep(Header h)
+{
+    int i;
+
+    for (i = 0; depevrtags[i] != 0; i++)
+	if (depContainsTilde(h, depevrtags[i]))
+	    return 1;
+    return 0;
+}
+
+static rpmRC writeRPM(Package pkg, unsigned char ** pkgidp,
+		      const char *fileName, char **cookie)
 {
     FD_t fd = NULL;
     FD_t ifd = NULL;
-    ssize_t count;
-    rpmSigTag sigtag;
     char * sigtarget = NULL;;
     char * rpmio_flags = NULL;
     char * SHA1 = NULL;
-    char *s;
-    char *buf = NULL;
-    Header h;
+    const char *s;
     Header sig = NULL;
     int xx;
     rpmRC rc = RPMRC_OK;
     struct rpmtd_s td;
-    rpmSigTag sizetag;
-    rpmTag payloadtag;
-
-    /* Transfer header reference form *hdrp to h. */
-    h = headerLink(*hdrp);
-    *hdrp = headerFree(*hdrp);
+    rpmTagVal sizetag;
+    rpmTagVal payloadtag;
 
     if (pkgidp)
 	*pkgidp = NULL;
 
     /* Save payload information */
-    if (headerIsSource(h))
+    if (headerIsSource(pkg->header))
 	rpmio_flags = rpmExpand("%{?_source_payload}", NULL);
     else 
 	rpmio_flags = rpmExpand("%{?_binary_payload}", NULL);
 
-    if (!(rpmio_flags && *rpmio_flags)) {
-	rpmio_flags = _free(rpmio_flags);
+    /* If not configured or bogus, fall back to gz */
+    if (rpmio_flags[0] != 'w') {
+	free(rpmio_flags);
 	rpmio_flags = xstrdup("w9.gzdio");
     }
     s = strchr(rpmio_flags, '.');
     if (s) {
+	char *buf = NULL;
 	const char *compr = NULL;
-	headerPutString(h, RPMTAG_PAYLOADFORMAT, "cpio");
+	headerPutString(pkg->header, RPMTAG_PAYLOADFORMAT, "cpio");
 
-	if (rstreq(s+1, "gzdio")) {
+	if (rstreq(s+1, "ufdio")) {
+	    compr = NULL;
+	} else if (rstreq(s+1, "gzdio")) {
 	    compr = "gzip";
 #if HAVE_BZLIB_H
 	} else if (rstreq(s+1, "bzdio")) {
 	    compr = "bzip2";
 	    /* Add prereq on rpm version that understands bzip2 payloads */
-	    (void) rpmlibNeedsFeature(h, "PayloadIsBzip2", "3.0.5-1");
+	    (void) rpmlibNeedsFeature(pkg, "PayloadIsBzip2", "3.0.5-1");
 #endif
 #if HAVE_LZMA_H
 	} else if (rstreq(s+1, "xzdio")) {
 	    compr = "xz";
-	    (void) rpmlibNeedsFeature(h, "PayloadIsXz", "5.2-1");
+	    (void) rpmlibNeedsFeature(pkg, "PayloadIsXz", "5.2-1");
 	} else if (rstreq(s+1, "lzdio")) {
 	    compr = "lzma";
-	    (void) rpmlibNeedsFeature(h, "PayloadIsLzma", "4.4.6-1");
+	    (void) rpmlibNeedsFeature(pkg, "PayloadIsLzma", "4.4.6-1");
 #endif
 	} else {
 	    rpmlog(RPMLOG_ERR, _("Unknown payload compression: %s\n"),
@@ -398,28 +306,31 @@ rpmRC writeRPM(Header *hdrp, unsigned char ** pkgidp, const char *fileName,
 	    goto exit;
 	}
 
-	headerPutString(h, RPMTAG_PAYLOADCOMPRESSOR, compr);
+	if (compr)
+	    headerPutString(pkg->header, RPMTAG_PAYLOADCOMPRESSOR, compr);
 	buf = xstrdup(rpmio_flags);
 	buf[s - rpmio_flags] = '\0';
-	headerPutString(h, RPMTAG_PAYLOADFLAGS, buf+1);
+	headerPutString(pkg->header, RPMTAG_PAYLOADFLAGS, buf+1);
 	free(buf);
     }
+
+    /* check if the package has a dependency with a '~' */
+    if (haveTildeDep(pkg->header))
+	(void) rpmlibNeedsFeature(pkg, "TildeInVersions", "4.10.0-1");
 
     /* Create and add the cookie */
     if (cookie) {
 	rasprintf(cookie, "%s %d", buildHost(), (int) (*getBuildTime()));
-	headerPutString(h, RPMTAG_COOKIE, *cookie);
+	headerPutString(pkg->header, RPMTAG_COOKIE, *cookie);
     }
     
     /* Reallocate the header into one contiguous region. */
-    h = headerReload(h, RPMTAG_HEADERIMMUTABLE);
-    if (h == NULL) {	/* XXX can't happen */
+    pkg->header = headerReload(pkg->header, RPMTAG_HEADERIMMUTABLE);
+    if (pkg->header == NULL) {
 	rc = RPMRC_FAIL;
 	rpmlog(RPMLOG_ERR, _("Unable to create immutable header region.\n"));
 	goto exit;
     }
-    /* Re-reference reallocated header. */
-    *hdrp = headerLink(h);
 
     /*
      * Write the header+archive into a temp file so that the size of
@@ -433,22 +344,19 @@ rpmRC writeRPM(Header *hdrp, unsigned char ** pkgidp, const char *fileName,
     }
 
     fdInitDigest(fd, PGPHASHALGO_SHA1, 0);
-    if (headerWrite(fd, h, HEADER_MAGIC_YES)) {
+    if (headerWrite(fd, pkg->header, HEADER_MAGIC_YES)) {
 	rc = RPMRC_FAIL;
 	rpmlog(RPMLOG_ERR, _("Unable to write temp header\n"));
     } else { /* Write the archive and get the size */
 	(void) Fflush(fd);
 	fdFiniDigest(fd, PGPHASHALGO_SHA1, (void **)&SHA1, NULL, 1);
-	if (csa->cpioList != NULL) {
-	    rc = cpio_doio(fd, h, csa, rpmio_flags);
-	} else if (Fileno(csa->cpioFdIn) >= 0) {
-	    rc = cpio_copy(fd, csa);
+	if (pkg->cpioList != NULL) {
+	    rc = cpio_doio(fd, pkg, rpmio_flags);
 	} else {
 	    rc = RPMRC_FAIL;
 	    rpmlog(RPMLOG_ERR, _("Bad CSA data\n"));
 	}
     }
-    rpmio_flags = _free(rpmio_flags);
 
     if (rc != RPMRC_OK)
 	goto exit;
@@ -469,21 +377,16 @@ rpmRC writeRPM(Header *hdrp, unsigned char ** pkgidp, const char *fileName,
      * older rpm will just bail out with error message on attempt to read
      * such a package.
      */
-    if (csa->cpioArchiveSize < UINT32_MAX) {
+    if (pkg->cpioArchiveSize < UINT32_MAX) {
 	sizetag = RPMSIGTAG_SIZE;
 	payloadtag = RPMSIGTAG_PAYLOADSIZE;
     } else {
 	sizetag = RPMSIGTAG_LONGSIZE;
 	payloadtag = RPMSIGTAG_LONGARCHIVESIZE;
     }
-    (void) rpmAddSignature(sig, sigtarget, sizetag, passPhrase);
-    (void) rpmAddSignature(sig, sigtarget, RPMSIGTAG_MD5, passPhrase);
+    (void) rpmGenDigest(sig, sigtarget, sizetag);
+    (void) rpmGenDigest(sig, sigtarget, RPMSIGTAG_MD5);
 
-    if ((sigtag = rpmLookupSignatureType(RPMLOOKUPSIG_QUERY)) > 0) {
-	rpmlog(RPMLOG_NOTICE, _("Generating signature: %d\n"), sigtag);
-	(void) rpmAddSignature(sig, sigtarget, sigtag, passPhrase);
-    }
-    
     if (SHA1) {
 	/* XXX can't use rpmtdFromFoo() on RPMSIGTAG_* items */
 	rpmtdReset(&td);
@@ -501,12 +404,12 @@ rpmRC writeRPM(Header *hdrp, unsigned char ** pkgidp, const char *fileName,
 	td.tag = payloadtag;
 	td.count = 1;
 	if (payloadtag == RPMSIGTAG_PAYLOADSIZE) {
-	    rpm_off_t asize = csa->cpioArchiveSize;
+	    rpm_off_t asize = pkg->cpioArchiveSize;
 	    td.type = RPM_INT32_TYPE;
 	    td.data = &asize;
 	    headerPut(sig, &td, HEADERPUT_DEFAULT);
 	} else {
-	    rpm_loff_t asize = csa->cpioArchiveSize;
+	    rpm_loff_t asize = pkg->cpioArchiveSize;
 	    td.type = RPM_INT64_TYPE;
 	    td.data = &asize;
 	    headerPut(sig, &td, HEADERPUT_DEFAULT);
@@ -532,9 +435,9 @@ rpmRC writeRPM(Header *hdrp, unsigned char ** pkgidp, const char *fileName,
 
     /* Write the lead section into the package. */
     {	
-	rpmlead lead = rpmLeadFromHeader(h);
+	rpmlead lead = rpmLeadFromHeader(pkg->header);
 	rc = rpmLeadWrite(fd, lead);
-	lead = rpmLeadFree(lead);
+	rpmLeadFree(lead);
 	if (rc != RPMRC_OK) {
 	    rc = RPMRC_FAIL;
 	    rpmlog(RPMLOG_ERR, _("Unable to write package: %s\n"),
@@ -569,12 +472,8 @@ rpmRC writeRPM(Header *hdrp, unsigned char ** pkgidp, const char *fileName,
 	    goto exit;
 	}
 
-#ifdef	NOTYET
-	(void) headerMergeLegacySigs(nh, sig);
-#endif
-
 	xx = headerWrite(fd, nh, HEADER_MAGIC_YES);
-	nh = headerFree(nh);
+	headerFree(nh);
 
 	if (xx) {
 	    rc = RPMRC_FAIL;
@@ -585,29 +484,11 @@ rpmRC writeRPM(Header *hdrp, unsigned char ** pkgidp, const char *fileName,
     }
 	
     /* Write the payload into the package. */
-    buf = xmalloc(BUFSIZ);
-    while ((count = Fread(buf, 1, BUFSIZ, ifd)) > 0) {
-	if (count == -1) {
-	    free(buf);
-	    rc = RPMRC_FAIL;
-	    rpmlog(RPMLOG_ERR, _("Unable to read payload from %s: %s\n"),
-		     sigtarget, Fstrerror(ifd));
-	    goto exit;
-	}
-	if (Fwrite(buf, sizeof(buf[0]), count, fd) != count) {
-	    free(buf);
-	    rc = RPMRC_FAIL;
-	    rpmlog(RPMLOG_ERR, _("Unable to write payload to %s: %s\n"),
-		     fileName, Fstrerror(fd));
-	    goto exit;
-	}
-    }
-    free(buf);
-    rc = RPMRC_OK;
+    rc = copyPayload(ifd, fileName, fd, sigtarget);
 
 exit:
-    SHA1 = _free(SHA1);
-    h = headerFree(h);
+    free(rpmio_flags);
+    free(SHA1);
 
     /* XXX Fish the pkgid out of the signature header. */
     if (sig != NULL && pkgidp != NULL) {
@@ -619,18 +500,13 @@ exit:
 	}
     }
 
-    sig = rpmFreeSignature(sig);
-    if (ifd) {
-	(void) Fclose(ifd);
-	ifd = NULL;
-    }
-    if (fd) {
-	(void) Fclose(fd);
-	fd = NULL;
-    }
+    rpmFreeSignature(sig);
+    Fclose(ifd);
+    Fclose(fd);
+
     if (sigtarget) {
 	(void) unlink(sigtarget);
-	sigtarget = _free(sigtarget);
+	free(sigtarget);
     }
 
     if (rc == RPMRC_OK)
@@ -641,46 +517,14 @@ exit:
     return rc;
 }
 
-static const rpmTag copyTags[] = {
+static const rpmTagVal copyTags[] = {
     RPMTAG_CHANGELOGTIME,
     RPMTAG_CHANGELOGNAME,
     RPMTAG_CHANGELOGTEXT,
     0
 };
 
-/*
- * Add extra provides to package.
- */
-static void addPackageProvides(Header h)
-{
-    const char *arch, *name;
-    char *evr, *isaprov;
-    rpmsenseFlags pflags = RPMSENSE_EQUAL;
-
-    /* <name> = <evr> provide */
-    name = headerGetString(h, RPMTAG_NAME);
-    arch = headerGetString(h, RPMTAG_ARCH);
-    evr = headerGetAsString(h, RPMTAG_EVR);
-    headerPutString(h, RPMTAG_PROVIDENAME, name);
-    headerPutString(h, RPMTAG_PROVIDEVERSION, evr);
-    headerPutUint32(h, RPMTAG_PROVIDEFLAGS, &pflags, 1);
-
-    /*
-     * <name>(<isa>) = <evr> provide
-     * FIXME: noarch needs special casing for now as BuildArch: noarch doesn't
-     * cause reading in the noarch macros :-/ 
-     */
-    isaprov = rpmExpand(name, "%{?_isa}", NULL);
-    if (!rstreq(arch, "noarch") && !rstreq(name, isaprov)) {
-	headerPutString(h, RPMTAG_PROVIDENAME, isaprov);
-	headerPutString(h, RPMTAG_PROVIDEVERSION, evr);
-	headerPutUint32(h, RPMTAG_PROVIDEFLAGS, &pflags, 1);
-    }
-    free(isaprov);
-    free(evr);
-}
-
-rpmRC checkPackages(char *pkgcheck)
+static rpmRC checkPackages(char *pkgcheck)
 {
     int fail = rpmExpandNumeric("%{?_nonzero_exit_pkgcheck_terminate_build}");
     int xx;
@@ -689,7 +533,7 @@ rpmRC checkPackages(char *pkgcheck)
     xx = system(pkgcheck);
     if (WEXITSTATUS(xx) == -1 || WEXITSTATUS(xx) == 127) {
 	rpmlog(RPMLOG_ERR, _("Execution of \"%s\" failed.\n"), pkgcheck);
-	if (fail) return 127;
+	if (fail) return RPMRC_NOTFOUND;
     }
     if (WEXITSTATUS(xx) != 0) {
 	rpmlog(RPMLOG_ERR, _("Package check \"%s\" failed.\n"), pkgcheck);
@@ -699,10 +543,8 @@ rpmRC checkPackages(char *pkgcheck)
     return RPMRC_OK;
 }
 
-rpmRC packageBinaries(rpmSpec spec)
+rpmRC packageBinaries(rpmSpec spec, const char *cookie, int cheating)
 {
-    struct cpioSourceArchive_s csabuf;
-    CSA_t csa = &csabuf;
     rpmRC rc;
     const char *errorString;
     Package pkg;
@@ -717,8 +559,8 @@ rpmRC packageBinaries(rpmSpec spec)
 	if ((rc = processScriptFiles(spec, pkg)))
 	    return rc;
 	
-	if (spec->cookie) {
-	    headerPutString(pkg->header, RPMTAG_COOKIE, spec->cookie);
+	if (cookie) {
+	    headerPutString(pkg->header, RPMTAG_COOKIE, cookie);
 	}
 
 	/* Copy changelog from src rpm */
@@ -728,21 +570,18 @@ rpmRC packageBinaries(rpmSpec spec)
 	headerPutString(pkg->header, RPMTAG_BUILDHOST, buildHost());
 	headerPutUint32(pkg->header, RPMTAG_BUILDTIME, getBuildTime(), 1);
 
-	addPackageProvides(pkg->header);
-
-    {	char * optflags = rpmExpand("%{optflags}", NULL);
-	headerPutString(pkg->header, RPMTAG_OPTFLAGS, optflags);
-	optflags = _free(optflags);
-    }
-
 	if (spec->sourcePkgId != NULL) {
 	    headerPutBin(pkg->header, RPMTAG_SOURCEPKGID, spec->sourcePkgId,16);
+	}
+
+	if (cheating) {
+	    (void) rpmlibNeedsFeature(pkg, "ShortCircuited", "4.9.0-1");
 	}
 	
 	{   char *binFormat = rpmGetPath("%{_rpmfilename}", NULL);
 	    char *binRpm, *binDir;
 	    binRpm = headerFormat(pkg->header, binFormat, &errorString);
-	    binFormat = _free(binFormat);
+	    free(binFormat);
 	    if (binRpm == NULL) {
 		rpmlog(RPMLOG_ERR, _("Could not generate output "
 		     "filename for package %s: %s\n"), 
@@ -766,31 +605,23 @@ rpmRC packageBinaries(rpmSpec spec)
 			break;
 		    }
 		}
-		dn = _free(dn);
+		free(dn);
 	    }
-	    binRpm = _free(binRpm);
+	    free(binRpm);
 	}
 
-	memset(csa, 0, sizeof(*csa));
-	csa->cpioArchiveSize = 0;
-	csa->cpioFdIn = fdNew(RPMDBG_M("init (packageBinaries)"));
-	csa->cpioList = rpmfiLink(pkg->cpioList, RPMDBG_M("packageBinaries"));
-
-	rc = writeRPM(&pkg->header, NULL, fn, csa, spec->passPhrase, NULL);
-	csa->cpioList = rpmfiFree(csa->cpioList);
-	csa->cpioFdIn = fdFree(csa->cpioFdIn, 
-			       RPMDBG_M("init (packageBinaries)"));
+	rc = writeRPM(pkg, NULL, fn, NULL);
 	if (rc == RPMRC_OK) {
 	    /* Do check each written package if enabled */
 	    char *pkgcheck = rpmExpand("%{?_build_pkgcheck} ", fn, NULL);
 	    if (pkgcheck[0] != ' ') {
 		rc = checkPackages(pkgcheck);
 	    }
-	    pkgcheck = _free(pkgcheck);
+	    free(pkgcheck);
 	    rstrcat(&pkglist, fn);
 	    rstrcat(&pkglist, " ");
 	}
-	fn = _free(fn);
+	free(fn);
 	if (rc != RPMRC_OK) {
 	    pkglist = _free(pkglist);
 	    return rc;
@@ -803,50 +634,37 @@ rpmRC packageBinaries(rpmSpec spec)
 	if (pkgcheck_set[0] != ' ') {	/* run only if _build_pkgcheck_set is defined */
 	    checkPackages(pkgcheck_set);
 	}
-	pkgcheck_set = _free(pkgcheck_set);
+	free(pkgcheck_set);
 	pkglist = _free(pkglist);
     }
     
     return RPMRC_OK;
 }
 
-rpmRC packageSources(rpmSpec spec)
+rpmRC packageSources(rpmSpec spec, char **cookie)
 {
-    struct cpioSourceArchive_s csabuf;
-    CSA_t csa = &csabuf;
+    Package sourcePkg = spec->sourcePackage;
     rpmRC rc;
 
     /* Add some cruft */
-    headerPutString(spec->sourceHeader, RPMTAG_RPMVERSION, VERSION);
-    headerPutString(spec->sourceHeader, RPMTAG_BUILDHOST, buildHost());
-    headerPutUint32(spec->sourceHeader, RPMTAG_BUILDTIME, getBuildTime(), 1);
+    headerPutString(sourcePkg->header, RPMTAG_RPMVERSION, VERSION);
+    headerPutString(sourcePkg->header, RPMTAG_BUILDHOST, buildHost());
+    headerPutUint32(sourcePkg->header, RPMTAG_BUILDTIME, getBuildTime(), 1);
 
-    spec->cookie = _free(spec->cookie);
-    
     /* XXX this should be %_srpmdir */
     {	char *fn = rpmGetPath("%{_srcrpmdir}/", spec->sourceRpmName,NULL);
 	char *pkgcheck = rpmExpand("%{?_build_pkgcheck_srpm} ", fn, NULL);
 
-	memset(csa, 0, sizeof(*csa));
-	csa->cpioArchiveSize = 0;
-	csa->cpioFdIn = fdNew(RPMDBG_M("init (packageSources)"));
-	csa->cpioList = rpmfiLink(spec->sourceCpioList, 
-				  RPMDBG_M("packageSources"));
-
 	spec->sourcePkgId = NULL;
-	rc = writeRPM(&spec->sourceHeader, &spec->sourcePkgId, fn, 
-		csa, spec->passPhrase, &(spec->cookie));
+	rc = writeRPM(sourcePkg, &spec->sourcePkgId, fn, cookie);
 
 	/* Do check SRPM package if enabled */
 	if (rc == RPMRC_OK && pkgcheck[0] != ' ') {
 	    rc = checkPackages(pkgcheck);
 	}
 
-	csa->cpioList = rpmfiFree(csa->cpioList);
-	csa->cpioFdIn = fdFree(csa->cpioFdIn, 
-			       RPMDBG_M("init (packageSources)"));
-	pkgcheck = _free(pkgcheck);
-	fn = _free(fn);
+	free(pkgcheck);
+	free(fn);
     }
     return rc;
 }

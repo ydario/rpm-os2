@@ -7,24 +7,11 @@
  */
 
 #include <rpm/rpmtypes.h>
+#include <rpm/argv.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-/**
- */
-extern int _rpmte_debug;
-
-/** \ingroup rpmte
- * Transaction element ordering chain linkage.
- */
-typedef struct tsortInfo_s *		tsortInfo;
-
-/** \ingroup rpmte
- * Transaction element iterator.
- */
-typedef struct rpmtsi_s *		rpmtsi;
 
 /** \ingroup rpmte
  * Transaction element type.
@@ -34,32 +21,12 @@ typedef enum rpmElementType_e {
     TR_REMOVED		= (1 << 1)	/*!< Package will be removed. */
 } rpmElementType;
 
-/** \ingroup rpmte
- * Destroy a transaction element.
- * @param te		transaction element
- * @return		NULL always
- */
-rpmte rpmteFree(rpmte te);
-
-/** \ingroup rpmte
- * Create a transaction element.
- * @param ts		transaction set
- * @param h		header
- * @param type		TR_ADDED/TR_REMOVED
- * @param key		(TR_ADDED) package retrieval key (e.g. file name)
- * @param relocs	(TR_ADDED) package file relocations
- * @param dboffset	unused
- * @return		new transaction element
- */
-rpmte rpmteNew(const rpmts ts, Header h, rpmElementType type,
-		fnpyKey key,
-		rpmRelocation * relocs,
-		int dboffset);
+typedef rpmFlags rpmElementTypes;
 
 /** \ingroup rpmte
  * Retrieve header from transaction element.
  * @param te		transaction element
- * @return		header
+ * @return		header (new reference)
  */
 Header rpmteHeader(rpmte te);
 
@@ -166,66 +133,6 @@ void rpmteSetDBInstance(rpmte te, unsigned int instance);
 rpm_loff_t rpmtePkgFileSize(rpmte te);
 
 /** \ingroup rpmte
- * Retrieve dependency tree depth of transaction element.
- * @param te		transaction element
- * @return		depth
- */
-int rpmteDepth(rpmte te);
-
-/** \ingroup rpmte
- * Set dependency tree depth of transaction element.
- * @param te		transaction element
- * @param ndepth	new depth
- * @return		previous depth
- */
-int rpmteSetDepth(rpmte te, int ndepth);
-
-/** \ingroup rpmte
- * Retrieve dependency tree breadth of transaction element.
- * @param te		transaction element
- * @return		breadth
- */
-int rpmteBreadth(rpmte te);
-
-/** \ingroup rpmte
- * Set dependency tree breadth of transaction element.
- * @param te		transaction element
- * @param nbreadth	new breadth
- * @return		previous breadth
- */
-int rpmteSetBreadth(rpmte te, int nbreadth);
-
-/** \ingroup rpmte
- * Retrieve tsort no. of predecessors of transaction element.
- * @param te		transaction element
- * @return		no. of predecessors
- */
-int rpmteNpreds(rpmte te);
-
-/** \ingroup rpmte
- * Set tsort no. of predecessors of transaction element.
- * @param te		transaction element
- * @param npreds	new no. of predecessors
- * @return		previous no. of predecessors
- */
-int rpmteSetNpreds(rpmte te, int npreds);
-
-/** \ingroup rpmte
- * Retrieve tree index of transaction element.
- * @param te		transaction element
- * @return		tree index
- */
-int rpmteTree(rpmte te);
-
-/** \ingroup rpmte
- * Set tree index of transaction element.
- * @param te		transaction element
- * @param ntree		new tree index
- * @return		previous tree index
- */
-int rpmteSetTree(rpmte te, int ntree);
-
-/** \ingroup rpmte
  * Retrieve parent transaction element.
  * @param te		transaction element
  * @return		parent transaction element
@@ -241,38 +148,17 @@ rpmte rpmteParent(rpmte te);
 rpmte rpmteSetParent(rpmte te, rpmte pte);
 
 /** \ingroup rpmte
- * Retrieve number of children of transaction element.
+ * Return problem set info of transaction element.
  * @param te		transaction element
- * @return		tree index
+ * @return		problem set (or NULL if none)
  */
-int rpmteDegree(rpmte te);
+rpmps rpmteProblems(rpmte te);
 
 /** \ingroup rpmte
- * Set number of children of transaction element.
- * @param te		transaction element
- * @param ndegree	new number of children
- * @return		previous number of children
- */
-int rpmteSetDegree(rpmte te, int ndegree);
-
-/** \ingroup rpmte
- * Retrieve tsort info for transaction element.
- * @param te		transaction element
- * @return		tsort info
- */
-tsortInfo rpmteTSI(rpmte te);
-
-/** \ingroup rpmte
- * Destroy tsort info of transaction element.
+ * Destroy problem set info of transaction element.
  * @param te		transaction element
  */
-void rpmteFreeTSI(rpmte te);
-
-/** \ingroup rpmte
- * Initialize tsort info of transaction element.
- * @param te		transaction element
- */
-void rpmteNewTSI(rpmte te);
+void rpmteCleanProblems(rpmte te);
 
 /** \ingroup rpmte
  * Destroy dependency set info of transaction element.
@@ -323,13 +209,6 @@ const char * rpmteNEVR(rpmte te);
 const char * rpmteNEVRA(rpmte te);
 
 /** \ingroup rpmte
- * Retrieve file handle from transaction element.
- * @param te		transaction element
- * @return		file handle
- */
-FD_t rpmteFd(rpmte te);
-
-/** \ingroup rpmte
  * Retrieve key from transaction element.
  * @param te		transaction element
  * @return		key
@@ -337,9 +216,11 @@ FD_t rpmteFd(rpmte te);
 fnpyKey rpmteKey(rpmte te);
 
 /** \ingroup rpmte
- * Return failed status of transaction element.
+ * Return failure status of transaction element.
+ * If the element itself failed, this is 1, larger count means one of
+ * it's parents failed.
  * @param te		transaction element
- * @return		1 if transaction element (or its parents) failed
+ * @return		number of failures for this transaction element
  */
 int rpmteFailed(rpmte te);
 
@@ -349,7 +230,7 @@ int rpmteFailed(rpmte te);
  * @param tag		dependency tag
  * @return		dependency tag set
  */
-rpmds rpmteDS(rpmte te, rpmTag tag);
+rpmds rpmteDS(rpmte te, rpmTagVal tag);
 
 /** \ingroup rpmte
  * Retrieve file info tag set from transaction element.
@@ -359,40 +240,20 @@ rpmds rpmteDS(rpmte te, rpmTag tag);
 rpmfi rpmteFI(rpmte te);
 
 /** \ingroup rpmte
- * Calculate transaction element dependency colors/refs from file info.
+ * Retrieve list of collections
  * @param te		transaction element
- * @param tag		dependency tag (RPMTAG_PROVIDENAME, RPMTAG_REQUIRENAME)
+ * @return		list of collections
  */
-void rpmteColorDS(rpmte te, rpmTag tag);
+ARGV_const_t rpmteCollections(rpmte te);
 
 /** \ingroup rpmte
- * Return transaction element index.
- * @param tsi		transaction element iterator
- * @return		transaction element index
+ * Determine a transaction element is part of a collection
+ * @param te		transaction element
+ * @param collname	collection name
+ * @return		1 if collname is part of a collection, 0 if not
  */
-int rpmtsiOc(rpmtsi tsi);
+int rpmteHasCollection(rpmte te, const char * collname);
 
-/** \ingroup rpmte
- * Destroy transaction element iterator.
- * @param tsi		transaction element iterator
- * @return		NULL always
- */
-rpmtsi rpmtsiFree(rpmtsi tsi);
-
-/** \ingroup rpmte
- * Create transaction element iterator.
- * @param ts		transaction set
- * @return		transaction element iterator
- */
-rpmtsi rpmtsiInit(rpmts ts);
-
-/** \ingroup rpmte
- * Return next transaction element of type.
- * @param tsi		transaction element iterator
- * @param type		transaction element type selector (0 for any)
- * @return		next transaction element of type, NULL on termination
- */
-rpmte rpmtsiNext(rpmtsi tsi, rpmElementType type);
 
 #ifdef __cplusplus
 }

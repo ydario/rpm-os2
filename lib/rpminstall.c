@@ -12,16 +12,16 @@
 #include <rpm/rpmts.h>
 #include <rpm/rpmlog.h>
 #include <rpm/rpmfileutil.h>
-#include <rpm/rpmgi.h>
 
+#include "lib/rpmgi.h"
 #include "lib/manifest.h"
 #include "debug.h"
 
-int rpmcliPackagesTotal = 0;
-int rpmcliHashesCurrent = 0;
-int rpmcliHashesTotal = 0;
-int rpmcliProgressCurrent = 0;
-int rpmcliProgressTotal = 0;
+static int rpmcliPackagesTotal = 0;
+static int rpmcliHashesCurrent = 0;
+static int rpmcliHashesTotal = 0;
+static int rpmcliProgressCurrent = 0;
+static int rpmcliProgressTotal = 0;
 
 /**
  * Print a CLI progress bar.
@@ -33,7 +33,7 @@ static void printHash(const rpm_loff_t amount, const rpm_loff_t total)
 {
     int hashesNeeded;
 
-    rpmcliHashesTotal = (isatty (STDOUT_FILENO) ? 44 : 50);
+    rpmcliHashesTotal = (isatty (STDOUT_FILENO) ? 34 : 40);
 
     if (rpmcliHashesCurrent != rpmcliHashesTotal) {
 	float pct = (total ? (((float) amount) / total) : 1.0);
@@ -81,11 +81,11 @@ static rpmVSFlags setvsFlags(struct rpmInstallArguments_s * ia)
     else
 	vsflags = rpmExpandNumeric("%{?_vsflags_install}");
 
-    if (ia->qva_flags & VERIFY_DIGEST)
+    if (rpmcliQueryFlags & VERIFY_DIGEST)
 	vsflags |= _RPMVSF_NODIGESTS;
-    if (ia->qva_flags & VERIFY_SIGNATURE)
+    if (rpmcliQueryFlags & VERIFY_SIGNATURE)
 	vsflags |= _RPMVSF_NOSIGNATURES;
-    if (ia->qva_flags & VERIFY_HDRCHK)
+    if (rpmcliQueryFlags & VERIFY_HDRCHK)
 	vsflags |= RPMVSF_NOHDRCHK;
 
     return vsflags;
@@ -99,11 +99,11 @@ void * rpmShowProgress(const void * arg,
 			void * data)
 {
     Header h = (Header) arg;
-    char * s;
     int flags = (int) ((long)data);
     void * rc = NULL;
     const char * filename = (const char *)key;
     static FD_t fd = NULL;
+    static int state = -1;
 
     switch (what) {
     case RPMCALLBACK_INST_OPEN_FILE:
@@ -119,13 +119,13 @@ void * rpmShowProgress(const void * arg,
 		fd = NULL;
 	    }
 	} else
-	    fd = fdLink(fd, RPMDBG_M("persist (showProgress)"));
+	    fd = fdLink(fd);
 	return (void *)fd;
 	break;
 
     case RPMCALLBACK_INST_CLOSE_FILE:
 	/* FIX: still necessary? */
-	fd = fdFree(fd, RPMDBG_M("persist (showProgress)"));
+	fd = fdFree(fd);
 	if (fd != NULL) {
 	    Fclose(fd);
 	    fd = NULL;
@@ -133,28 +133,44 @@ void * rpmShowProgress(const void * arg,
 	break;
 
     case RPMCALLBACK_INST_START:
+    case RPMCALLBACK_UNINST_START:
+	if (state != what) {
+	    state = what;
+	    if (flags & INSTALL_HASH) {
+		if (what == RPMCALLBACK_INST_START) {
+		    fprintf(stdout, _("Updating / installing...\n"));
+		} else {
+		    fprintf(stdout, _("Cleaning up / removing...\n"));
+		}
+		fflush(stdout);
+	    }
+	}
+		
 	rpmcliHashesCurrent = 0;
 	if (h == NULL || !(flags & INSTALL_LABEL))
 	    break;
-	/* @todo Remove headerFormat() on a progress callback. */
 	if (flags & INSTALL_HASH) {
-	    s = headerFormat(h, "%{NAME}", NULL);
+	    char *s = headerGetAsString(h, RPMTAG_NEVR);
 	    if (isatty (STDOUT_FILENO))
-		fprintf(stdout, "%4d:%-23.23s", rpmcliProgressCurrent + 1, s);
+		fprintf(stdout, "%4d:%-33.33s", rpmcliProgressCurrent + 1, s);
 	    else
-		fprintf(stdout, "%-28.28s", s);
+		fprintf(stdout, "%-38.38s", s);
 	    (void) fflush(stdout);
-	    s = _free(s);
+	    free(s);
 	} else {
-	    s = headerFormat(h, "%{NAME}-%{VERSION}-%{RELEASE}", NULL);
+	    char *s = headerGetAsString(h, RPMTAG_NEVRA);
 	    fprintf(stdout, "%s\n", s);
 	    (void) fflush(stdout);
-	    s = _free(s);
+	    free(s);
 	}
+	break;
+
+    case RPMCALLBACK_INST_STOP:
 	break;
 
     case RPMCALLBACK_TRANS_PROGRESS:
     case RPMCALLBACK_INST_PROGRESS:
+    case RPMCALLBACK_UNINST_PROGRESS:
 	if (flags & INSTALL_PERCENT)
 	    fprintf(stdout, "%%%% %f\n", (double) (total
 				? ((((float) amount) / total) * 100)
@@ -168,12 +184,14 @@ void * rpmShowProgress(const void * arg,
 	rpmcliHashesCurrent = 0;
 	rpmcliProgressTotal = 1;
 	rpmcliProgressCurrent = 0;
+	rpmcliPackagesTotal = total;
+	state = what;
 	if (!(flags & INSTALL_LABEL))
 	    break;
 	if (flags & INSTALL_HASH)
-	    fprintf(stdout, "%-28s", _("Preparing..."));
+	    fprintf(stdout, "%-38s", _("Preparing..."));
 	else
-	    fprintf(stdout, "%s\n", _("Preparing packages for installation..."));
+	    fprintf(stdout, "%s\n", _("Preparing packages..."));
 	(void) fflush(stdout);
 	break;
 
@@ -184,10 +202,6 @@ void * rpmShowProgress(const void * arg,
 	rpmcliProgressCurrent = 0;
 	break;
 
-    case RPMCALLBACK_UNINST_PROGRESS:
-	break;
-    case RPMCALLBACK_UNINST_START:
-	break;
     case RPMCALLBACK_UNINST_STOP:
 	break;
     case RPMCALLBACK_UNPACK_ERROR:
@@ -195,6 +209,10 @@ void * rpmShowProgress(const void * arg,
     case RPMCALLBACK_CPIO_ERROR:
 	break;
     case RPMCALLBACK_SCRIPT_ERROR:
+	break;
+    case RPMCALLBACK_SCRIPT_START:
+	break;
+    case RPMCALLBACK_SCRIPT_STOP:
 	break;
     case RPMCALLBACK_UNKNOWN:
     default:
@@ -214,7 +232,6 @@ static void setNotifyFlag(struct rpmInstallArguments_s * ia,
 }
 
 struct rpmEIU {
-    Header h;
     int numFailed;
     int numPkgs;
     char ** pkgURL;
@@ -225,7 +242,6 @@ struct rpmEIU {
     int numRPMS;
     int numSRPMS;
     char ** sourceURL;
-    int isSource;
     int argc;
     char ** argv;
     rpmRelocation * relocations;
@@ -259,7 +275,7 @@ static int rpmcliTransaction(rpmts ts, struct rpmInstallArguments_s * ia,
 	ps = rpmpsFree(ps);
     }
 
-    if ((eflags? 1 : (!stop)) && !(ia->installInterfaceFlags & INSTALL_NOORDER)) {
+    if (!stop && !(ia->installInterfaceFlags & INSTALL_NOORDER)) {
 	if (rpmtsOrder(ts)) {
 	    rc = numPackages;
 	    stop = 1;
@@ -267,16 +283,10 @@ static int rpmcliTransaction(rpmts ts, struct rpmInstallArguments_s * ia,
     }
 
     if (numPackages && !stop) {
-
-	if (eflags) {
-	    rpmlog(RPMLOG_DEBUG, "erasing packages\n");
-	    rpmtsClean(ts);
-	    rc = rpmtsRun(ts, NULL, ia->probFilter & (RPMPROB_FILTER_DISKSPACE|RPMPROB_FILTER_DISKNODES));
-	} else {
-	    rpmlog(RPMLOG_DEBUG, "installing binary packages\n");
-	    rpmtsClean(ts);
-	    rc = rpmtsRun(ts, NULL, ia->probFilter);
-	}
+	rpmlog(RPMLOG_DEBUG, eflags ? "erasing packages\n" :
+				      "installing binary packages\n");
+	rpmtsClean(ts);
+	rc = rpmtsRun(ts, NULL, ia->probFilter);
 
 	ps = rpmtsProblems(ts);
 
@@ -293,7 +303,7 @@ static int tryReadManifest(struct rpmEIU * eiu)
     int rc;
 
     /* Try to read a package manifest. */
-    FD_t fd = Fopen(*eiu->fnp, "r.fpio");
+    FD_t fd = Fopen(*eiu->fnp, "r.ufdio");
     if (fd == NULL || Ferror(fd)) {
         rpmlog(RPMLOG_ERR, _("open of %s failed: %s\n"), *eiu->fnp,
 	       Fstrerror(fd));
@@ -319,10 +329,8 @@ static int tryReadManifest(struct rpmEIU * eiu)
     return rc;
 }
 
-static int tryReadHeader(rpmts ts, struct rpmEIU * eiu, rpmVSFlags vsflags)
+static int tryReadHeader(rpmts ts, struct rpmEIU * eiu, Header * hdrp)
 {
-   rpmVSFlags tvsflags;
-
    /* Try to read the header from a package file. */
    FD_t fd = Fopen(*eiu->fnp, "r.ufdio");
    if (fd == NULL || Ferror(fd)) {
@@ -337,9 +345,7 @@ static int tryReadHeader(rpmts ts, struct rpmEIU * eiu, rpmVSFlags vsflags)
    }
 
    /* Read the header, verifying signatures (if present). */
-   tvsflags = rpmtsSetVSFlags(ts, vsflags);
-   eiu->rpmrc = rpmReadPackageFile(ts, fd, *eiu->fnp, &eiu->h);
-   tvsflags = rpmtsSetVSFlags(ts, tvsflags);
+   eiu->rpmrc = rpmReadPackageFile(ts, fd, *eiu->fnp, hdrp);
    Fclose(fd);
    fd = NULL;
    
@@ -357,31 +363,26 @@ static int tryReadHeader(rpmts ts, struct rpmEIU * eiu, rpmVSFlags vsflags)
 
 
 /* On --freshen, verify package is installed and newer */
-static int checkFreshenStatus(rpmts ts, struct rpmEIU * eiu)
+static int checkFreshenStatus(rpmts ts, Header h)
 {
     rpmdbMatchIterator mi = NULL;
-    const char * name = headerGetString(eiu->h, RPMTAG_NAME);
-    Header oldH;
-    int count;
+    const char * name = headerGetString(h, RPMTAG_NAME);
+    const char *arch = headerGetString(h, RPMTAG_ARCH);
+    Header oldH = NULL;
 
     if (name != NULL)
-        mi = rpmtsInitIterator(ts, RPMTAG_NAME, name, 0);
-    count = rpmdbGetIteratorCount(mi);
-    while ((oldH = rpmdbNextIterator(mi)) != NULL) {
-        if (rpmVersionCompare(oldH, eiu->h) < 0)
-	    continue;
-	/* same or newer package already installed */
-	count = 0;
-	break;
-    }
-    mi = rpmdbFreeIterator(mi);
-    if (count == 0) {
-        eiu->h = headerFree(eiu->h);
-	return -1;
-    }
-    /* Package is newer than those currently installed. */
+        mi = rpmtsInitIterator(ts, RPMDBI_NAME, name, 0);
+    if (rpmtsColor(ts) && arch)
+	rpmdbSetIteratorRE(mi, RPMTAG_ARCH, RPMMIRE_DEFAULT, arch);
 
-   return 1;
+    while ((oldH = rpmdbNextIterator(mi)) != NULL) {
+	/* Package is newer than those currently installed. */
+        if (rpmVersionCompare(oldH, h) < 0)
+	    break;
+    }
+
+    rpmdbFreeIterator(mi);
+    return (oldH != NULL);
 }
 
 /** @todo Generalize --freshen policies. */
@@ -394,16 +395,14 @@ int rpmInstall(rpmts ts, struct rpmInstallArguments_s * ia, ARGV_t fileArgv)
     int rc;
     int i;
 
-    if (fileArgv == NULL) goto exit;
+    vsflags = setvsFlags(ia);
+    ovsflags = rpmtsSetVSFlags(ts, (vsflags | RPMVSF_NEEDPAYLOAD));
 
-    rpmcliPackagesTotal = 0;
+    if (fileArgv == NULL) goto exit;
 
     (void) rpmtsSetFlags(ts, ia->transFlags);
 
     relocations = ia->relocations;
-
-    vsflags = setvsFlags(ia);
-    ovsflags = rpmtsSetVSFlags(ts, (vsflags | RPMVSF_NEEDPAYLOAD));
 
     setNotifyFlag(ia, ts); 
 
@@ -511,12 +510,13 @@ restart:
 	 *eiu->fnp != NULL;
 	 eiu->fnp++, eiu->prevx++)
     {
+	Header h = NULL;
 	const char * fileName;
 
 	rpmlog(RPMLOG_DEBUG, "============== %s\n", *eiu->fnp);
 	(void) urlPath(*eiu->fnp, &fileName);
 
-	if (tryReadHeader(ts, eiu, vsflags) == RPMRC_FAIL)
+	if (tryReadHeader(ts, eiu, &h) == RPMRC_FAIL)
 	    continue;
 
 	if (eiu->rpmrc == RPMRC_NOTFOUND) {
@@ -527,9 +527,7 @@ restart:
 	    }
 	}
 
-	eiu->isSource = headerIsSource(eiu->h);
-
-	if (eiu->isSource) {
+	if (headerIsSource(h)) {
 	    rpmlog(RPMLOG_DEBUG, "\tadded source package [%d]\n",
 		eiu->numSRPMS);
 	    eiu->sourceURL = xrealloc(eiu->sourceURL,
@@ -544,28 +542,29 @@ restart:
 	if (eiu->relocations) {
 	    struct rpmtd_s prefixes;
 
-	    headerGet(eiu->h, RPMTAG_PREFIXES, &prefixes, HEADERGET_DEFAULT);
+	    headerGet(h, RPMTAG_PREFIXES, &prefixes, HEADERGET_DEFAULT);
 	    if (rpmtdCount(&prefixes) == 1) {
 		eiu->relocations->oldPath = xstrdup(rpmtdGetString(&prefixes));
 		rpmtdFreeData(&prefixes);
 	    } else {
 		rpmlog(RPMLOG_ERR, _("package %s is not relocatable\n"),
-		       headerGetString(eiu->h, RPMTAG_NAME));
+		       headerGetString(h, RPMTAG_NAME));
 		eiu->numFailed++;
 		goto exit;
 	    }
 	}
 
 	if (ia->installInterfaceFlags & INSTALL_FRESHEN)
-	    if (checkFreshenStatus(ts, eiu) != 1)
+	    if (checkFreshenStatus(ts, h) != 1) {
+		headerFree(h);
 	        continue;
+	    }
 
-	rc = rpmtsAddInstallElement(ts, eiu->h, (fnpyKey)fileName,
+	rc = rpmtsAddInstallElement(ts, h, (fnpyKey)fileName,
 			(ia->installInterfaceFlags & INSTALL_UPGRADE) != 0,
 			relocations);
 
-	/* XXX reference held by transaction set */
-	eiu->h = headerFree(eiu->h);
+	headerFree(h);
 	if (eiu->relocations)
 	    eiu->relocations->oldPath = _free(eiu->relocations->oldPath);
 
@@ -577,13 +576,6 @@ restart:
 	case 1:
 	    rpmlog(RPMLOG_ERR,
 			    _("error reading from file %s\n"), *eiu->fnp);
-	    eiu->numFailed++;
-	    goto exit;
-	    break;
-	case 2:
-	    rpmlog(RPMLOG_ERR,
-			    _("file %s requires a newer version of RPM\n"),
-			    *eiu->fnp);
 	    eiu->numFailed++;
 	    goto exit;
 	    break;
@@ -638,6 +630,7 @@ exit:
     free(eiu);
 
     rpmtsEmpty(ts);
+    rpmtsSetVSFlags(ts, ovsflags);
 
     return rc;
 }
@@ -655,27 +648,15 @@ int rpmErase(rpmts ts, struct rpmInstallArguments_s * ia, ARGV_const_t argv)
     vsflags = setvsFlags(ia);
     ovsflags = rpmtsSetVSFlags(ts, vsflags);
 
-    /* XXX suggest mechanism only meaningful when installing */
-    ia->transFlags |= RPMTRANS_FLAG_NOSUGGEST;
-
     (void) rpmtsSetFlags(ts, ia->transFlags);
 
-#ifdef	NOTYET	/* XXX no callbacks on erase yet */
     setNotifyFlag(ia, ts);
-#endif
 
     qfmt = rpmExpand("%{?_query_all_fmt}\n", NULL);
     for (arg = argv; *arg; arg++) {
-	rpmdbMatchIterator mi;
-	int matches = 0;
+	rpmdbMatchIterator mi = rpmtsInitIterator(ts, RPMDBI_LABEL, *arg, 0);
+	int matches = rpmdbGetIteratorCount(mi);
 	int erasing = 1;
-
-	/* Iterator count isn't reliable with labels, count manually... */
-	mi = rpmtsInitIterator(ts, RPMDBI_LABEL, *arg, 0);
-	while (rpmdbNextIterator(mi) != NULL) {
-	    matches++;
-	}
-	rpmdbFreeIterator(mi);
 
 	if (! matches) {
 	    rpmlog(RPMLOG_ERR, _("package %s is not installed\n"), *arg);
@@ -691,7 +672,6 @@ int rpmErase(rpmts ts, struct rpmInstallArguments_s * ia, ARGV_const_t argv)
 		erasing = 0;
 	    }
 
-	    mi = rpmtsInitIterator(ts, RPMDBI_LABEL, *arg, 0);
 	    while ((h = rpmdbNextIterator(mi)) != NULL) {
 		if (erasing) {
 		    (void) rpmtsAddEraseElement(ts, h, -1);
@@ -702,8 +682,8 @@ int rpmErase(rpmts ts, struct rpmInstallArguments_s * ia, ARGV_const_t argv)
 		    free(nevra);
 		}
 	    }
-	    mi = rpmdbFreeIterator(mi);
 	}
+	rpmdbFreeIterator(mi);
     }
     free(qfmt);
 
@@ -711,6 +691,7 @@ int rpmErase(rpmts ts, struct rpmInstallArguments_s * ia, ARGV_const_t argv)
     numFailed = rpmcliTransaction(ts, ia, numPackages);
 exit:
     rpmtsEmpty(ts);
+    rpmtsSetVSFlags(ts, ovsflags);
 
     return numFailed;
 }
@@ -737,7 +718,7 @@ int rpmInstallSource(rpmts ts, const char * arg,
 		rpmtsSetVSFlags(ts, (specFilePtr) ? (rpmtsVSFlags(ts) | RPMVSF_NEEDPAYLOAD) : rpmtsVSFlags(ts));
 	rpmRC rpmrc = rpmInstallSourcePackage(ts, fd, specFilePtr, cookie);
 	rc = (rpmrc == RPMRC_OK ? 0 : 1);
-	ovsflags = rpmtsSetVSFlags(ts, ovsflags);
+	rpmtsSetVSFlags(ts, ovsflags);
     }
     if (rc != 0) {
 	rpmlog(RPMLOG_ERR, _("%s cannot be installed\n"), arg);

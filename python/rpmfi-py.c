@@ -6,8 +6,6 @@
 #include "header-py.h"
 #include "rpmfi-py.h"
 
-#include "debug.h"
-
 struct rpmfiObject_s {
     PyObject_HEAD
     PyObject *md_dict;		/*!< to look like PyModuleObject */
@@ -16,74 +14,74 @@ struct rpmfiObject_s {
 };
 
 static PyObject *
-rpmfi_FC(rpmfiObject * s)
+rpmfi_FC(rpmfiObject * s, PyObject * unused)
 {
     return Py_BuildValue("i", rpmfiFC(s->fi));
 }
 
 static PyObject *
-rpmfi_FX(rpmfiObject * s)
+rpmfi_FX(rpmfiObject * s, PyObject * unused)
 {
     return Py_BuildValue("i", rpmfiFX(s->fi));
 }
 
 static PyObject *
-rpmfi_DC(rpmfiObject * s)
+rpmfi_DC(rpmfiObject * s, PyObject * unused)
 {
     return Py_BuildValue("i", rpmfiDC(s->fi));
 }
 
 static PyObject *
-rpmfi_DX(rpmfiObject * s)
+rpmfi_DX(rpmfiObject * s, PyObject * unused)
 {
     return Py_BuildValue("i", rpmfiDX(s->fi));
 }
 
 static PyObject *
-rpmfi_BN(rpmfiObject * s)
+rpmfi_BN(rpmfiObject * s, PyObject * unused)
 {
     return Py_BuildValue("s", rpmfiBN(s->fi));
 }
 
 static PyObject *
-rpmfi_DN(rpmfiObject * s)
+rpmfi_DN(rpmfiObject * s, PyObject * unused)
 {
     return Py_BuildValue("s", rpmfiDN(s->fi));
 }
 
 static PyObject *
-rpmfi_FN(rpmfiObject * s)
+rpmfi_FN(rpmfiObject * s, PyObject * unused)
 {
     return Py_BuildValue("s", rpmfiFN(s->fi));
 }
 
 static PyObject *
-rpmfi_FFlags(rpmfiObject * s)
+rpmfi_FFlags(rpmfiObject * s, PyObject * unused)
 {
     return Py_BuildValue("i", rpmfiFFlags(s->fi));
 }
 
 static PyObject *
-rpmfi_VFlags(rpmfiObject * s)
+rpmfi_VFlags(rpmfiObject * s, PyObject * unused)
 {
     return Py_BuildValue("i", rpmfiVFlags(s->fi));
 }
 
 static PyObject *
-rpmfi_FMode(rpmfiObject * s)
+rpmfi_FMode(rpmfiObject * s, PyObject * unused)
 {
     return Py_BuildValue("i", rpmfiFMode(s->fi));
 }
 
 static PyObject *
-rpmfi_FState(rpmfiObject * s)
+rpmfi_FState(rpmfiObject * s, PyObject * unused)
 {
     return Py_BuildValue("i", rpmfiFState(s->fi));
 }
 
 /* XXX rpmfiFDigest */
 static PyObject *
-rpmfi_Digest(rpmfiObject * s)
+rpmfi_Digest(rpmfiObject * s, PyObject * unused)
 {
     char *digest = rpmfiFDigestHex(s->fi, NULL);
     if (digest) {
@@ -96,49 +94,49 @@ rpmfi_Digest(rpmfiObject * s)
 }
 
 static PyObject *
-rpmfi_FLink(rpmfiObject * s)
+rpmfi_FLink(rpmfiObject * s, PyObject * unused)
 {
     return Py_BuildValue("s", rpmfiFLink(s->fi));
 }
 
 static PyObject *
-rpmfi_FSize(rpmfiObject * s)
+rpmfi_FSize(rpmfiObject * s, PyObject * unused)
 {
     return Py_BuildValue("L", rpmfiFSize(s->fi));
 }
 
 static PyObject *
-rpmfi_FRdev(rpmfiObject * s)
+rpmfi_FRdev(rpmfiObject * s, PyObject * unused)
 {
     return Py_BuildValue("i", rpmfiFRdev(s->fi));
 }
 
 static PyObject *
-rpmfi_FMtime(rpmfiObject * s)
+rpmfi_FMtime(rpmfiObject * s, PyObject * unused)
 {
     return Py_BuildValue("i", rpmfiFMtime(s->fi));
 }
 
 static PyObject *
-rpmfi_FUser(rpmfiObject * s)
+rpmfi_FUser(rpmfiObject * s, PyObject * unused)
 {
     return Py_BuildValue("s", rpmfiFUser(s->fi));
 }
 
 static PyObject *
-rpmfi_FGroup(rpmfiObject * s)
+rpmfi_FGroup(rpmfiObject * s, PyObject * unused)
 {
     return Py_BuildValue("s", rpmfiFGroup(s->fi));
 }
 
 static PyObject *
-rpmfi_FColor(rpmfiObject * s)
+rpmfi_FColor(rpmfiObject * s, PyObject * unused)
 {
     return Py_BuildValue("i", rpmfiFColor(s->fi));
 }
 
 static PyObject *
-rpmfi_FClass(rpmfiObject * s)
+rpmfi_FClass(rpmfiObject * s, PyObject * unused)
 {
     const char * FClass;
 
@@ -198,7 +196,7 @@ rpmfi_iternext(rpmfiObject * s)
 	    PyTuple_SET_ITEM(result, 11, Py_None);
 	} else
 	    PyTuple_SET_ITEM(result, 11, Py_BuildValue("s", FGroup));
-	PyTuple_SET_ITEM(result, 12, rpmfi_Digest(s));
+	PyTuple_SET_ITEM(result, 12, rpmfi_Digest(s, NULL));
 
     } else
 	s->active = 0;
@@ -299,7 +297,7 @@ static PyObject * rpmfi_new(PyTypeObject * subtype, PyObject *args, PyObject *kw
     PyObject * to = NULL;
     Header h = NULL;
     rpmfi fi = NULL;
-    rpmTag tagN = RPMTAG_BASENAMES;
+    rpmTagVal tagN = RPMTAG_BASENAMES;
     int flags = 0;
     char * kwlist[] = {"header", "tag", "flags", NULL};
 
@@ -308,6 +306,11 @@ static PyObject * rpmfi_new(PyTypeObject * subtype, PyObject *args, PyObject *kw
 	return NULL;
 
     fi = rpmfiNew(NULL, h, tagN, flags);
+
+    if (fi == NULL) {
+	PyErr_SetString(PyExc_ValueError, "invalid file data in header");
+	return NULL;
+    }
 
     return rpmfi_Wrap(subtype, fi);
 }

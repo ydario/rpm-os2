@@ -3,6 +3,11 @@
  */
 
 #include "system.h"
+
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
+
 #include "debug.h"
 
 static rpmMemFailFunc failfunc = NULL;
@@ -24,9 +29,9 @@ static void *vmefail(size_t size)
     return val;	
 }
 
-void * rpmSetMemFail(rpmMemFailFunc func, void *data)
+rpmMemFailFunc rpmSetMemFail(rpmMemFailFunc func, void *data)
 {
-    void *ofunc = failfunc;
+    rpmMemFailFunc ofunc = failfunc;
     failfunc = func;
     failfunc_data = data;
     return ofunc;

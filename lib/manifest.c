@@ -6,7 +6,7 @@
 
 #include <rpm/rpmlog.h>
 #include <rpm/rpmfileutil.h>
-#include <rpm/rpmstring.h>
+#include <rpm/argv.h>
 
 #include "lib/manifest.h"
 
@@ -61,14 +61,14 @@ char * rpmPermsString(int mode)
 /**@todo Infinite loops through manifest files exist, operator error for now. */
 rpmRC rpmReadPackageManifest(FD_t fd, int * argcPtr, char *** argvPtr)
 {
-    StringBuf sb = newStringBuf();
+    ARGV_t sb = NULL;
     char * s = NULL;
     char * se;
     int ac = 0;
     char ** av = NULL;
     int argc = (argcPtr ? *argcPtr : 0);
     char ** argv = (argvPtr ? *argvPtr : NULL);
-    FILE * f = fdGetFILE(fd);
+    FILE * f = fdopen(Fileno(fd), "r");
     rpmRC rpmrc = RPMRC_OK;
     int i, j, next, npre;
 
@@ -96,18 +96,17 @@ rpmRC rpmReadPackageManifest(FD_t fd, int * argcPtr, char *** argvPtr)
 
 	/* Sanity checks: skip obviously binary lines and dash (for stdin) */
 	if (*s < 32 || rstreq(s, "-")) {
+	    s = NULL;
 	    rpmrc = RPMRC_NOTFOUND;
 	    goto exit;
 	}
 
 	/* Concatenate next line in buffer. */
-	*se++ = ' ';
 	*se = '\0';
-	appendStringBuf(sb, s);
+	argvAdd(&sb, s);
     }
 
-    if (s == NULL)		/* XXX always true */
-	s = getStringBuf(sb);
+    s = argvJoin(sb, " ");
 
     if (!(s && *s)) {
 	rpmrc = RPMRC_NOTFOUND;
@@ -115,7 +114,7 @@ rpmRC rpmReadPackageManifest(FD_t fd, int * argcPtr, char *** argvPtr)
     }
 
     /* Glob manifest items. */
-    rpmrc = rpmGlob(s, &ac, &av);
+    rpmrc = (rpmGlob(s, &ac, &av) == 0 ? RPMRC_OK : RPMRC_FAIL);
     if (rpmrc != RPMRC_OK) goto exit;
 
     rpmlog(RPMLOG_DEBUG, "adding %d args from manifest.\n", ac);
@@ -169,7 +168,8 @@ exit:
 	   av[i] = _free(av[i]);
 	av = _free(av);
     }
-    sb = freeStringBuf(sb);
+    argvFree(sb);
+    free(s);
     /* FIX: *argvPtr may be NULL. */
     return rpmrc;
 }

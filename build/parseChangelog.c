@@ -6,20 +6,28 @@
 #include "system.h"
 
 #include <rpm/header.h>
-#include <rpm/rpmbuild.h>
 #include <rpm/rpmlog.h>
+#include "build/rpmbuild_internal.h"
 #include "debug.h"
 
 #define SKIPSPACE(s) { while (*(s) && risspace(*(s))) (s)++; }
 #define SKIPNONSPACE(s) { while (*(s) && !risspace(*(s))) (s)++; }
 
-void addChangelogEntry(Header h, time_t time, const char *name, const char *text)
+static void addChangelogEntry(Header h, time_t time, const char *name, const char *text)
 {
     rpm_time_t mytime = time;	/* XXX convert to header representation */
 				
     headerPutUint32(h, RPMTAG_CHANGELOGTIME, &mytime, 1);
     headerPutString(h, RPMTAG_CHANGELOGNAME, name);
     headerPutString(h, RPMTAG_CHANGELOGTEXT, text);
+}
+
+static int sameDate(const struct tm *ot, const struct tm *nt)
+{
+    return (ot->tm_year == nt->tm_year &&
+	    ot->tm_mon == nt->tm_mon &&
+	    ot->tm_mday == nt->tm_mday &&
+	    ot->tm_wday == nt->tm_wday);
 }
 
 /**
@@ -31,7 +39,7 @@ void addChangelogEntry(Header h, time_t time, const char *name, const char *text
 static int dateToTimet(const char * datestr, time_t * secs)
 {
     int rc = -1; /* assume failure */
-    struct tm time;
+    struct tm time, ntime;
     const char * const * idx;
     char *p, *pe, *q, *date, *tz;
     
@@ -40,10 +48,11 @@ static int dateToTimet(const char * datestr, time_t * secs)
     static const char * const months[] =
 	{ "Jan", "Feb", "Mar", "Apr", "May", "Jun",
  	  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec", NULL };
-    static const char const lengths[] =
+    static const char lengths[] =
 	{ 31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
     
     memset(&time, 0, sizeof(time));
+    memset(&ntime, 0, sizeof(ntime));
 
     date = xstrdup(datestr);
     pe = date;
@@ -55,6 +64,7 @@ static int dateToTimet(const char * datestr, time_t * secs)
     for (idx = days; *idx && !rstreq(*idx, p); idx++)
 	{};
     if (*idx == NULL) goto exit;
+    time.tm_wday = idx - days;
 
     /* month */
     p = pe; SKIPSPACE(p);
@@ -80,7 +90,7 @@ static int dateToTimet(const char * datestr, time_t * secs)
     /* year */
     p = pe; SKIPSPACE(p);
     if (*p == '\0') goto exit;
-    pe = p; SKIPNONSPACE(pe); if (*pe != '\0') *pe++ = '\0';
+    pe = p; SKIPNONSPACE(pe); if (*pe != '\0') *pe = '\0';
     time.tm_year = strtol(p, &q, 10);
     if (!(q && *q == '\0')) goto exit;
     if (time.tm_year < 1990 || time.tm_year >= 3000) goto exit;
@@ -90,13 +100,18 @@ static int dateToTimet(const char * datestr, time_t * secs)
     tz = getenv("TZ");
     if (tz) tz = xstrdup(tz);
     setenv("TZ", "UTC", 1);
-    *secs = mktime(&time);
+    ntime = time; /* struct assignment */
+    *secs = mktime(&ntime);
     unsetenv("TZ");
     if (tz) {
 	setenv("TZ", tz, 1);
 	free(tz);
     }
     if (*secs == -1) goto exit;
+
+    /* XXX Turn this into a hard error in a release or two */
+    if (!sameDate(&time, &ntime))
+	rpmlog(RPMLOG_WARNING, _("bogus date in %%changelog: %s\n"), datestr);
 
     rc = 0;
 
@@ -111,25 +126,25 @@ exit:
  * @param sb		changelog strings
  * @return		RPMRC_OK on success
  */
-static rpmRC addChangelog(Header h, StringBuf sb)
+static rpmRC addChangelog(Header h, ARGV_const_t sb)
 {
-    char *s;
+    rpmRC rc = RPMRC_FAIL; /* assume failure */
+    char *s, *sp;
     int i;
     time_t time;
     time_t lastTime = 0;
     time_t trimtime = rpmExpandNumeric("%{?_changelog_trimtime}");
     char *date, *name, *text, *next;
 
-    s = getStringBuf(sb);
+    s = sp = argvJoin(sb, "");
 
     /* skip space */
     SKIPSPACE(s);
 
     while (*s != '\0') {
 	if (*s != '*') {
-	    rpmlog(RPMLOG_ERR,
-			_("%%changelog entries must start with *\n"));
-	    return RPMRC_FAIL;
+	    rpmlog(RPMLOG_ERR, _("%%changelog entries must start with *\n"));
+	    goto exit;
 	}
 
 	/* find end of line */
@@ -137,7 +152,7 @@ static rpmRC addChangelog(Header h, StringBuf sb)
 	while(*s && *s != '\n') s++;
 	if (! *s) {
 	    rpmlog(RPMLOG_ERR, _("incomplete %%changelog entry\n"));
-	    return RPMRC_FAIL;
+	    goto exit;
 	}
 	*s = '\0';
 	text = s + 1;
@@ -152,12 +167,12 @@ static rpmRC addChangelog(Header h, StringBuf sb)
 	SKIPSPACE(date);
 	if (dateToTimet(date, &time)) {
 	    rpmlog(RPMLOG_ERR, _("bad date in %%changelog: %s\n"), date);
-	    return RPMRC_FAIL;
+	    goto exit;
 	}
 	if (lastTime && lastTime < time) {
 	    rpmlog(RPMLOG_ERR,
 		     _("%%changelog not in descending chronological order\n"));
-	    return RPMRC_FAIL;
+	    goto exit;
 	}
 	lastTime = time;
 
@@ -165,7 +180,7 @@ static rpmRC addChangelog(Header h, StringBuf sb)
 	SKIPSPACE(s);
 	if (! *s) {
 	    rpmlog(RPMLOG_ERR, _("missing name in %%changelog\n"));
-	    return RPMRC_FAIL;
+	    goto exit;
 	}
 
 	/* name */
@@ -176,14 +191,14 @@ static rpmRC addChangelog(Header h, StringBuf sb)
 	}
 	if (s == name) {
 	    rpmlog(RPMLOG_ERR, _("missing name in %%changelog\n"));
-	    return RPMRC_FAIL;
+	    goto exit;
 	}
 
 	/* text */
 	SKIPSPACE(text);
 	if (! *text) {
 	    rpmlog(RPMLOG_ERR, _("no description in %%changelog\n"));
-	    return RPMRC_FAIL;
+	    goto exit;
 	}
 	    
 	/* find the next leading '*' (or eos) */
@@ -205,14 +220,18 @@ static rpmRC addChangelog(Header h, StringBuf sb)
 	
 	s = next;
     }
+    rc = RPMRC_OK;
 
-    return RPMRC_OK;
+exit:
+    free(sp);
+
+    return rc;
 }
 
 int parseChangelog(rpmSpec spec)
 {
     int nextPart, rc, res = PART_ERROR;
-    StringBuf sb = newStringBuf();
+    ARGV_t sb = NULL;
     
     /* There are no options to %changelog */
     if ((rc = readLine(spec, STRIP_COMMENTS)) > 0) {
@@ -223,7 +242,7 @@ int parseChangelog(rpmSpec spec)
     }
     
     while (! (nextPart = isPart(spec->line))) {
-	appendStringBuf(sb, spec->line);
+	argvAdd(&sb, spec->line);
 	if ((rc = readLine(spec, STRIP_COMMENTS)) > 0) {
 	    nextPart = PART_NONE;
 	    break;
@@ -232,13 +251,13 @@ int parseChangelog(rpmSpec spec)
 	}
     }
 
-    if (addChangelog(spec->packages->header, sb)) {
+    if (sb && addChangelog(spec->packages->header, sb)) {
 	goto exit;
     }
     res = nextPart;
 
 exit:
-    sb = freeStringBuf(sb);
+    argvFree(sb);
 
     return res;
 }

@@ -20,22 +20,6 @@ extern "C" {
 #endif
 
 /** \ingroup rpmio
- * Hide libio API lossage.
- * The libio interface changed after glibc-2.1.3 to pass the seek offset
- * argument as a pointer rather than as an off_t. The snarl below defines
- * typedefs to isolate the lossage.
- */
-#if defined(__GLIBC__) && \
-	(__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 2))
-#define USE_COOKIE_SEEK_POINTER 1
-typedef _IO_off64_t 	_libio_off_t;
-typedef _libio_off_t *	_libio_pos_t;
-#else
-typedef off_t 		_libio_off_t;
-typedef off_t 		_libio_pos_t;
-#endif
-
-/** \ingroup rpmio
  */
 typedef const struct FDIO_s * FDIO_t;
 
@@ -62,7 +46,7 @@ ssize_t Fwrite(const void * buf, size_t size, size_t nmemb, FD_t fd);
 /** \ingroup rpmio
  * fseek(3) clone.
  */
-int Fseek(FD_t fd, _libio_off_t offset, int whence);
+int Fseek(FD_t fd, off_t offset, int whence);
 
 /** \ingroup rpmio
  * ftell(3) clone.
@@ -106,6 +90,11 @@ int Fileno(FD_t fd);
 int Fcntl(FD_t fd, int op, void *lip);
 
 /** \ingroup rpmio
+ * Get informative description (eg file name) from fd for diagnostic output.
+ */
+const char * Fdescr(FD_t fd);
+
+/** \ingroup rpmio
  * \name RPMIO Utilities.
  */
 
@@ -118,40 +107,16 @@ off_t	fdSize(FD_t fd);
 FD_t fdDup(int fdno);
 
 /** \ingroup rpmio
- * Get associated FILE stream from fd (if any)
  */
-FILE * fdGetFILE(FD_t fd);
+FD_t fdLink(FD_t fd);
 
 /** \ingroup rpmio
  */
-FD_t fdLink (void * cookie, const char * msg);
-
-/** \ingroup rpmio
- */
-FD_t fdFree(FD_t fd, const char * msg);
-
-/** \ingroup rpmio
- */
-FD_t fdNew (const char * msg);
-
-/** \ingroup rpmio
- */
-int fdWritable(FD_t fd, int secs);
-
-/** \ingroup rpmio
- */
-int fdReadable(FD_t fd, int secs);
+FD_t fdFree(FD_t fd);
 
 /**
  */
-int ufdCopy(FD_t sfd, FD_t tfd);
-
-/**
- * XXX the name is misleading, this is a legacy wrapper that ensures 
- * only S_ISREG() files are read, nothing to do with timed... 
- * TODO: get this out of the API
- */
-ssize_t timedRead(FD_t fd, void * bufptr, size_t length);
+off_t ufdCopy(FD_t sfd, FD_t tfd);
 
 /** \ingroup rpmio
  * Identify per-desciptor I/O operation statistics.

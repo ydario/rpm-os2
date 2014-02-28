@@ -7,7 +7,9 @@
 #include <rpm/rpmlib.h>		/* rpmvercmp */
 #include <rpm/rpmstring.h>
 #include <rpm/rpmlog.h>
-#include <rpm/rpmds.h>
+#include <rpm/rpmstrpool.h>
+
+#include "lib/rpmds_internal.h"
 
 #include "debug.h"
 
@@ -19,16 +21,16 @@ int _rpmds_nopromote = 1;
  * A package dependency set.
  */
 struct rpmds_s {
+    rpmstrPool pool;		/*!< String pool. */
     const char * Type;		/*!< Tag name. */
     char * DNEVR;		/*!< Formatted dependency string. */
-    const char ** N;		/*!< Name. */
-    const char ** EVR;		/*!< Epoch-Version-Release. */
+    rpmsid * N;			/*!< Dependency name id's (pool) */
+    rpmsid * EVR;		/*!< Dependency EVR id's (pool) */
     rpmsenseFlags * Flags;	/*!< Bit(s) identifying context/comparison. */
     rpm_color_t * Color;	/*!< Bit(s) calculated from file color(s). */
-    int32_t * Refs;		/*!< No. of file refs. */
-    time_t BT;			/*!< Package build time tie breaker. */
-    rpmTag tagN;		/*!< Header tag. */
+    rpmTagVal tagN;		/*!< Header tag. */
     int32_t Count;		/*!< No. of elements */
+    unsigned int instance;	/*!< From rpmdb instance? */
     int i;			/*!< Element index. */
     unsigned l;			/*!< Low element (bsearch). */
     unsigned u;			/*!< High element (bsearch). */
@@ -36,15 +38,13 @@ struct rpmds_s {
     int nrefs;			/*!< Reference count. */
 };
 
-static const char ** rpmdsDupArgv(const char ** argv, int argc);
-
-static int dsType(rpmTag tag, 
-		  const char ** Type, rpmTag * tagEVR, rpmTag * tagF)
+static int dsType(rpmTagVal tag, 
+		  const char ** Type, rpmTagVal * tagEVR, rpmTagVal * tagF)
 {
     int rc = 0;
     const char *t = NULL;
-    rpmTag evr = RPMTAG_NOT_FOUND;
-    rpmTag f = RPMTAG_NOT_FOUND;
+    rpmTagVal evr = RPMTAG_NOT_FOUND;
+    rpmTagVal f = RPMTAG_NOT_FOUND;
 
     if (tag == RPMTAG_PROVIDENAME) {
 	t = "Provides";
@@ -62,6 +62,10 @@ static int dsType(rpmTag tag,
 	t = "Obsoletes";
 	evr = RPMTAG_OBSOLETEVERSION;
 	f = RPMTAG_OBSOLETEFLAGS;
+    } else if (tag == RPMTAG_ORDERNAME) {
+	t = "Order";
+	evr = RPMTAG_ORDERVERSION;
+	f = RPMTAG_ORDERFLAGS;
     } else if (tag == RPMTAG_TRIGGERNAME) {
 	t = "Trigger";
 	evr = RPMTAG_TRIGGERVERSION;
@@ -75,38 +79,75 @@ static int dsType(rpmTag tag,
     return rc;
 }    
 
-rpmds rpmdsUnlink(rpmds ds, const char * msg)
+rpmsid rpmdsNIdIndex(rpmds ds, int i)
 {
-    if (ds == NULL) return NULL;
-if (_rpmds_debug && msg != NULL)
-fprintf(stderr, "--> ds %p -- %d %s\n", ds, ds->nrefs, msg);
-    ds->nrefs--;
+    rpmsid id = 0;
+    if (ds != NULL && i >= 0 && i < ds->Count && ds->N != NULL)
+	id = ds->N[i];
+    return id;
+}
+
+rpmsid rpmdsEVRIdIndex(rpmds ds, int i)
+{
+    rpmsid id = 0;
+    if (ds != NULL && i >= 0 && i < ds->Count && ds->EVR != NULL)
+	id = ds->EVR[i];
+    return id;
+}
+const char * rpmdsNIndex(rpmds ds, int i)
+{
+    const char * N = NULL;
+    if (ds != NULL && i >= 0 && i < ds->Count && ds->N != NULL)
+	N = rpmstrPoolStr(ds->pool, ds->N[i]);
+    return N;
+}
+
+const char * rpmdsEVRIndex(rpmds ds, int i)
+{
+    const char * EVR = NULL;
+    if (ds != NULL && i >= 0 && i < ds->Count && ds->EVR != NULL)
+	EVR = rpmstrPoolStr(ds->pool, ds->EVR[i]);
+    return EVR;
+}
+
+rpmsenseFlags rpmdsFlagsIndex(rpmds ds, int i)
+{
+    rpmsenseFlags Flags = 0;
+    if (ds != NULL && i >= 0 && i < ds->Count && ds->Flags != NULL)
+	Flags = ds->Flags[i];
+    return Flags;
+}
+
+rpm_color_t rpmdsColorIndex(rpmds ds, int i)
+{
+    rpm_color_t Color = 0;
+    if (ds != NULL && i >= 0 && i < ds->Count && ds->Color != NULL)
+	Color = ds->Color[i];
+    return Color;
+}
+static rpmds rpmdsUnlink(rpmds ds)
+{
+    if (ds)
+	ds->nrefs--;
     return NULL;
 }
 
-rpmds rpmdsLink(rpmds ds, const char * msg)
+rpmds rpmdsLink(rpmds ds)
 {
-    if (ds == NULL) return NULL;
-    ds->nrefs++;
-
-if (_rpmds_debug && msg != NULL)
-fprintf(stderr, "--> ds %p ++ %d %s\n", ds, ds->nrefs, msg);
-
+    if (ds)
+	ds->nrefs++;
     return ds;
 }
 
 rpmds rpmdsFree(rpmds ds)
 {
-    rpmTag tagEVR, tagF;
+    rpmTagVal tagEVR, tagF;
 
     if (ds == NULL)
 	return NULL;
 
     if (ds->nrefs > 1)
-	return rpmdsUnlink(ds, ds->Type);
-
-if (_rpmds_debug < 0)
-fprintf(stderr, "*** ds %p\t%s[%d]\n", ds, ds->Type, ds->Count);
+	return rpmdsUnlink(ds);
 
     if (dsType(ds->tagN, NULL, &tagEVR, &tagF))
 	return NULL;
@@ -117,84 +158,102 @@ fprintf(stderr, "*** ds %p\t%s[%d]\n", ds, ds->Type, ds->Count);
 	ds->Flags = _free(ds->Flags);
     }
 
+    ds->pool = rpmstrPoolFree(ds->pool);
     ds->DNEVR = _free(ds->DNEVR);
     ds->Color = _free(ds->Color);
-    ds->Refs = _free(ds->Refs);
 
-    (void) rpmdsUnlink(ds, ds->Type);
+    (void) rpmdsUnlink(ds);
     memset(ds, 0, sizeof(*ds));		/* XXX trash and burn */
     ds = _free(ds);
     return NULL;
 }
 
-rpmds rpmdsNew(Header h, rpmTag tagN, int flags)
+static rpmds rpmdsCreate(rpmstrPool pool,
+		  rpmTagVal tagN, const char * Type, int Count,
+		  unsigned int instance)
 {
-    rpmTag tagEVR, tagF;
+    rpmds ds = xcalloc(1, sizeof(*ds));
+
+    ds->pool = (pool != NULL) ? rpmstrPoolLink(pool) : rpmstrPoolCreate();
+    ds->tagN = tagN;
+    ds->Type = Type;
+    ds->Count = Count;
+    ds->instance = instance;
+    ds->nopromote = _rpmds_nopromote;
+    ds->i = -1;
+
+    return rpmdsLink(ds);
+}
+
+rpmds rpmdsNewPool(rpmstrPool pool, Header h, rpmTagVal tagN, int flags)
+{
+    rpmTagVal tagEVR, tagF;
     rpmds ds = NULL;
     const char * Type;
     struct rpmtd_s names;
-    headerGetFlags hgflags = HEADERGET_ALLOC|HEADERGET_ARGV;
-
     if (dsType(tagN, &Type, &tagEVR, &tagF))
 	goto exit;
 
-    if (headerGet(h, tagN, &names, hgflags) && rpmtdCount(&names) > 0) {
+    if (headerGet(h, tagN, &names, HEADERGET_MINMEM)) {
 	struct rpmtd_s evr, flags; 
 
-	ds = xcalloc(1, sizeof(*ds));
-	ds->Type = Type;
-	ds->i = -1;
-	ds->DNEVR = NULL;
-	ds->tagN = tagN;
-	ds->N = names.data;
-	ds->Count = rpmtdCount(&names);
-	ds->nopromote = _rpmds_nopromote;
+	ds = rpmdsCreate(pool, tagN, Type,
+			 rpmtdCount(&names), headerGetInstance(h));
 
-	headerGet(h, tagEVR, &evr, hgflags);
-	ds->EVR = evr.data;
-	headerGet(h, tagF, &flags, hgflags);
+	ds->N = rpmtdToPool(&names, ds->pool);
+	headerGet(h, tagEVR, &evr, HEADERGET_MINMEM);
+	ds->EVR = rpmtdToPool(&evr, ds->pool);
+	headerGet(h, tagF, &flags, HEADERGET_ALLOC);
 	ds->Flags = flags.data;
 	/* ensure rpmlib() requires always have RPMSENSE_RPMLIB flag set */
 	if (tagN == RPMTAG_REQUIRENAME && ds->Flags) {
 	    for (int i = 0; i < ds->Count; i++) {
-		if (!(ds->Flags[i] & RPMSENSE_RPMLIB) &&
-			rstreqn(ds->N[i], "rpmlib(", sizeof("rpmlib(")-1))
-		    ds->Flags[i] |= RPMSENSE_RPMLIB;
+		if (!(rpmdsFlagsIndex(ds, i) & RPMSENSE_RPMLIB)) {
+		    const char *N = rpmdsNIndex(ds, i);
+		    if (rstreqn(N, "rpmlib(", sizeof("rpmlib(")-1))
+			ds->Flags[i] |= RPMSENSE_RPMLIB;
+		}
 	    }
 	}
+	rpmtdFreeData(&names);
+	rpmtdFreeData(&evr);
 
-	ds->BT = headerGetNumber(h, RPMTAG_BUILDTIME);
-	ds->Color = xcalloc(ds->Count, sizeof(*ds->Color));
-	ds->Refs = xcalloc(ds->Count, sizeof(*ds->Refs));
-	ds = rpmdsLink(ds, ds->Type);
-
-if (_rpmds_debug < 0)
-fprintf(stderr, "*** ds %p\t%s[%d]\n", ds, ds->Type, ds->Count);
+	/* freeze the pool to save memory, but only if private pool */
+	if (ds->pool != pool)
+	    rpmstrPoolFreeze(ds->pool, 0);
     }
 
 exit:
     return ds;
 }
 
+rpmds rpmdsNew(Header h, rpmTagVal tagN, int flags)
+{
+    return rpmdsNewPool(NULL, h, tagN, flags);
+}
+
 char * rpmdsNewDNEVR(const char * dspfx, const rpmds ds)
 {
+    const char * N = rpmdsN(ds);
+    const char * EVR = rpmdsEVR(ds);
+    rpmsenseFlags Flags = rpmdsFlags(ds);
     char * tbuf, * t;
     size_t nb;
 
     nb = 0;
     if (dspfx)	nb += strlen(dspfx) + 1;
-    if (ds->N[ds->i])	nb += strlen(ds->N[ds->i]);
+    if (N)	nb += strlen(N);
     /* XXX rpm prior to 3.0.2 did not always supply EVR and Flags. */
-    if (ds->Flags != NULL && (ds->Flags[ds->i] & RPMSENSE_SENSEMASK)) {
+    if (Flags & RPMSENSE_SENSEMASK) {
 	if (nb)	nb++;
-	if (ds->Flags[ds->i] & RPMSENSE_LESS)	nb++;
-	if (ds->Flags[ds->i] & RPMSENSE_GREATER) nb++;
-	if (ds->Flags[ds->i] & RPMSENSE_EQUAL)	nb++;
+	if (Flags & RPMSENSE_LESS)	nb++;
+	if (Flags & RPMSENSE_GREATER) nb++;
+	if (Flags & RPMSENSE_EQUAL)	nb++;
     }
     /* XXX rpm prior to 3.0.2 did not always supply EVR and Flags. */
-    if (ds->EVR != NULL && ds->EVR[ds->i] && *ds->EVR[ds->i]) {
+    if (EVR && *EVR) {
 	if (nb)	nb++;
-	nb += strlen(ds->EVR[ds->i]);
+	nb += strlen(EVR);
     }
 
     t = tbuf = xmalloc(nb + 1);
@@ -202,33 +261,27 @@ char * rpmdsNewDNEVR(const char * dspfx, const rpmds ds)
 	t = stpcpy(t, dspfx);
 	*t++ = ' ';
     }
-    if (ds->N[ds->i])
-	t = stpcpy(t, ds->N[ds->i]);
+    if (N)
+	t = stpcpy(t, N);
     /* XXX rpm prior to 3.0.2 did not always supply EVR and Flags. */
-    if (ds->Flags != NULL && (ds->Flags[ds->i] & RPMSENSE_SENSEMASK)) {
+    if (Flags & RPMSENSE_SENSEMASK) {
 	if (t != tbuf)	*t++ = ' ';
-	if (ds->Flags[ds->i] & RPMSENSE_LESS)	*t++ = '<';
-	if (ds->Flags[ds->i] & RPMSENSE_GREATER) *t++ = '>';
-	if (ds->Flags[ds->i] & RPMSENSE_EQUAL)	*t++ = '=';
+	if (Flags & RPMSENSE_LESS)	*t++ = '<';
+	if (Flags & RPMSENSE_GREATER) *t++ = '>';
+	if (Flags & RPMSENSE_EQUAL)	*t++ = '=';
     }
     /* XXX rpm prior to 3.0.2 did not always supply EVR and Flags. */
-    if (ds->EVR != NULL && ds->EVR[ds->i] && *ds->EVR[ds->i]) {
+    if (EVR && *EVR) {
 	if (t != tbuf)	*t++ = ' ';
-	t = stpcpy(t, ds->EVR[ds->i]);
+	t = stpcpy(t, EVR);
     }
     *t = '\0';
     return tbuf;
 }
 
-rpmds rpmdsThis(Header h, rpmTag tagN, rpmsenseFlags Flags)
-{
-    char *evr = headerGetAsString(h, RPMTAG_EVR);
-    rpmds ds = rpmdsSingle(tagN, headerGetString(h, RPMTAG_NAME), evr, Flags);
-    free(evr);
-    return ds;
-}
-
-rpmds rpmdsSingle(rpmTag tagN, const char * N, const char * EVR, rpmsenseFlags Flags)
+static rpmds singleDSPool(rpmstrPool pool, rpmTagVal tagN,
+			  rpmsid N, rpmsid EVR, rpmsenseFlags Flags,
+			  unsigned int instance, rpm_color_t Color)
 {
     rpmds ds = NULL;
     const char * Type;
@@ -236,24 +289,74 @@ rpmds rpmdsSingle(rpmTag tagN, const char * N, const char * EVR, rpmsenseFlags F
     if (dsType(tagN, &Type, NULL, NULL))
 	goto exit;
 
-    ds = xcalloc(1, sizeof(*ds));
-    ds->Type = Type;
-    ds->tagN = tagN;
-    {	time_t now = time(NULL);
-	ds->BT = now;
-    }
-    ds->Count = 1;
-    ds->nopromote = _rpmds_nopromote;
+    ds = rpmdsCreate(pool, tagN, Type, 1, instance);
 
-    ds->N = rpmdsDupArgv(&N, 1);
-    ds->EVR = rpmdsDupArgv(&EVR, 1);
-
+    ds->N = xmalloc(1 * sizeof(*ds->N));
+    ds->N[0] = N;
+    ds->EVR = xmalloc(1 * sizeof(*ds->EVR));
+    ds->EVR[0] = EVR;
     ds->Flags = xmalloc(sizeof(*ds->Flags));
     ds->Flags[0] = Flags;
     ds->i = 0;
+    if (Color)
+	rpmdsSetColor(ds, Color);
 
 exit:
-    return rpmdsLink(ds, (ds ? ds->Type : NULL));
+    return ds;
+}
+
+static rpmds singleDS(rpmstrPool pool, rpmTagVal tagN,
+		      const char * N, const char * EVR,
+		      rpmsenseFlags Flags, unsigned int instance,
+		      rpm_color_t Color)
+{
+    rpmds ds = singleDSPool(pool, tagN, 0, 0, Flags, instance, Color);
+    if (ds) {
+	/* now that we have a pool, we can insert our N & EVR strings */
+	ds->N[0] = rpmstrPoolId(ds->pool, N ? N : "", 1);
+	ds->EVR[0] = rpmstrPoolId(ds->pool, EVR ? EVR : "", 1);
+	/* freeze the pool to save memory, but only if private pool */
+	if (ds->pool != pool)
+	    rpmstrPoolFreeze(ds->pool, 0);
+    }
+    return ds;
+}
+
+rpmds rpmdsThisPool(rpmstrPool pool,
+		    Header h, rpmTagVal tagN, rpmsenseFlags Flags)
+{
+    char *evr = headerGetAsString(h, RPMTAG_EVR);
+    rpmds ds = singleDS(pool, tagN, headerGetString(h, RPMTAG_NAME),
+			evr, Flags, headerGetInstance(h), 0);
+    free(evr);
+    return ds;
+}
+
+rpmds rpmdsThis(Header h, rpmTagVal tagN, rpmsenseFlags Flags)
+{
+    return rpmdsThisPool(NULL, h, tagN, Flags);
+}
+
+rpmds rpmdsSinglePool(rpmstrPool pool,rpmTagVal tagN,
+		      const char * N, const char * EVR, rpmsenseFlags Flags)
+{
+    return singleDS(pool, tagN, N, EVR, Flags, 0, 0);
+}
+
+rpmds rpmdsSingle(rpmTagVal tagN, const char * N, const char * EVR, rpmsenseFlags Flags)
+{
+    return rpmdsSinglePool(NULL, tagN, N, EVR, Flags);
+}
+
+rpmds rpmdsCurrent(rpmds ds)
+{
+    rpmds cds = NULL;
+    if (ds != NULL && ds->i >= 0 && ds->i < ds->Count) {
+	/* Using parent's pool so we can just use the same id's */
+	cds = singleDSPool(ds->pool, ds->tagN, ds->N[ds->i], ds->EVR[ds->i],
+			   rpmdsFlags(ds), ds->instance, rpmdsColor(ds));
+    }
+    return cds;
 }
 
 int rpmdsCount(const rpmds ds)
@@ -292,64 +395,43 @@ const char * rpmdsDNEVR(const rpmds ds)
     return DNEVR;
 }
 
+rpmsid rpmdsNId(rpmds ds)
+{
+    return (ds != NULL) ? rpmdsNIdIndex(ds, ds->i) : 0;
+}
+
+rpmsid rpmdsEVRId(rpmds ds)
+{
+    return (ds != NULL) ? rpmdsEVRIdIndex(ds, ds->i) : 0;
+}
+
 const char * rpmdsN(const rpmds ds)
 {
-    const char * N = NULL;
-
-    if (ds != NULL && ds->i >= 0 && ds->i < ds->Count) {
-	if (ds->N != NULL)
-	    N = ds->N[ds->i];
-    }
-    return N;
+    return (ds != NULL) ? rpmdsNIndex(ds, ds->i) : NULL;
 }
 
 const char * rpmdsEVR(const rpmds ds)
 {
-    const char * EVR = NULL;
-
-    if (ds != NULL && ds->i >= 0 && ds->i < ds->Count) {
-	if (ds->EVR != NULL)
-	    EVR = ds->EVR[ds->i];
-    }
-    return EVR;
+    return (ds != NULL) ? rpmdsEVRIndex(ds, ds->i) : NULL;
 }
 
 rpmsenseFlags rpmdsFlags(const rpmds ds)
 {
-    rpmsenseFlags Flags = 0;
-
-    if (ds != NULL && ds->i >= 0 && ds->i < ds->Count) {
-	if (ds->Flags != NULL)
-	    Flags = ds->Flags[ds->i];
-    }
-    return Flags;
+    return (ds != NULL) ? rpmdsFlagsIndex(ds, ds->i) : 0;
 }
 
-rpmTag rpmdsTagN(const rpmds ds)
+rpmTagVal rpmdsTagN(const rpmds ds)
 {
-    rpmTag tagN = 0;
+    rpmTagVal tagN = RPMTAG_NOT_FOUND;
 
     if (ds != NULL)
 	tagN = ds->tagN;
     return tagN;
 }
 
-time_t rpmdsBT(const rpmds ds)
+unsigned int rpmdsInstance(rpmds ds)
 {
-    time_t BT = 0;
-    if (ds != NULL && ds->BT > 0)
-	BT = ds->BT;
-    return BT;
-}
-
-time_t rpmdsSetBT(const rpmds ds, time_t BT)
-{
-    time_t oBT = 0;
-    if (ds != NULL) {
-	oBT = ds->BT;
-	ds->BT = BT;
-    }
-    return oBT;
+    return (ds != NULL) ? ds->instance : 0;
 }
 
 int rpmdsNoPromote(const rpmds ds)
@@ -374,13 +456,7 @@ int rpmdsSetNoPromote(rpmds ds, int nopromote)
 
 rpm_color_t rpmdsColor(const rpmds ds)
 {
-    rpm_color_t Color = 0;
-
-    if (ds != NULL && ds->i >= 0 && ds->i < ds->Count) {
-	if (ds->Color != NULL)
-	    Color = ds->Color[ds->i];
-    }
-    return Color;
+    return (ds != NULL) ? rpmdsColorIndex(ds, ds->i) : 0;
 }
 
 rpm_color_t rpmdsSetColor(const rpmds ds, rpm_color_t color)
@@ -388,36 +464,13 @@ rpm_color_t rpmdsSetColor(const rpmds ds, rpm_color_t color)
     rpm_color_t ocolor = 0;
 
     if (ds != NULL && ds->i >= 0 && ds->i < ds->Count) {
-	if (ds->Color != NULL) {
-	    ocolor = ds->Color[ds->i];
-	    ds->Color[ds->i] = color;
+	if (ds->Color == NULL) {
+	    ds->Color = xcalloc(ds->Count, sizeof(*ds->Color));
 	}
+	ocolor = ds->Color[ds->i];
+	ds->Color[ds->i] = color;
     }
     return ocolor;
-}
-
-int32_t rpmdsRefs(const rpmds ds)
-{
-    int32_t Refs = 0;
-
-    if (ds != NULL && ds->i >= 0 && ds->i < ds->Count) {
-	if (ds->Refs != NULL)
-	    Refs = ds->Refs[ds->i];
-    }
-    return Refs;
-}
-
-int32_t rpmdsSetRefs(const rpmds ds, int32_t refs)
-{
-    int32_t orefs = 0;
-
-    if (ds != NULL && ds->i >= 0 && ds->i < ds->Count) {
-	if (ds->Refs != NULL) {
-	    orefs = ds->Refs[ds->i];
-	    ds->Refs[ds->i] = refs;
-	}
-    }
-    return orefs;
 }
 
 void rpmdsNotify(rpmds ds, const char * where, int rc)
@@ -465,63 +518,42 @@ rpmds rpmdsInit(rpmds ds)
     return ds;
 }
 
-static
-const char ** rpmdsDupArgv(const char ** argv, int argc)
-{
-    const char ** av;
-    size_t nb = 0;
-    int ac = 0;
-    char * t;
-
-    if (argv == NULL)
-	return NULL;
-    for (ac = 0; ac < argc && argv[ac]; ac++) {
-	nb += strlen(argv[ac]) + 1;
-    }
-    nb += (ac + 1) * sizeof(*av);
-
-    av = xmalloc(nb);
-    t = (char *) (av + ac + 1);
-    for (ac = 0; ac < argc && argv[ac]; ac++) {
-	av[ac] = t;
-	t = stpcpy(t, argv[ac]) + 1;
-    }
-    av[ac] = NULL;
-    return av;
-}
-
 static rpmds rpmdsDup(const rpmds ods)
 {
-    rpmds ds = xcalloc(1, sizeof(*ds));
+    rpmds ds = rpmdsCreate(ods->pool, ods->tagN, ods->Type,
+			   ods->Count, ods->instance);
     size_t nb;
-
-    ds->Type = ods->Type;
-    ds->tagN = ods->tagN;
-    ds->Count = ods->Count;
+    
     ds->i = ods->i;
     ds->l = ods->l;
     ds->u = ods->u;
     ds->nopromote = ods->nopromote;
 
-    ds->N = rpmdsDupArgv(ods->N, ods->Count);
-
+    nb = ds->Count * sizeof(*ds->N);
+    ds->N = memcpy(xmalloc(nb), ods->N, nb);
+    
     /* XXX rpm prior to 3.0.2 did not always supply EVR and Flags. */
-assert(ods->EVR != NULL);
-assert(ods->Flags != NULL);
+    if (ods->EVR) {
+	nb = ds->Count * sizeof(*ds->EVR);
+	ds->EVR = memcpy(xmalloc(nb), ods->EVR, nb);
+    }
 
-    ds->EVR = rpmdsDupArgv(ods->EVR, ods->Count);
+    if (ods->Flags) {
+	nb = ds->Count * sizeof(*ds->Flags);
+	ds->Flags = memcpy(xmalloc(nb), ods->Flags, nb);
+    }
 
-    nb = (ds->Count * sizeof(*ds->Flags));
-    ds->Flags = memcpy(xmalloc(nb), ods->Flags, nb);
-
-/* FIX: ds->Flags is kept, not only */
-    return rpmdsLink(ds, (ds ? ds->Type : NULL));
+    return ds;
 
 }
 
 int rpmdsFind(rpmds ds, const rpmds ods)
 {
     int comparison;
+    const char *N, *ON = rpmdsN(ods);
+    const char *EVR, *OEVR = rpmdsEVR(ods);
+    rpmsenseFlags Flags, OFlags = rpmdsFlags(ods);
+    int rc = -1; /* assume not found */
 
     if (ds == NULL || ods == NULL)
 	return -1;
@@ -531,35 +563,40 @@ int rpmdsFind(rpmds ds, const rpmds ods)
     while (ds->l < ds->u) {
 	ds->i = (ds->l + ds->u) / 2;
 
-	comparison = strcmp(ods->N[ods->i], ds->N[ds->i]);
+	N = rpmdsN(ds);
+	EVR = rpmdsEVR(ds);
+	Flags = rpmdsFlags(ds);
+
+	comparison = strcmp(ON, N);
 
 	/* XXX rpm prior to 3.0.2 did not always supply EVR and Flags. */
-	if (comparison == 0 && ods->EVR && ds->EVR)
-	    comparison = strcmp(ods->EVR[ods->i], ds->EVR[ds->i]);
-	if (comparison == 0 && ods->Flags && ds->Flags)
-	    comparison = (ods->Flags[ods->i] - ds->Flags[ds->i]);
+	if (comparison == 0 && OEVR && EVR)
+	    comparison = strcmp(OEVR, EVR);
+	if (comparison == 0)
+	    comparison = OFlags - Flags;
 
 	if (comparison < 0)
 	    ds->u = ds->i;
 	else if (comparison > 0)
 	    ds->l = ds->i + 1;
-	else
-	    return ds->i;
+	else {
+	    rc = ds->i;
+	    break;
+	}
     }
-    return -1;
+    return rc;
 }
 
 int rpmdsMerge(rpmds * dsp, rpmds ods)
 {
     rpmds ds;
-    const char ** N;
-    const char ** EVR;
-    rpmsenseFlags * Flags;
-    int j;
     int save;
+    int ocount;
 
     if (dsp == NULL || ods == NULL)
 	return -1;
+
+    ocount = rpmdsCount(*dsp);
 
     /* If not initialized yet, dup the 1st entry. */
     if (*dsp == NULL) {
@@ -572,12 +609,19 @@ int rpmdsMerge(rpmds * dsp, rpmds ods)
     if (ds == NULL)
 	return -1;
 
+    /* Ensure EVR and Flags exist */
+    if (ds->EVR == NULL)
+	ds->EVR = xcalloc(ds->Count, sizeof(*ds->EVR));
+    if (ds->Flags == NULL)
+	ds->Flags = xcalloc(ds->Count, sizeof(*ds->Flags));
+
     /*
      * Add new entries.
      */
     save = ods->i;
     ods = rpmdsInit(ods);
     while (rpmdsNext(ods) >= 0) {
+	const char *OEVR;
 	/*
 	 * If this entry is already present, don't bother.
 	 */
@@ -585,42 +629,37 @@ int rpmdsMerge(rpmds * dsp, rpmds ods)
 	    continue;
 
 	/*
-	 * Insert new entry.
+	 * Insert new entry. Ensure pool is unfrozen to allow additions.
 	 */
-	for (j = ds->Count; j > ds->u; j--)
-	    ds->N[j] = ds->N[j-1];
-	ds->N[ds->u] = ods->N[ods->i];
-	N = rpmdsDupArgv(ds->N, ds->Count+1);
-	ds->N = _free(ds->N);
-	ds->N = N;
-	
-	/* XXX rpm prior to 3.0.2 did not always supply EVR and Flags. */
-assert(ods->EVR != NULL);
-assert(ods->Flags != NULL);
+	rpmstrPoolUnfreeze(ds->pool);
+	ds->N = xrealloc(ds->N, (ds->Count+1) * sizeof(*ds->N));
+	if (ds->u < ds->Count) {
+	    memmove(ds->N + ds->u + 1, ds->N + ds->u,
+		    (ds->Count - ds->u) * sizeof(*ds->N));
+	}
+	ds->N[ds->u] = rpmstrPoolId(ds->pool, rpmdsN(ods), 1);
 
-	for (j = ds->Count; j > ds->u; j--)
-	    ds->EVR[j] = ds->EVR[j-1];
-	ds->EVR[ds->u] = ods->EVR[ods->i];
-	EVR = rpmdsDupArgv(ds->EVR, ds->Count+1);
-	ds->EVR = _free(ds->EVR);
-	ds->EVR = EVR;
+	ds->EVR = xrealloc(ds->EVR, (ds->Count+1) * sizeof(*ds->EVR));
+	if (ds->u < ds->Count) {
+	    memmove(ds->EVR + ds->u + 1, ds->EVR + ds->u,
+		    (ds->Count - ds->u) * sizeof(*ds->EVR));
+	}
+	OEVR = rpmdsEVR(ods);
+	ds->EVR[ds->u] = rpmstrPoolId(ds->pool, OEVR ? OEVR : "", 1);
 
-	Flags = xmalloc((ds->Count+1) * sizeof(*Flags));
-	if (ds->u > 0)
-	    memcpy(Flags, ds->Flags, ds->u * sizeof(*Flags));
-	if (ds->u < ds->Count)
-	    memcpy(Flags + ds->u + 1, ds->Flags + ds->u, 
-		   (ds->Count - ds->u) * sizeof(*Flags));
-	Flags[ds->u] = ods->Flags[ods->i];
-	ds->Flags = _free(ds->Flags);
-	ds->Flags = Flags;
+	ds->Flags = xrealloc(ds->Flags, (ds->Count+1) * sizeof(*ds->Flags));
+	if (ds->u < ds->Count) {
+	    memmove(ds->Flags + ds->u + 1, ds->Flags + ds->u,
+		    (ds->Count - ds->u) * sizeof(*ds->Flags));
+	}
+	ds->Flags[ds->u] = rpmdsFlags(ods);
 
 	ds->i = ds->Count;
 	ds->Count++;
 
     }
     ods->i = save;
-    return 0;
+    return (ds->Count - ocount);
 }
 
 
@@ -628,6 +667,7 @@ int rpmdsSearch(rpmds ds, rpmds ods)
 {
     int comparison;
     int i, l, u;
+    const char *ON = rpmdsN(ods);
 
     if (ds == NULL || ods == NULL)
 	return -1;
@@ -639,7 +679,7 @@ int rpmdsSearch(rpmds ds, rpmds ods)
     while (l < u) {
 	i = (l + u) / 2;
 
-	comparison = strcmp(ods->N[ods->i], ds->N[i]);
+	comparison = strcmp(ON, rpmdsNIndex(ds, i));
 
 	if (comparison < 0)
 	    u = i;
@@ -647,16 +687,16 @@ int rpmdsSearch(rpmds ds, rpmds ods)
 	    l = i + 1;
 	else {
 	    /* Set l to 1st member of set that contains N. */
-	    if (!rstreq(ods->N[ods->i], ds->N[l]))
+	    if (!rstreq(ON, rpmdsNIndex(ds, l)))
 		l = i;
-	    while (l > 0 && rstreq(ods->N[ods->i], ds->N[l-1]))
+	    while (l > 0 && rstreq(ON, rpmdsNIndex(ds, l-1)))
 		l--;
 	    /* Set u to 1st member of set that does not contain N. */
-	    if (u >= ds->Count || !rstreq(ods->N[ods->i], ds->N[u]))
+	    if (u >= ds->Count || !rstreq(ON, rpmdsNIndex(ds, u)))
 		u = i;
 	    while (++u < ds->Count) {
-		if (!rstreq(ods->N[ods->i], ds->N[u]))
-		    /*@innerbreak@*/ break;
+		if (!rstreq(ON, rpmdsNIndex(ds, u)))
+		    break;
 	    }
 	    break;
 	}
@@ -723,15 +763,75 @@ void parseEVR(char * evr,
     if (rp) *rp = release;
 }
 
-int rpmdsCompare(const rpmds A, const rpmds B)
+static inline int rpmdsCompareEVR(const char *AEVR, uint32_t AFlags,
+				  const char *BEVR, uint32_t BFlags,
+				  int nopromote)
 {
-    char *aEVR, *bEVR;
     const char *aE, *aV, *aR, *bE, *bV, *bR;
+    char *aEVR = xstrdup(AEVR);
+    char *bEVR = xstrdup(BEVR);
+    int sense = 0;
+    int result = 0;
+
+    parseEVR(aEVR, &aE, &aV, &aR);
+    parseEVR(bEVR, &bE, &bV, &bR);
+
+    /* Compare {A,B} [epoch:]version[-release] */
+    if (aE && *aE && bE && *bE)
+	sense = rpmvercmp(aE, bE);
+    else if (aE && *aE && atol(aE) > 0) {
+	if (!nopromote) {
+	    sense = 0;
+	} else
+	    sense = 1;
+    } else if (bE && *bE && atol(bE) > 0)
+	sense = -1;
+
+    if (sense == 0) {
+	sense = rpmvercmp(aV, bV);
+	if (sense == 0) {
+	    if (aR && *aR && bR && *bR) {
+		sense = rpmvercmp(aR, bR);
+	    } else {
+		/* always matches if the side with no release has SENSE_EQUAL */
+		if ((aR && *aR && (BFlags & RPMSENSE_EQUAL)) ||
+		    (bR && *bR && (AFlags & RPMSENSE_EQUAL))) {
+		    aEVR = _free(aEVR);
+		    bEVR = _free(bEVR);
+		    result = 1;
+		    goto exit;
+		}
+	    }
+	}
+    }
+
+    /* Detect overlap of {A,B} range. */
+    if (sense < 0 && ((AFlags & RPMSENSE_GREATER) || (BFlags & RPMSENSE_LESS))) {
+	result = 1;
+    } else if (sense > 0 && ((AFlags & RPMSENSE_LESS) || (BFlags & RPMSENSE_GREATER))) {
+	result = 1;
+    } else if (sense == 0 &&
+	(((AFlags & RPMSENSE_EQUAL) && (BFlags & RPMSENSE_EQUAL)) ||
+	 ((AFlags & RPMSENSE_LESS) && (BFlags & RPMSENSE_LESS)) ||
+	 ((AFlags & RPMSENSE_GREATER) && (BFlags & RPMSENSE_GREATER)))) {
+	result = 1;
+    }
+
+exit:
+    free(aEVR);
+    free(bEVR);
+    return result;
+}
+
+int rpmdsCompareIndex(rpmds A, int aix, rpmds B, int bix)
+{
+    const char *AEVR, *BEVR;
+    rpmsenseFlags AFlags, BFlags;
     int result;
-    int sense;
 
     /* Different names don't overlap. */
-    if (!rstreq(A->N[A->i], B->N[B->i])) {
+    if (!rpmstrPoolStreq(A->pool, rpmdsNIdIndex(A, aix),
+			 B->pool, rpmdsNIdIndex(B, bix))) {
 	result = 0;
 	goto exit;
     }
@@ -743,163 +843,82 @@ int rpmdsCompare(const rpmds A, const rpmds B)
     }
 
     /* Same name. If either A or B is an existence test, always overlap. */
-    if (!((A->Flags[A->i] & RPMSENSE_SENSEMASK) && (B->Flags[B->i] & RPMSENSE_SENSEMASK))) {
+    AFlags = rpmdsFlagsIndex(A, aix);
+    BFlags = rpmdsFlagsIndex(B, bix);
+    if (!((AFlags & RPMSENSE_SENSEMASK) && (BFlags & RPMSENSE_SENSEMASK))) {
 	result = 1;
 	goto exit;
     }
 
-    /* If either EVR is non-existent or empty, always overlap. */
-    if (!(A->EVR[A->i] && *A->EVR[A->i] && B->EVR[B->i] && *B->EVR[B->i])) {
+    AEVR = rpmdsEVRIndex(A, aix);
+    BEVR = rpmdsEVRIndex(B, bix);
+    if (!(AEVR && *AEVR && BEVR && *BEVR)) {
+	/* If either EVR is non-existent or empty, always overlap. */
 	result = 1;
-	goto exit;
-    }
-
-    /* Both AEVR and BEVR exist. */
-    aEVR = xstrdup(A->EVR[A->i]);
-    parseEVR(aEVR, &aE, &aV, &aR);
-    bEVR = xstrdup(B->EVR[B->i]);
-    parseEVR(bEVR, &bE, &bV, &bR);
-
-    /* Compare {A,B} [epoch:]version[-release] */
-    sense = 0;
-    if (aE && *aE && bE && *bE)
-	sense = rpmvercmp(aE, bE);
-    else if (aE && *aE && atol(aE) > 0) {
-	if (!B->nopromote) {
-	    sense = 0;
-	} else
-	    sense = 1;
-    } else if (bE && *bE && atol(bE) > 0)
-	sense = -1;
-
-    if (sense == 0) {
-	sense = rpmvercmp(aV, bV);
-	if (sense == 0 && aR && *aR && bR && *bR)
-	    sense = rpmvercmp(aR, bR);
-    }
-    aEVR = _free(aEVR);
-    bEVR = _free(bEVR);
-
-    /* Detect overlap of {A,B} range. */
-    result = 0;
-    if (sense < 0 && ((A->Flags[A->i] & RPMSENSE_GREATER) || (B->Flags[B->i] & RPMSENSE_LESS))) {
-	result = 1;
-    } else if (sense > 0 && ((A->Flags[A->i] & RPMSENSE_LESS) || (B->Flags[B->i] & RPMSENSE_GREATER))) {
-	result = 1;
-    } else if (sense == 0 &&
-	(((A->Flags[A->i] & RPMSENSE_EQUAL) && (B->Flags[B->i] & RPMSENSE_EQUAL)) ||
-	 ((A->Flags[A->i] & RPMSENSE_LESS) && (B->Flags[B->i] & RPMSENSE_LESS)) ||
-	 ((A->Flags[A->i] & RPMSENSE_GREATER) && (B->Flags[B->i] & RPMSENSE_GREATER)))) {
-	result = 1;
+    } else {
+	/* Both AEVR and BEVR exist, compare [epoch:]version[-release]. */
+	result = rpmdsCompareEVR(AEVR, AFlags, BEVR, BFlags, B->nopromote);
     }
 
 exit:
     return result;
 }
 
-void rpmdsProblem(rpmps ps, const char * pkgNEVR, const rpmds ds,
-	const fnpyKey * suggestedKeys, int adding)
+int rpmdsCompare(const rpmds A, const rpmds B)
 {
-    const char * DNEVR = rpmdsDNEVR(ds);
-    const char * EVR = rpmdsEVR(ds);
-    rpmProblemType type;
-    fnpyKey key;
+    return rpmdsCompareIndex(A, A->i, B, B->i);
+}
 
-    if (ps == NULL) return;
+int rpmdsMatches(rpmstrPool pool, Header h, int prix,
+		 rpmds req, int selfevr, int nopromote)
+{
+    rpmds provides;
+    rpmTagVal tag = RPMTAG_PROVIDENAME;
+    int result = 0;
 
-    if (EVR == NULL) EVR = "?EVR?";
-    if (DNEVR == NULL) DNEVR = "? ?N? ?OP? ?EVR?";
+    /* Get provides information from header */
+    if (selfevr)
+	provides = rpmdsThisPool(pool, h, tag, RPMSENSE_EQUAL);
+    else
+	provides = rpmdsNewPool(pool, h, tag, 0);
 
-    rpmlog(RPMLOG_DEBUG, "package %s has unsatisfied %s: %s\n",
-	    pkgNEVR, ds->Type, DNEVR+2);
+    rpmdsSetNoPromote(provides, nopromote);
 
-    switch ((unsigned)DNEVR[0]) {
-    case 'C':	type = RPMPROB_CONFLICT;	break;
-    default:
-    case 'R':	type = RPMPROB_REQUIRES;	break;
+    /*
+     * For a self-provide and indexed provide, we only need one comparison.
+     * Otherwise loop through the provides until match or end.
+     */
+    if (prix >= 0 || selfevr) {
+	if (prix >= 0)
+	    rpmdsSetIx(provides, prix);
+	result = rpmdsCompare(provides, req);
+    } else {
+	provides = rpmdsInit(provides);
+	while (rpmdsNext(provides) >= 0) {
+	    result = rpmdsCompare(provides, req);
+	    /* If this provide matches the require, we're done. */
+	    if (result)
+		break;
+	}
     }
 
-    key = (suggestedKeys ? suggestedKeys[0] : NULL);
-    rpmpsAppend(ps, type, pkgNEVR, key, NULL, NULL, DNEVR, adding);
+    rpmdsFree(provides);
+    return result;
+}
+
+int rpmdsMatchesDep (const Header h, int ix, const rpmds req, int nopromote)
+{
+    return rpmdsMatches(NULL, h, ix, req, 0, nopromote);
 }
 
 int rpmdsAnyMatchesDep (const Header h, const rpmds req, int nopromote)
 {
-    rpmds provides = NULL;
-    int result = 0;
-
-    /* XXX rpm prior to 3.0.2 did not always supply EVR and Flags. */
-    if (req->EVR == NULL || req->Flags == NULL)
-	return 1;
-
-    if (!(req->Flags[req->i] & RPMSENSE_SENSEMASK) || !req->EVR[req->i] || *req->EVR[req->i] == '\0')
-	return 1;
-
-    /* Get provides information from header */
-    provides = rpmdsInit(rpmdsNew(h, RPMTAG_PROVIDENAME, 0));
-    if (provides == NULL)
-	goto exit;	/* XXX should never happen */
-    if (nopromote)
-	(void) rpmdsSetNoPromote(provides, nopromote);
-
-    /*
-     * Rpm prior to 3.0.3 did not have versioned provides.
-     * If no provides version info is available, match any/all requires
-     * with same name.
-     */
-    if (provides->EVR == NULL) {
-	result = 1;
-	goto exit;
-    }
-
-    result = 0;
-    if (provides != NULL)
-    while (rpmdsNext(provides) >= 0) {
-
-	/* Filter out provides that came along for the ride. */
-	if (!rstreq(provides->N[provides->i], req->N[req->i]))
-	    continue;
-
-	result = rpmdsCompare(provides, req);
-
-	/* If this provide matches the require, we're done. */
-	if (result)
-	    break;
-    }
-
-exit:
-    provides = rpmdsFree(provides);
-
-    return result;
+    return rpmdsMatches(NULL, h, -1, req, 0, nopromote);
 }
 
 int rpmdsNVRMatchesDep(const Header h, const rpmds req, int nopromote)
 {
-    const char * pkgN;
-    char * pkgEVR;
-    rpmsenseFlags pkgFlags = RPMSENSE_EQUAL;
-    rpmds pkg;
-    int rc = 1;	/* XXX assume match, names already match here */
-
-    /* XXX rpm prior to 3.0.2 did not always supply EVR and Flags. */
-    if (req->EVR == NULL || req->Flags == NULL)
-	return rc;
-
-    if (!((req->Flags[req->i] & RPMSENSE_SENSEMASK) && req->EVR[req->i] && *req->EVR[req->i]))
-	return rc;
-
-    /* Get package information from header */
-    pkgN = headerGetString(h, RPMTAG_NAME);
-    pkgEVR = headerGetAsString(h, RPMTAG_EVR);
-    if ((pkg = rpmdsSingle(RPMTAG_PROVIDENAME, pkgN, pkgEVR, pkgFlags)) != NULL) {
-	if (nopromote)
-	    (void) rpmdsSetNoPromote(pkg, nopromote);
-	rc = rpmdsCompare(pkg, req);
-	pkg = rpmdsFree(pkg);
-    }
-    free(pkgEVR);
-
-    return rc;
+    return rpmdsMatches(NULL, h, -1, req, 1, nopromote);
 }
 
 /**
@@ -962,25 +981,43 @@ static const struct rpmlibProvides_s rpmlibProvides[] = {
 	(		 RPMSENSE_EQUAL),
     N_("support for POSIX.1e file capabilities") },
 #endif
+    { "rpmlib(ScriptletExpansion)",    "4.9.0-1",
+	(		RPMSENSE_EQUAL),
+    N_("package scriptlets can be expanded at install time.") },
+    { "rpmlib(TildeInVersions)",    "4.10.0-1",
+	(		RPMSENSE_EQUAL),
+    N_("dependency comparison supports versions with tilde.") },
     { NULL,				NULL, 0,	NULL }
 };
 
 
-int rpmdsRpmlib(rpmds * dsp, void * tblp)
+int rpmdsRpmlibPool(rpmstrPool pool, rpmds * dsp, const void * tblp)
 {
     const struct rpmlibProvides_s * rltblp = tblp;
     const struct rpmlibProvides_s * rlp;
-    int xx;
+    int rc = 0;
 
     if (rltblp == NULL)
 	rltblp = rpmlibProvides;
 
-    for (rlp = rltblp; rlp->featureName != NULL; rlp++) {
-	rpmds ds = rpmdsSingle(RPMTAG_PROVIDENAME, rlp->featureName,
+    for (rlp = rltblp; rlp->featureName != NULL && rc >= 0; rlp++) {
+	rpmds ds = rpmdsSinglePool(pool, RPMTAG_PROVIDENAME, rlp->featureName,
 			rlp->featureEVR, rlp->featureFlags);
-	xx = rpmdsMerge(dsp, ds);
-	ds = rpmdsFree(ds);
+	rc = rpmdsMerge(dsp, ds);
+	rpmdsFree(ds);
     }
-    return 0;
+    /* freeze the pool to save memory, but only if private pool */
+    if (*dsp && (*dsp)->pool != pool)
+	rpmstrPoolFreeze((*dsp)->pool, 0);
+    return (rc < 0) ? -1 : 0;
 }
 
+int rpmdsRpmlib(rpmds * dsp, const void * tblp)
+{
+    return rpmdsRpmlibPool(NULL, dsp, tblp);
+}
+
+rpmstrPool rpmdsPool(rpmds ds)
+{
+    return (ds != NULL) ? ds->pool : NULL;
+}

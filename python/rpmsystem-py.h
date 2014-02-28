@@ -8,8 +8,6 @@
 #include <Python.h>
 #include <structmember.h>
 
-#include "../system.h"
-
 #if ((PY_MAJOR_VERSION << 8) | (PY_MINOR_VERSION << 0)) < 0x0205
 typedef ssize_t Py_ssize_t;
 typedef Py_ssize_t (*lenfunc)(PyObject *);
@@ -26,11 +24,21 @@ typedef Py_ssize_t (*lenfunc)(PyObject *);
 #endif
 
 #if ((PY_MAJOR_VERSION << 8) | (PY_MINOR_VERSION << 0)) < 0x0206
-#define PyXBytes_Check PyString_Check
-#define PyXBytes_FromString PyString_FromString
-#define PyXBytes_FromStringAndSize PyString_FromStringAndSize
-#define PyXBytes_Size PyString_Size
-#define PyXBytes_AsString PyString_AsString
+#define PyBytes_Check PyString_Check
+#define PyBytes_FromString PyString_FromString
+#define PyBytes_FromStringAndSize PyString_FromStringAndSize
+#define PyBytes_Size PyString_Size
+#define PyBytes_AsString PyString_AsString
+#endif
+
+#if ((PY_MAJOR_VERSION << 8) | (PY_MINOR_VERSION << 0)) >= 0x0207
+#define CAPSULE_BUILD(ptr,name) PyCapsule_New(ptr, name, NULL)
+#define CAPSULE_CHECK(obj) PyCapsule_CheckExact(obj)
+#define CAPSULE_EXTRACT(obj,name) PyCapsule_GetPointer(obj, name)
+#else
+#define CAPSULE_BUILD(ptr,name) PyCObject_FromVoidPtr(ptr, NULL)
+#define CAPSULE_CHECK(obj) PyCObject_Check(obj)
+#define CAPSULE_EXTRACT(obj,name) PyCObject_AsVoidPtr(obj)
 #endif
 
 /* For Python 3, use the PyLong type throughout in place of PyInt */
@@ -38,6 +46,8 @@ typedef Py_ssize_t (*lenfunc)(PyObject *);
 #define PyInt_Check PyLong_Check
 #define PyInt_AsLong PyLong_AsLong
 #define PyInt_FromLong PyLong_FromLong
+#define PyInt_AsUnsignedLongMask PyLong_AsUnsignedLongMask
+#define PyInt_AsUnsignedLongLongMask PyLong_AsUnsignedLongLongMask
 #endif
 
 #endif	/* H_SYSTEM_PYTHON */

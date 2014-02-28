@@ -30,6 +30,10 @@ include/rpm/rpmstring.h: rpmio/rpmstring.h include/rpm/$(dirstamp)
 	$(INSTALL_DATA) $(top_srcdir)/rpmio/rpmstring.h include/rpm/rpmstring.h
 BUILT_SOURCES += include/rpm/rpmstring.h
 CLEANFILES += include/rpm/rpmstring.h
+include/rpm/rpmstrpool.h: rpmio/rpmstrpool.h include/rpm/$(dirstamp)
+	$(INSTALL_DATA) $(top_srcdir)/rpmio/rpmstrpool.h include/rpm/rpmstrpool.h
+BUILT_SOURCES += include/rpm/rpmstrpool.h
+CLEANFILES += include/rpm/rpmstrpool.h
 include/rpm/rpmsw.h: rpmio/rpmsw.h include/rpm/$(dirstamp)
 	$(INSTALL_DATA) $(top_srcdir)/rpmio/rpmsw.h include/rpm/rpmsw.h
 BUILT_SOURCES += include/rpm/rpmsw.h
@@ -46,6 +50,10 @@ include/rpm/rpmkeyring.h: rpmio/rpmkeyring.h include/rpm/$(dirstamp)
 	$(INSTALL_DATA) $(top_srcdir)/rpmio/rpmkeyring.h include/rpm/rpmkeyring.h
 BUILT_SOURCES += include/rpm/rpmkeyring.h
 CLEANFILES += include/rpm/rpmkeyring.h
+include/rpm/rpmbase64.h: rpmio/rpmbase64.h include/rpm/$(dirstamp)
+	$(INSTALL_DATA) $(top_srcdir)/rpmio/rpmbase64.h include/rpm/rpmbase64.h
+BUILT_SOURCES += include/rpm/rpmbase64.h
+CLEANFILES += include/rpm/rpmbase64.h
 include/rpm/header.h: lib/header.h include/rpm/$(dirstamp)
 	$(INSTALL_DATA) $(top_srcdir)/lib/header.h include/rpm/header.h
 BUILT_SOURCES += include/rpm/header.h
@@ -74,18 +82,22 @@ include/rpm/rpmfi.h: lib/rpmfi.h include/rpm/$(dirstamp)
 	$(INSTALL_DATA) $(top_srcdir)/lib/rpmfi.h include/rpm/rpmfi.h
 BUILT_SOURCES += include/rpm/rpmfi.h
 CLEANFILES += include/rpm/rpmfi.h
-include/rpm/rpmgi.h: lib/rpmgi.h include/rpm/$(dirstamp)
-	$(INSTALL_DATA) $(top_srcdir)/lib/rpmgi.h include/rpm/rpmgi.h
-BUILT_SOURCES += include/rpm/rpmgi.h
-CLEANFILES += include/rpm/rpmgi.h
 include/rpm/rpmlegacy.h: lib/rpmlegacy.h include/rpm/$(dirstamp)
 	$(INSTALL_DATA) $(top_srcdir)/lib/rpmlegacy.h include/rpm/rpmlegacy.h
 BUILT_SOURCES += include/rpm/rpmlegacy.h
 CLEANFILES += include/rpm/rpmlegacy.h
+include/rpm/rpmpol.h: lib/rpmpol.h include/rpm/$(dirstamp)
+	$(INSTALL_DATA) $(top_srcdir)/lib/rpmpol.h include/rpm/rpmpol.h
+BUILT_SOURCES += include/rpm/rpmpol.h
+CLEANFILES += include/rpm/rpmpol.h
 include/rpm/rpmps.h: lib/rpmps.h include/rpm/$(dirstamp)
 	$(INSTALL_DATA) $(top_srcdir)/lib/rpmps.h include/rpm/rpmps.h
 BUILT_SOURCES += include/rpm/rpmps.h
 CLEANFILES += include/rpm/rpmps.h
+include/rpm/rpmprob.h: lib/rpmprob.h include/rpm/$(dirstamp)
+	$(INSTALL_DATA) $(top_srcdir)/lib/rpmprob.h include/rpm/rpmprob.h
+BUILT_SOURCES += include/rpm/rpmprob.h
+CLEANFILES += include/rpm/rpmprob.h
 include/rpm/rpmtag.h: lib/rpmtag.h include/rpm/$(dirstamp)
 	$(INSTALL_DATA) $(top_srcdir)/lib/rpmtag.h include/rpm/rpmtag.h
 BUILT_SOURCES += include/rpm/rpmtag.h
@@ -110,6 +122,10 @@ include/rpm/rpmvf.h: lib/rpmvf.h include/rpm/$(dirstamp)
 	$(INSTALL_DATA) $(top_srcdir)/lib/rpmvf.h include/rpm/rpmvf.h
 BUILT_SOURCES += include/rpm/rpmvf.h
 CLEANFILES += include/rpm/rpmvf.h
+include/rpm/rpmsign.h: sign/rpmsign.h include/rpm/$(dirstamp)
+	$(INSTALL_DATA) $(top_srcdir)/sign/rpmsign.h include/rpm/rpmsign.h
+BUILT_SOURCES += include/rpm/rpmsign.h
+CLEANFILES += include/rpm/rpmsign.h
 include/rpm/rpmbuild.h: build/rpmbuild.h include/rpm/$(dirstamp)
 	$(INSTALL_DATA) $(top_srcdir)/build/rpmbuild.h include/rpm/rpmbuild.h
 BUILT_SOURCES += include/rpm/rpmbuild.h

@@ -25,8 +25,10 @@ typedef struct headerToken_s * Header;
 typedef struct headerIterator_s * HeaderIterator;
 
 typedef int32_t		rpm_tag_t;
-typedef uint32_t	rpm_tagtype_t; 		/* unused */
+typedef uint32_t	rpm_tagtype_t;
 typedef uint32_t	rpm_count_t;
+typedef rpm_tag_t	rpmTagVal;
+typedef rpm_tag_t	rpmDbiTagVal;
 
 typedef void *		rpm_data_t;
 typedef const void *	rpm_constdata_t;
@@ -36,6 +38,8 @@ typedef struct rpmtd_s * rpmtd;
 typedef uint32_t	rpm_color_t;
 typedef uint32_t	rpm_flag_t;
 typedef uint32_t	rpm_tid_t;
+
+typedef uint32_t	rpmFlags;
 /** @} */
 
 /** \ingroup rpmtypes
@@ -62,12 +66,21 @@ typedef struct rpmds_s * rpmds;
 typedef struct rpmfi_s * rpmfi;
 typedef struct rpmdb_s * rpmdb;
 typedef struct rpmdbMatchIterator_s * rpmdbMatchIterator;
+typedef struct rpmtsi_s * rpmtsi;
+typedef struct rpmps_s * rpmps;
+
+typedef struct rpmdbIndexIterator_s * rpmdbIndexIterator;
 typedef const void * fnpyKey;
 typedef void * rpmCallbackData;
 /** @} */
 
 typedef struct rpmPubkey_s * rpmPubkey;
 typedef struct rpmKeyring_s * rpmKeyring;
+
+typedef uint32_t rpmsid;
+typedef struct rpmstrPool_s * rpmstrPool;
+
+typedef struct rpmPlugins_s * rpmPlugins;
 
 typedef struct rpmgi_s * rpmgi;
 

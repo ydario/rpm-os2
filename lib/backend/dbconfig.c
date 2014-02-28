@@ -14,217 +14,74 @@
 #include "lib/rpmdb_internal.h"
 #include "debug.h"
 
-static struct _dbiIndex db3dbi;
+static struct dbiIndex_s staticdbi;
+static struct dbConfig_s staticcfg;
+static int db_eflags;
 
-/** \ingroup db3
+/** \ingroup dbi
  */
 static const struct poptOption rdbOptions[] = {
- /* XXX DB_CXX_NO_EXCEPTIONS */
-
- { "create",	0,POPT_BIT_SET,	&db3dbi.dbi_oeflags, DB_CREATE,
+ /* Environment options */
+   
+ { "cdb",	0,POPT_BIT_SET,	&db_eflags, DB_INIT_CDB,
 	NULL, NULL },
- { "thread",	0,POPT_BIT_SET,	&db3dbi.dbi_oeflags, DB_THREAD,
+ { "lock",	0,POPT_BIT_SET,	&db_eflags, DB_INIT_LOCK,
 	NULL, NULL },
-
- { "force",	0,POPT_BIT_SET,	&db3dbi.dbi_eflags, DB_FORCE,
+ { "log",	0,POPT_BIT_SET,	&db_eflags, DB_INIT_LOG,
 	NULL, NULL },
- { "cdb",	0,POPT_BIT_SET,	&db3dbi.dbi_eflags, DB_INIT_CDB,
+ { "txn",	0,POPT_BIT_SET,	&db_eflags, DB_INIT_TXN,
 	NULL, NULL },
- { "lock",	0,POPT_BIT_SET,	&db3dbi.dbi_eflags, DB_INIT_LOCK,
+ { "recover",	0,POPT_BIT_SET,	&db_eflags, DB_RECOVER,
 	NULL, NULL },
- { "log",	0,POPT_BIT_SET,	&db3dbi.dbi_eflags, DB_INIT_LOG,
+ { "recover_fatal", 0,POPT_BIT_SET,	&db_eflags, DB_RECOVER_FATAL,
 	NULL, NULL },
- { "mpool",	0,POPT_BIT_SET,	&db3dbi.dbi_eflags, DB_INIT_MPOOL,
+ { "lockdown",	0,POPT_BIT_SET,	&db_eflags, DB_LOCKDOWN,
 	NULL, NULL },
- { "txn",	0,POPT_BIT_SET,	&db3dbi.dbi_eflags, DB_INIT_TXN,
-	NULL, NULL },
- { "joinenv",	0,POPT_BIT_SET,	&db3dbi.dbi_eflags, DB_JOINENV,
-	NULL, NULL },
- { "recover",	0,POPT_BIT_SET,	&db3dbi.dbi_eflags, DB_RECOVER,
-	NULL, NULL },
- { "recover_fatal", 0,POPT_BIT_SET,	&db3dbi.dbi_eflags, DB_RECOVER_FATAL,
-	NULL, NULL },
- { "shared",	0,POPT_BIT_SET,	&db3dbi.dbi_eflags, DB_SYSTEM_MEM,
-	NULL, NULL },
- { "txn_nosync", 0,POPT_BIT_SET,	&db3dbi.dbi_eflags, DB_TXN_NOSYNC,
-	NULL, NULL },
- { "use_environ_root", 0,POPT_BIT_SET,	&db3dbi.dbi_eflags, DB_USE_ENVIRON_ROOT,
-	NULL, NULL },
- { "use_environ", 0,POPT_BIT_SET,	&db3dbi.dbi_eflags, DB_USE_ENVIRON,
-	NULL, NULL },
- { "lockdown",	0,POPT_BIT_SET,	&db3dbi.dbi_eflags, DB_LOCKDOWN,
-	NULL, NULL },
- { "private",	0,POPT_BIT_SET,	&db3dbi.dbi_eflags, DB_PRIVATE,
+ { "private",	0,POPT_BIT_SET,	&db_eflags, DB_PRIVATE,
 	NULL, NULL },
 
- { "txn_sync",	0,POPT_BIT_SET,	&db3dbi.dbi_tflags, DB_TXN_SYNC,
+ { "deadlock",	0,POPT_BIT_SET,	&staticcfg.db_verbose, DB_VERB_DEADLOCK,
 	NULL, NULL },
- { "txn_nowait",0,POPT_BIT_SET,	&db3dbi.dbi_tflags, DB_TXN_NOWAIT,
+ { "recovery",	0,POPT_BIT_SET,	&staticcfg.db_verbose, DB_VERB_RECOVERY,
 	NULL, NULL },
-
- { "excl",	0,POPT_BIT_SET,	&db3dbi.dbi_oflags, DB_EXCL,
+ { "waitsfor",	0,POPT_BIT_SET,	&staticcfg.db_verbose, DB_VERB_WAITSFOR,
 	NULL, NULL },
- { "nommap",	0,POPT_BIT_SET,	&db3dbi.dbi_oflags, DB_NOMMAP,
-	NULL, NULL },
- { "rdonly",	0,POPT_BIT_SET,	&db3dbi.dbi_oflags, DB_RDONLY,
-	NULL, NULL },
- { "truncate",	0,POPT_BIT_SET,	&db3dbi.dbi_oflags, DB_TRUNCATE,
-	NULL, NULL },
- { "fcntl_locking",0,POPT_BIT_SET,	&db3dbi.dbi_oflags, DB_FCNTL_LOCKING,
+ { "verbose",	0,POPT_ARG_VAL,		&staticcfg.db_verbose, -1,
 	NULL, NULL },
 
- { "btree",	0,POPT_ARG_VAL,		&db3dbi.dbi_type, DB_BTREE,
+ { "cachesize",	0,POPT_ARG_INT,		&staticcfg.db_cachesize, 0,
 	NULL, NULL },
- { "hash", 	0,POPT_ARG_VAL,		&db3dbi.dbi_type, DB_HASH,
+ { "mmapsize", 0,POPT_ARG_INT,		&staticcfg.db_mmapsize, 0,
 	NULL, NULL },
- { "recno",	0,POPT_ARG_VAL,		&db3dbi.dbi_type, DB_RECNO,
+ { "mp_mmapsize", 0,POPT_ARG_INT,	&staticcfg.db_mmapsize, 0,
 	NULL, NULL },
- { "queue",	0,POPT_ARG_VAL,		&db3dbi.dbi_type, DB_QUEUE,
-	NULL, NULL },
- { "unknown",	0,POPT_ARG_VAL,		&db3dbi.dbi_type, DB_UNKNOWN,
+ { "mp_size",	0,POPT_ARG_INT,		&staticcfg.db_cachesize, 0,
 	NULL, NULL },
 
- { "file",	0,POPT_ARG_STRING,	&db3dbi.dbi_file, 0,
-	NULL, NULL },
- { "subfile",	0,POPT_ARG_STRING,	&db3dbi.dbi_subfile, 0,
-	NULL, NULL },
- { "mode",	0,POPT_ARG_INT,		&db3dbi.dbi_mode, 0,
-	NULL, NULL },
- { "perms",	0,POPT_ARG_INT,		&db3dbi.dbi_perms, 0,
-	NULL, NULL },
- { "shmkey",	0,POPT_ARG_LONG,	&db3dbi.dbi_shmkey, 0,
-	NULL, NULL },
- { "tmpdir",	0,POPT_ARG_STRING,	&db3dbi.dbi_tmpdir, 0,
+ { "nofsync",	0,POPT_ARG_NONE,	&staticcfg.db_no_fsync, 0,
 	NULL, NULL },
 
- { "verify",	0,POPT_ARG_NONE,	&db3dbi.dbi_verify_on_close, 0,
-	NULL, NULL },
- { "usedbenv",	0,POPT_ARG_NONE,	&db3dbi.dbi_use_dbenv, 0,
-	NULL, NULL },
- { "nofsync",	0,POPT_ARG_NONE,	&db3dbi.dbi_no_fsync, 0,
-	NULL, NULL },
- { "nodbsync",	0,POPT_ARG_NONE,	&db3dbi.dbi_no_dbsync, 0,
-	NULL, NULL },
- { "lockdbfd",	0,POPT_ARG_NONE,	&db3dbi.dbi_lockdbfd, 0,
-	NULL, NULL },
- { "temporary",	0,POPT_ARG_NONE,	&db3dbi.dbi_temporary, 0,
-	NULL, NULL },
- { "debug",	0,POPT_ARG_NONE,	&db3dbi.dbi_debug, 0,
+ /* Per-dbi options */
+ { "nommap",	0,POPT_BIT_SET,		&staticdbi.dbi_oflags, DB_NOMMAP,
 	NULL, NULL },
 
- { "cachesize",	0,POPT_ARG_INT,		&db3dbi.dbi_cachesize, 0,
+ { "nodbsync",	0,POPT_ARG_NONE,	&staticdbi.dbi_no_dbsync, 0,
 	NULL, NULL },
- { "errpfx",	0,POPT_ARG_STRING,	&db3dbi.dbi_errpfx, 0,
-	NULL, NULL },
- { "region_init", 0,POPT_ARG_VAL,	&db3dbi.dbi_region_init, 1,
-	NULL, NULL },
- { "tas_spins",	0,POPT_ARG_INT,		&db3dbi.dbi_tas_spins, 0,
-	NULL, NULL },
-
-#if defined(DB_VERB_CHKPOINT)
- { "chkpoint",	0,POPT_BIT_SET,	&db3dbi.dbi_verbose, DB_VERB_CHKPOINT,
-	NULL, NULL },
-#endif
- { "deadlock",	0,POPT_BIT_SET,	&db3dbi.dbi_verbose, DB_VERB_DEADLOCK,
-	NULL, NULL },
- { "recovery",	0,POPT_BIT_SET,	&db3dbi.dbi_verbose, DB_VERB_RECOVERY,
-	NULL, NULL },
- { "waitsfor",	0,POPT_BIT_SET,	&db3dbi.dbi_verbose, DB_VERB_WAITSFOR,
-	NULL, NULL },
- { "verbose",	0,POPT_ARG_VAL,		&db3dbi.dbi_verbose, -1,
-	NULL, NULL },
-
- { "lk_oldest",	0,POPT_ARG_VAL,		&db3dbi.dbi_lk_detect, DB_LOCK_OLDEST,
-	NULL, NULL },
- { "lk_random",	0,POPT_ARG_VAL,		&db3dbi.dbi_lk_detect, DB_LOCK_RANDOM,
-	NULL, NULL },
- { "lk_youngest",0, POPT_ARG_VAL,	&db3dbi.dbi_lk_detect, DB_LOCK_YOUNGEST,
-	NULL, NULL },
-/* XXX lk_conflicts matrix */
- { "lk_max",	0,POPT_ARG_INT,		&db3dbi.dbi_lk_max, 0,
-	NULL, NULL },
-
- { "lg_bsize",	0,POPT_ARG_INT,		&db3dbi.dbi_lg_bsize, 0,
-	NULL, NULL },
- { "lg_max",	0,POPT_ARG_INT,		&db3dbi.dbi_lg_max, 0,
-	NULL, NULL },
-
-/* XXX tx_recover */
- { "tx_max",	0,POPT_ARG_INT,		&db3dbi.dbi_tx_max, 0,
-	NULL, NULL },
-
- { "lorder",	0,POPT_ARG_INT,		&db3dbi.dbi_lorder, 0,
-	NULL, NULL },
-
- { "mmapsize", 0,POPT_ARG_INT,		&db3dbi.dbi_mmapsize, 0,
-	NULL, NULL },
- { "mp_mmapsize", 0,POPT_ARG_INT,	&db3dbi.dbi_mmapsize, 0,
-	NULL, NULL },
- { "mp_size",	0,POPT_ARG_INT,		&db3dbi.dbi_cachesize, 0,
-	NULL, NULL },
- { "pagesize",	0,POPT_ARG_INT,		&db3dbi.dbi_pagesize, 0,
-	NULL, NULL },
-
-/* XXX bt_minkey */
-/* XXX bt_compare */
-/* XXX bt_dup_compare */
-/* XXX bt_prefix */
- { "bt_dup",	0,POPT_BIT_SET,	&db3dbi.dbi_bt_flags, DB_DUP,
-	NULL, NULL },
- { "bt_dupsort",0,POPT_BIT_SET,	&db3dbi.dbi_bt_flags, DB_DUPSORT,
-	NULL, NULL },
- { "bt_recnum",	0,POPT_BIT_SET,	&db3dbi.dbi_bt_flags, DB_RECNUM,
-	NULL, NULL },
- { "bt_revsplitoff", 0,POPT_BIT_SET,	&db3dbi.dbi_bt_flags, DB_REVSPLITOFF,
-	NULL, NULL },
-
- { "h_dup",	0,POPT_BIT_SET,	&db3dbi.dbi_h_flags, DB_DUP,
-	NULL, NULL },
- { "h_dupsort",	0,POPT_BIT_SET,	&db3dbi.dbi_h_flags, DB_DUPSORT,
-	NULL, NULL },
- { "h_ffactor",	0,POPT_ARG_INT,		&db3dbi.dbi_h_ffactor, 0,
-	NULL, NULL },
- { "h_nelem",	0,POPT_ARG_INT,		&db3dbi.dbi_h_nelem, 0,
-	NULL, NULL },
-
- { "re_renumber", 0,POPT_BIT_SET,	&db3dbi.dbi_re_flags, DB_RENUMBER,
-	NULL, NULL },
- { "re_snapshot",0,POPT_BIT_SET,	&db3dbi.dbi_re_flags, DB_SNAPSHOT,
-	NULL, NULL },
- { "re_delim",	0,POPT_ARG_INT,		&db3dbi.dbi_re_delim, 0,
-	NULL, NULL },
- { "re_len",	0,POPT_ARG_INT,		&db3dbi.dbi_re_len, 0,
-	NULL, NULL },
- { "re_pad",	0,POPT_ARG_INT,		&db3dbi.dbi_re_pad, 0,
-	NULL, NULL },
- { "re_source",	0,POPT_ARG_STRING,	&db3dbi.dbi_re_source, 0,
-	NULL, NULL },
-
- { "q_extentsize", 0,POPT_ARG_INT,	&db3dbi.dbi_q_extentsize, 0,
+ { "lockdbfd",	0,POPT_ARG_NONE,	&staticdbi.dbi_lockdbfd, 0,
 	NULL, NULL },
 
     POPT_TABLEEND
 };
 
-dbiIndex db3Free(dbiIndex dbi)
+dbiIndex dbiFree(dbiIndex dbi)
 {
     if (dbi) {
-	dbi->dbi_file = _free(dbi->dbi_file);
-	dbi->dbi_subfile = _free(dbi->dbi_subfile);
-	dbi->dbi_tmpdir = _free(dbi->dbi_tmpdir);
-	dbi->dbi_errpfx = _free(dbi->dbi_errpfx);
-	dbi->dbi_re_source = _free(dbi->dbi_re_source);
-	dbi->dbi_stats = _free(dbi->dbi_stats);
-	dbi = _free(dbi);
+	free(dbi);
     }
-    return dbi;
+    return NULL;
 }
 
-/** @todo Set a reasonable "last gasp" default db config. */
-static const char * const db3_config_default =
-    "db3:hash:mpool:cdb:verbose:mp_mmapsize=8Mb:cachesize=512Kb:pagesize=512:perms=0644";
-
-dbiIndex db3New(rpmdb rpmdb, rpmTag rpmtag)
+dbiIndex dbiNew(rpmdb rdb, rpmDbiTagVal rpmtag)
 {
     dbiIndex dbi = xcalloc(1, sizeof(*dbi));
     char *dbOpts;
@@ -235,7 +92,7 @@ dbiIndex db3New(rpmdb rpmdb, rpmTag rpmtag)
 	dbOpts = _free(dbOpts);
 	dbOpts = rpmExpand("%{_dbi_config}", NULL);
 	if (!(dbOpts && *dbOpts && *dbOpts != '%')) {
-	    dbOpts = rpmExpand(db3_config_default, NULL);
+	    dbOpts = _free(dbOpts);
 	}
     }
 
@@ -244,7 +101,7 @@ dbiIndex db3New(rpmdb rpmdb, rpmTag rpmtag)
 	char *o, *oe;
 	char *p, *pe;
 
-	memset(&db3dbi, 0, sizeof(db3dbi));
+	memset(&staticdbi, 0, sizeof(staticdbi));
 /*=========*/
 	for (o = dbOpts; o && *o; o = oe) {
 	    const struct poptOption *opt;
@@ -355,41 +212,23 @@ dbiIndex db3New(rpmdb rpmdb, rpmTag rpmtag)
 
     dbOpts = _free(dbOpts);
 
-    *dbi = db3dbi;	/* structure assignment */
-    memset(&db3dbi, 0, sizeof(db3dbi));
+    *dbi = staticdbi;	/* structure assignment */
+    memset(&staticdbi, 0, sizeof(staticdbi));
 
-    if (!(dbi->dbi_perms & 0600))
-	dbi->dbi_perms = 0644;
-    dbi->dbi_mode = rpmdb->db_mode;
     /* FIX: figger lib/dbi refcounts */
-    dbi->dbi_rpmdb = rpmdb;
-    dbi->dbi_rpmtag = rpmtag;
-    if (!dbi->dbi_file) dbi->dbi_file = xstrdup(rpmTagGetName(rpmtag));
-    
-    /*
-     * Inverted lists have join length of 2, primary data has join length of 1.
-     */
-    switch (rpmtag) {
-    case RPMDBI_PACKAGES:
-    case RPMDBI_DEPENDS:
-	dbi->dbi_jlen = 1 * sizeof(int32_t);
-	break;
-    default:
-	dbi->dbi_jlen = 2 * sizeof(int32_t);
-	break;
-    }
-
+    dbi->dbi_rpmdb = rdb;
+    dbi->dbi_file = rpmTagGetName(rpmtag);
+    dbi->dbi_type = (rpmtag == RPMDBI_PACKAGES) ? DBI_PRIMARY : DBI_SECONDARY;
     dbi->dbi_byteswapped = -1;	/* -1 unknown, 0 native order, 1 alien order */
 
-    if (!dbi->dbi_use_dbenv) {		/* db3 dbenv is always used now. */
-	dbi->dbi_use_dbenv = 1;
-	dbi->dbi_eflags |= (DB_INIT_MPOOL|DB_JOINENV);
-	dbi->dbi_mmapsize = 16 * 1024 * 1024;
-	dbi->dbi_cachesize = 1 * 1024 * 1024;
+    /* XXX FIXME: Get environment configuration out of here! */
+    if (rdb->db_dbenv == NULL) {
+	struct dbConfig_s * cfg = &rdb->cfg;
+	*cfg = staticcfg;	/* structure assignment */
+	/* Throw in some defaults if configuration didn't set any */
+	if (!cfg->db_mmapsize) cfg->db_mmapsize = 16 * 1024 * 1024;
+	if (!cfg->db_cachesize) cfg->db_cachesize = 8 * 1024 * 1024;
     }
-
-    if ((dbi->dbi_bt_flags | dbi->dbi_h_flags) & DB_DUP)
-	dbi->dbi_permit_dups = 1;
 
     /* FIX: *(rdbOptions->arg) reachable */
     return dbi;
@@ -405,12 +244,10 @@ char * prDbiOpenFlags(int dbflags, int print_dbenv_flags)
 	if (opt->argInfo != POPT_BIT_SET)
 	    continue;
 	if (print_dbenv_flags) {
-	    if (!(opt->arg == &db3dbi.dbi_oeflags ||
-		  opt->arg == &db3dbi.dbi_eflags))
+	    if (!(opt->arg == &db_eflags))
 		continue;
 	} else {
-	    if (!(opt->arg == &db3dbi.dbi_oeflags ||
-		  opt->arg == &db3dbi.dbi_oflags))
+	    if (!(opt->arg == &staticdbi.dbi_oflags))
 		continue;
 	}
 	if ((dbflags & opt->val) != opt->val)
@@ -427,5 +264,5 @@ char * prDbiOpenFlags(int dbflags, int print_dbenv_flags)
     buf = argvJoin(flags, ":");
     argvFree(flags);
 	
-    return buf;
+    return buf ? buf : xstrdup("(none)");
 }

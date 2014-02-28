@@ -97,10 +97,10 @@ static inline unsigned char rnibble(char c)
 {
     if (c >= '0' && c <= '9')
 	return (c - '0');
-    if (c >= 'A' && c <= 'F')
-	return (c - 'A') + 10;
     if (c >= 'a' && c <= 'f')
 	return (c - 'a') + 10;
+    if (c >= 'A' && c <= 'F')
+	return (c - 'A') + 10;
     return 0;
 }
 
@@ -173,48 +173,12 @@ char *rstrscat(char **dest, const char *arg, ...) RPM_GNUC_NULL_TERMINATED;
 size_t rstrlcpy(char *dest, const char *src, size_t n);
 
 /** \ingroup rpmstring
- * Remove occurences of trailing character from string.
- * @param s		string
- * @param c		character to strip
- * @return 		string
+ * String hashing function
+ * @param string	string to hash
+ * @return		hash id
  */
-char * stripTrailingChar(char * s, char c);
-
-/** \ingroup rpmstring
- */
-typedef struct StringBufRec *StringBuf;
-
-/** \ingroup rpmstring
- */
-StringBuf newStringBuf(void);
-
-/** \ingroup rpmstring
- */
-StringBuf freeStringBuf( StringBuf sb);
-
-/** \ingroup rpmstring
- */
-void truncStringBuf(StringBuf sb);
-
-/** \ingroup rpmstring
- */
-char * getStringBuf(StringBuf sb);
-
-/** \ingroup rpmstring
- */
-void stripTrailingBlanksStringBuf(StringBuf sb);
-
-/** \ingroup rpmstring
- */
-#define appendStringBuf(sb, s)     appendStringBufAux(sb, s, 0)
-
-/** \ingroup rpmstring
- */
-#define appendLineStringBuf(sb, s) appendStringBufAux(sb, s, 1)
-
-/** \ingroup rpmstring
- */
-void appendStringBufAux(StringBuf sb, const char * s, int nl);
+RPM_GNUC_PURE
+unsigned int rstrhash(const char * string);
 
 #ifdef __cplusplus
 }

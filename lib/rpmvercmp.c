@@ -15,15 +15,15 @@
 /*       -1: b is newer than a */
 int rpmvercmp(const char * a, const char * b)
 {
+    /* easy comparison to see if versions are identical */
+    if (rstreq(a, b)) return 0;
+
     char oldch1, oldch2;
     char abuf[strlen(a)+1], bbuf[strlen(b)+1];
     char *str1 = abuf, *str2 = bbuf;
     char * one, * two;
     int rc;
     int isnum;
-
-    /* easy comparison to see if versions are identical */
-    if (rstreq(a, b)) return 0;
 
     strcpy(str1, a);
     strcpy(str2, b);
@@ -32,9 +32,18 @@ int rpmvercmp(const char * a, const char * b)
     two = str2;
 
     /* loop through each version segment of str1 and str2 and compare them */
-    while (*one && *two) {
-	while (*one && !risalnum(*one)) one++;
-	while (*two && !risalnum(*two)) two++;
+    while (*one || *two) {
+	while (*one && !risalnum(*one) && *one != '~') one++;
+	while (*two && !risalnum(*two) && *two != '~') two++;
+
+	/* handle the tilde separator, it sorts before everything else */
+	if (*one == '~' || *two == '~') {
+	    if (*one != '~') return 1;
+	    if (*two != '~') return -1;
+	    one++;
+	    two++;
+	    continue;
+	}
 
 	/* If we ran to the end of either, we are finished with the loop */
 	if (!(*one && *two)) break;
@@ -73,6 +82,7 @@ int rpmvercmp(const char * a, const char * b)
 	if (two == str2) return (isnum ? 1 : -1);
 
 	if (isnum) {
+	    size_t onelen, twolen;
 	    /* this used to be done by converting the digit segments */
 	    /* to ints using atoi() - it's changed because long  */
 	    /* digit segments can overflow an int - this should fix that. */
@@ -82,8 +92,10 @@ int rpmvercmp(const char * a, const char * b)
 	    while (*two == '0') two++;
 
 	    /* whichever number has more digits wins */
-	    if (strlen(one) > strlen(two)) return 1;
-	    if (strlen(two) > strlen(one)) return -1;
+	    onelen = strlen(one);
+	    twolen = strlen(two);
+	    if (onelen > twolen) return 1;
+	    if (twolen > onelen) return -1;
 	}
 
 	/* strcmp will return which one is greater - even if the two */
@@ -107,4 +119,25 @@ int rpmvercmp(const char * a, const char * b)
 
     /* whichever version still has characters left over wins */
     if (!*one) return -1; else return 1;
+}
+
+int rpmVersionCompare(Header first, Header second)
+{
+    /* Missing epoch becomes zero here, which is what we want */
+    uint32_t epochOne = headerGetNumber(first, RPMTAG_EPOCH);
+    uint32_t epochTwo = headerGetNumber(second, RPMTAG_EPOCH);
+    int rc;
+
+    if (epochOne < epochTwo)
+	return -1;
+    else if (epochOne > epochTwo)
+	return 1;
+
+    rc = rpmvercmp(headerGetString(first, RPMTAG_VERSION),
+		   headerGetString(second, RPMTAG_VERSION));
+    if (rc)
+	return rc;
+
+    return rpmvercmp(headerGetString(first, RPMTAG_RELEASE),
+		     headerGetString(second, RPMTAG_RELEASE));
 }

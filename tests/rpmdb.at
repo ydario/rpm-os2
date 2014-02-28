@@ -44,6 +44,45 @@ runroot rpm \
 [0])
 AT_CLEANUP
 
+# ------------------------------
+# Run rpm -q <package> where <package> exists in the db.
+AT_SETUP([rpm -q foo])
+AT_KEYWORDS([rpmdb query])
+AT_CHECK([
+RPMDB_CLEAR
+RPMDB_INIT
+
+runroot rpm -i \
+  /data/RPMS/foo-1.0-1.noarch.rpm
+
+runroot rpm -q foo
+
+],
+[0],
+[foo-1.0-1.noarch
+],
+[])
+AT_CLEANUP
+
+# ------------------------------
+# Run rpm -q <package>- where <package> exists in the db.
+AT_SETUP([rpm -q foo-])
+AT_KEYWORDS([rpmdb query])
+AT_CHECK([
+RPMDB_CLEAR
+RPMDB_INIT
+
+runroot rpm -i \
+  /data/RPMS/foo-1.0-1.noarch.rpm
+
+runroot rpm -q foo-
+
+],
+[1],
+[package foo- is not installed
+],
+[])
+AT_CLEANUP
 
 # ------------------------------
 # install a noarch package into a local rpmdb without --relocate and --nodeps
@@ -55,11 +94,8 @@ AT_CHECK([
 RPMDB_CLEAR
 RPMDB_INIT
 
-tpkg="foo-1.0-1.noarch.rpm"
-cp "${RPMDATA}/RPMS/${tpkg}" "${RPMTEST}"
-
 runroot rpm -i \
-  "${tpkg}"
+  /data/RPMS/foo-1.0-1.noarch.rpm
 ],
 [0])
 
@@ -74,12 +110,16 @@ AT_CHECK([
 RPMDB_CLEAR
 RPMDB_INIT
 
-tpkg="foo-1.0-1.noarch.rpm"
-cp "${RPMDATA}/RPMS/${tpkg}" "${RPMTEST}"
+tpkg="/data/RPMS/foo-1.0-1.noarch.rpm"
 
-runroot rpm -i "${tpkg}" && runroot rpm -U --replacepkgs "${tpkg}"
+runroot rpm -i "${tpkg}" && 
+  runroot rpm -U --replacepkgs "${tpkg}" &&
+  runroot rpm -qa
 ],
-[0])
+[0],
+[foo-1.0-1.noarch
+],
+[])
 
 AT_CLEANUP
 
@@ -93,12 +133,9 @@ AT_CHECK([
 RPMDB_CLEAR
 RPMDB_INIT
 
-tpkg="hello-1.0-1.i386.rpm"
-cp "${RPMDATA}/RPMS/${tpkg}" "${RPMTEST}"
-
 runroot rpm -i \
-  --noscripts --nodeps --ignorearch --relocate=/usr="${abs_builddir}"/testing/check \
-  "${tpkg}"
+  --noscripts --nodeps --ignorearch --relocate=/usr=/check \
+  /data/RPMS/hello-1.0-1.i386.rpm
 ],
 [0])
 
@@ -115,12 +152,9 @@ AT_CHECK([
 RPMDB_CLEAR
 RPMDB_INIT
 
-tpkg="hello-1.0-1.ppc64.rpm"
-cp "${RPMDATA}/RPMS/${tpkg}" "${RPMTEST}"
-
 runroot rpm -i \
-  --noscripts --nodeps --ignorearch --relocate=/usr="${abs_builddir}"/testing/check \
-  "${tpkg}"
+  --noscripts --nodeps --ignorearch --relocate=/usr=/check \
+  /data/RPMS/hello-1.0-1.ppc64.rpm
 ],
 [0],
 [ignore],
@@ -128,18 +162,43 @@ runroot rpm -i \
 
 AT_CLEANUP
 
+AT_SETUP([rpmdb --rebuilddb])
+AT_KEYWORDS([rpmdb])
+AT_CHECK([
+RPMDB_CLEAR
+RPMDB_INIT
+
+runroot rpm -U --noscripts --nodeps --ignorearch \
+  /data/RPMS/hello-1.0-1.i386.rpm
+runroot rpm -qa --qf "%{nevra} %{dbinstance}\n"
+runroot rpm -U --noscripts --nodeps --ignorearch \
+  /data/RPMS/hello-2.0-1.i686.rpm
+runroot rpm -qa --qf "%{nevra} %{dbinstance}\n"
+runroot rpmdb --rebuilddb
+runroot rpm -qa --qf "%{nevra} %{dbinstance}\n"
+],
+[],
+[hello-1.0-1.i386 1
+hello-2.0-1.i686 2
+hello-2.0-1.i686 1
+],
+[])
+AT_CLEANUP
+
+
 # ------------------------------
 # Install and verify status
 AT_SETUP([rpm -U and verify status])
 AT_KEYWORDS([install rpmdb query])
 AT_CHECK([
 RPMDB_CLEAR
+RPMDB_INIT
 rm -rf "${TOPDIR}"
 
-run rpmbuild --quiet -bb \
+runroot rpmbuild --quiet -bb \
         --define "pkg status" \
 	--define "filedata same_stuff" \
-          ${RPMDATA}/SPECS/conflicttest.spec
+          /data/SPECS/conflicttest.spec
 
 runroot rpm -U "${TOPDIR}"/RPMS/noarch/conflictstatus-1.0-1.noarch.rpm
 runroot rpm -qls conflictstatus
@@ -156,16 +215,18 @@ AT_SETUP([rpm -U with _install_lang and verify status])
 AT_KEYWORDS([install rpmdb query])
 AT_CHECK([
 RPMDB_CLEAR
+RPMDB_INIT
 rm -rf "${TOPDIR}"
 
-run rpmbuild --quiet -bb \
-          ${RPMDATA}/SPECS/flangtest.spec
+runroot rpmbuild --quiet -bb \
+          /data/SPECS/flangtest.spec
 
 runroot rpm -U --define "_install_langs de:fi" "${TOPDIR}"/RPMS/noarch/flangtest-1.0-1.noarch.rpm
 runroot rpm -qls flangtest
 ],
 [0],
 [normal        /usr/share/flangtest/de.txt
+normal        /usr/share/flangtest/empty.txt
 not installed /usr/share/flangtest/en.txt
 normal        /usr/share/flangtest/fi.txt
 normal        /usr/share/flangtest/none.txt
@@ -180,41 +241,38 @@ AT_SETUP([rpm -U and verify files on disk])
 AT_KEYWORDS([install rpmdb])
 AT_CHECK([
 RPMDB_CLEAR
+RPMDB_INIT
 rm -rf "${TOPDIR}"
-rm -f "${RPMTEST}"/usr/share/my.version
+rm -rf "${RPMTEST}"/opt/*
 
-run rpmbuild --quiet -bb \
-        --define "pkg status" \
-	--define "filedata same_stuff" \
-          ${RPMDATA}/SPECS/conflicttest.spec
-
-runroot rpm -U "${TOPDIR}"/RPMS/noarch/conflictstatus-1.0-1.noarch.rpm
-test -f "${RPMTEST}"/usr/share/my.version
+runroot rpmbuild --quiet -bb /data/SPECS/selfconflict.spec
+runroot rpm -U "${TOPDIR}"/RPMS/noarch/selfconflict-1.0-1.noarch.rpm
+find "${RPMTEST}"/opt | wc -l
 ],
 [0],
-[],
+[6
+],
 [])
 AT_CLEANUP
 
 # ------------------------------
-# Install, erase and verify files removed from disk
+# Install, erase and oerify files removed from disk
+# Note /opt is not owned by the pkg so it gets left behind
 AT_SETUP([rpm -e and verify files removed])
 AT_KEYWORDS([install rpmdb])
 AT_CHECK([
 RPMDB_CLEAR
+RPMDB_INIT
 rm -rf "${TOPDIR}"
-rm -f "${RPMTEST}"/usr/share/my.version
+rm -rf "${RPMTEST}"/opt/*
 
-run rpmbuild --quiet -bb \
-        --define "pkg status" \
-	--define "filedata same_stuff" \
-          ${RPMDATA}/SPECS/conflicttest.spec
-
-runroot rpm -U "${TOPDIR}"/RPMS/noarch/conflictstatus-1.0-1.noarch.rpm
-runroot rpm -e conflictstatus
-test -f "${RPMTEST}"/usr/share/my.version
+runroot rpmbuild --quiet -bb /data/SPECS/selfconflict.spec
+runroot rpm -U "${TOPDIR}"/RPMS/noarch/selfconflict-1.0-1.noarch.rpm
+runroot rpm -e selfconflict
+find "${RPMTEST}"/opt | wc -l
 ],
-[1],
-[],
+[0],
+[1
+],
 [])
 AT_CLEANUP

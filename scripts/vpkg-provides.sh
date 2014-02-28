@@ -49,9 +49,9 @@
 usage="usage: $0 --spec_header '/path/to/os-base-header.spec' \n"
 usage="$usage\t[--find_provides '/path/to/find-provides']\n"
 usage="$usage\t[--shlib_dirs 'dirs:which:contain:shared:libs']\n"
-usage="$usage\t[--ignore_dirs 'egrep|pattern|of|paths|to|ignore']\n"
+usage="$usage\t[--ignore_dirs 'grep-E|pattern|of|paths|to|ignore']\n"
 
-# these two should be unnessary as the regular dependency analysis
+# these two should be unnecessary as the regular dependency analysis
 # should take care of interpreters as well as shared libraries.
 
 usage="$usage\t[--interp_dirs 'dirs:which:contain:interpreters']\n"
@@ -67,10 +67,10 @@ sum_cmd="xargs cksum"
 date=`date`
 hostname=`uname -n`
 
-# if some subdirectories of the system directories needs to be ignored
+# if some subdirectories of the system directories need to be ignored
 # (eg /usr/local is a subdirectory of /usr but should not be part of
 # the virtual package) then call this script with ignore_dirs set to a
-# vaild egrep pattern which discribes the directories to ignored.
+# valid grep -E pattern which describes the directories to ignore.
 
 PATH=/bin:/usr/bin:/sbin:/usr/sbin:/usr/ucb:/usr/bsd
 export PATH
@@ -207,7 +207,7 @@ do
 done
 
 
-# consistancy checks on the arguments
+# consistency checks on the arguments
 
 if [ ! -f $spec_header ]; then
 	echo "You must pass me the full path to the partial spec file"
@@ -232,7 +232,7 @@ fi
 
 
 
-provides_tmp=/tmp/provides.$$
+provides_tmp=${TMPDIR:-/tmp}/provides.$$
 if test -f $provides_tmp ; then
 	echo "$provides_tmp already exists.  Exiting."
 	exit 11
@@ -244,10 +244,10 @@ fi
 #
 for d in `echo $shlib_dirs | sed -e 's/:/ /g'`
 do
-	find $d -type f -print 2>/dev/null | egrep -v \'$ignore_dirs\' | $find_provides >> $provides_tmp
+	find $d -type f -print 2>/dev/null | grep -E -v \'$ignore_dirs\' | $find_provides >> $provides_tmp
 done
 
-sum_tmp=/tmp/sum.$$
+sum_tmp=${TMPDIR:-/tmp}/sum.$$
 if test -f $sum_tmp ; then
 	echo "$sum_tmp already exists.  Exiting."
 	exit 11
@@ -258,7 +258,7 @@ fi
 #
 for d in `echo $shlib_dirs | sed -e 's/:/ /g'`
 do
-	find $d -type f -print 2>/dev/null | egrep -v \'$ignore_dirs\' | $sum_cmd >> $sum_tmp
+	find $d -type f -print 2>/dev/null | grep -E -v \'$ignore_dirs\' | $sum_cmd >> $sum_tmp
 done
 
 
@@ -294,7 +294,7 @@ cat $spec_header
 } | sed -e 's/%/%%/g'
 
 #
-# Output the discription of the spec file
+# Output the description of the spec file
 #
 
 cat <<_EIEIO_
@@ -347,13 +347,13 @@ cat <<_EIEIO_
 PATH=/bin:/usr/bin:/sbin:/usr/sbin:/usr/ucb:/usr/bsd
 export PATH
 
-sum_current_tmp=/tmp/rpm.sum.current.\$\$
+sum_current_tmp=\${TMPDIR:-/tmp}/rpm.sum.current.\$\$
 if test -f \$sum_current_tmp ; then
 	echo "\$sum_current_tmp already exists.  Exiting."
 	exit 11
 fi
 
-sum_package_tmp=/tmp/rpm.sum.package.\$\$
+sum_package_tmp=\${TMPDIR:-/tmp}/rpm.sum.package.\$\$
 if test -f \$sum_package_tmp ; then
 	echo "\$sum_package_tmp already exists.  Exiting."
 	exit 11
@@ -361,7 +361,7 @@ fi
 
 for d in `echo $shlib_dirs | sed -e 's/:/ /g'`
 do
-	find \$d -type f -print 2>/dev/null | egrep -v \'$ignore_dirs\' | $sum_cmd >> \$sum_current_tmp
+	find \$d -type f -print 2>/dev/null | grep -E -v \'$ignore_dirs\' | $sum_cmd >> \$sum_current_tmp
 done
 
 cat >\$sum_package_tmp <<_EOF_

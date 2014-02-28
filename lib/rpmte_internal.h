@@ -3,70 +3,48 @@
 
 #include <rpm/rpmte.h>
 #include <rpm/rpmds.h>
+#include "lib/rpmfs.h"
+
+typedef enum pkgGoal_e {
+    PKG_NONE		= 0,
+    /* permit using rpmteType() for install + erase goals */
+    PKG_INSTALL		= TR_ADDED,
+    PKG_ERASE		= TR_REMOVED,
+    /* permit using scriptname for these for now... */
+    PKG_VERIFY		= RPMTAG_VERIFYSCRIPT,
+    PKG_PRETRANS	= RPMTAG_PRETRANS,
+    PKG_POSTTRANS	= RPMTAG_POSTTRANS,
+} pkgGoal;
 
 /** \ingroup rpmte
- * Dependncy ordering information.
+ * Transaction element ordering chain linkage.
  */
+typedef struct tsortInfo_s *		tsortInfo;
 
-struct relation_s {
-    rpmte   rel_suc;  // pkg requiring this package
-    rpmsenseFlags rel_flags; // accumulated flags of the requirements
-    struct relation_s * rel_next;
-};
-
-typedef struct relation_s * relation;
-
-struct tsortInfo_s {
-    int	     tsi_count;     // #pkgs this pkg requires
-    int	     tsi_qcnt;      // #pkgs requiring this package
-    int	     tsi_reqx;       // requires Idx/mark as (queued/loop)
-    struct relation_s * tsi_relations;
-    struct relation_s * tsi_forward_relations;
-    rpmte    tsi_suc;        // used for queuing (addQ)
-    int      tsi_SccIdx;     // # of the SCC the node belongs to
-                             // (1 for trivial SCCs)
-    int      tsi_SccLowlink; // used for SCC detection
-};
-
-/**
- */
-typedef struct sharedFileInfo_s *		sharedFileInfo;
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 /** \ingroup rpmte
- * Transaction element file states.
+ * Create a transaction element.
+ * @param ts		transaction set
+ * @param h		header
+ * @param type		TR_ADDED/TR_REMOVED
+ * @param key		(TR_ADDED) package retrieval key (e.g. file name)
+ * @param relocs	(TR_ADDED) package file relocations
+ * @return		new transaction element
  */
-typedef struct rpmfs_s *		rpmfs;
+RPM_GNUC_INTERNAL
+rpmte rpmteNew(rpmts ts, Header h, rpmElementType type, fnpyKey key,
+	       rpmRelocation * relocs);
 
-/**
+/** \ingroup rpmte
+ * Destroy a transaction element.
+ * @param te		transaction element
+ * @return		NULL always
  */
-struct sharedFileInfo_s {
-    int pkgFileNum;
-    int otherPkg;
-    int otherFileNum;
-};
-
-typedef char rpm_fstate_t;
-
-struct rpmfs_s {
-    unsigned int fc;
-
-    rpm_fstate_t * states;
-    rpmFileAction * actions;	/*!< File disposition(s). */
-
-    sharedFileInfo replaced;	/*!< (TR_ADDED) to be replaced files in the rpmdb */
-    int numReplaced;
-    int allocatedReplaced;
-};
-
-/**
- * Iterator across transaction elements, forward on install, backward on erase.
- */
-struct rpmtsi_s {
-    rpmts ts;		/*!< transaction set. */
-    int reverse;	/*!< reversed traversal? */
-    int ocsave;		/*!< last returned iterator index. */
-    int oc;		/*!< iterator index. */
-};
+RPM_GNUC_INTERNAL
+rpmte rpmteFree(rpmte te);
 
 RPM_GNUC_INTERNAL
 rpmfi rpmteSetFI(rpmte te, rpmfi fi);
@@ -75,58 +53,36 @@ RPM_GNUC_INTERNAL
 FD_t rpmteSetFd(rpmte te, FD_t fd);
 
 RPM_GNUC_INTERNAL
-int rpmteOpen(rpmte te, rpmts ts, int reload_fi);
+FD_t rpmtePayload(rpmte te);
 
 RPM_GNUC_INTERNAL
-int rpmteClose(rpmte te, rpmts ts, int reset_fi);
+int rpmteProcess(rpmte te, pkgGoal goal);
 
 RPM_GNUC_INTERNAL
-int rpmteMarkFailed(rpmte te, rpmts ts);
+void rpmteAddProblem(rpmte te, rpmProblemType type,
+                     const char *altNEVR, const char *str, uint64_t number);
 
 RPM_GNUC_INTERNAL
-int rpmteHaveTransScript(rpmte te, rpmTag tag);
+void rpmteAddDepProblem(rpmte te, const char * pkgNEVR, rpmds ds,
+		        fnpyKey * suggestedKeys);
 
 RPM_GNUC_INTERNAL
-rpmps rpmteProblems(rpmte te);
+void rpmteAddRelocProblems(rpmte te);
 
-//RPM_GNUC_INTERNAL
+RPM_GNUC_INTERNAL
+const char * rpmteTypeString(rpmte te);
+
+RPM_GNUC_INTERNAL
+tsortInfo rpmteTSI(rpmte te);
+
+RPM_GNUC_INTERNAL
+void rpmteSetTSI(rpmte te, tsortInfo tsi);
+
+RPM_GNUC_INTERNAL
+int rpmteHaveTransScript(rpmte te, rpmTagVal tag);
+
+/* XXX should be internal too but build code needs for now... */
 rpmfs rpmteGetFileStates(rpmte te);
-
-RPM_GNUC_INTERNAL
-rpmfs rpmfsNew(unsigned int fc, rpmElementType type);
-
-RPM_GNUC_INTERNAL
-rpmfs rpmfsFree(rpmfs fs);
-
-RPM_GNUC_INTERNAL
-rpm_count_t rpmfsFC(rpmfs fs);
-
-RPM_GNUC_INTERNAL
-void rpmfsAddReplaced(rpmfs fs, int pkgFileNum, int otherPkg, int otherFileNum);
-
-RPM_GNUC_INTERNAL
-sharedFileInfo rpmfsGetReplaced(rpmfs fs);
-
-RPM_GNUC_INTERNAL
-sharedFileInfo rpmfsNextReplaced(rpmfs fs , sharedFileInfo replaced);
-
-RPM_GNUC_INTERNAL
-void rpmfsSetState(rpmfs fs, unsigned int ix, rpmfileState state);
-
-RPM_GNUC_INTERNAL
-rpmfileState rpmfsGetState(rpmfs fs, unsigned int ix);
-
-/*
- * May return NULL
- */
-RPM_GNUC_INTERNAL
-rpm_fstate_t * rpmfsGetStates(rpmfs fs);
-
-RPM_GNUC_INTERNAL
-rpmFileAction rpmfsGetAction(rpmfs fs, unsigned int ix);
-
-//RPM_GNUC_INTERNAL
-void rpmfsSetAction(rpmfs fs, unsigned int ix, rpmFileAction action);
 
 /* XXX here for now... */
 /**
@@ -139,6 +95,66 @@ void rpmfsSetAction(rpmfs fs, unsigned int ix, rpmFileAction action);
  */
 RPM_GNUC_INTERNAL
 void rpmRelocateFileList(rpmRelocation *relocs, int numRelocations, rpmfs fs, Header h);
+
+/** \ingroup rpmte
+ * Retrieve size in bytes of package header.
+ * @param te		transaction element
+ * @return		size in bytes of package file.
+ */
+RPM_GNUC_INTERNAL
+unsigned int rpmteHeaderSize(rpmte te);
+
+/**
+ * Package state machine driver.
+ * @param ts		transaction set
+ * @param te		transaction element
+ * @param goal		state machine goal
+ * @return		0 on success
+ */
+RPM_GNUC_INTERNAL
+rpmRC rpmpsmRun(rpmts ts, rpmte te, pkgGoal goal);
+
+/** \ingroup rpmte
+ * Add a collection to the list of last collections for the installation
+ * section of a transaction element
+ * @param te		transaction element
+ * @param collname		collection name
+ * @return		0 on success, non-zero on error
+ */
+RPM_GNUC_INTERNAL
+int rpmteAddToLastInCollectionAdd(rpmte te, const char * collname);
+
+/** \ingroup rpmte
+ * Add a collection to the list of last collections for the installation
+ * or removal section of a transaction element
+ * @param te		transaction element
+ * @param collname		collection name
+ * @return		0 on success, non-zero on error
+ */
+RPM_GNUC_INTERNAL
+int rpmteAddToLastInCollectionAny(rpmte te, const char * collname);
+
+/** \ingroup rpmte
+ * Add a collection to the list of first collections for the removal
+ * section of a transaction element
+ * @param te		transaction element
+ * @param collname		collection name
+ * @return		0 on success, non-zero on error
+ */
+RPM_GNUC_INTERNAL
+int rpmteAddToFirstInCollectionRemove(rpmte te, const char * collname);
+
+/** \ingroup rpmte
+ * Sends the open te plugin hook for each plugins with the transaction element open
+ * @param te		transaction element
+ * @return		0 on success, non-zero on error
+ */
+RPM_GNUC_INTERNAL
+rpmRC rpmteSetupCollectionPlugins(rpmte te);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif	/* _RPMTE_INTERNAL_H */
 

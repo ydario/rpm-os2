@@ -25,8 +25,8 @@ AT_KEYWORDS([install])
 AT_CHECK([
 rm -rf ${TOPDIR}
 
-run rpm \
-  -U "${abs_srcdir}"/data/SRPMS/hello-1.0-1.src.rpm
+runroot rpm \
+  -U /data/SRPMS/hello-1.0-1.src.rpm
 ],
 [0],
 [ignore],
@@ -40,8 +40,8 @@ AT_KEYWORDS([install])
 AT_CHECK([
 rm -rf ${TOPDIR}
 
-run rpm \
-  -i "${abs_srcdir}"/data/SRPMS/hello-1.0-1.src.rpm
+runroot rpm \
+  -i /data/SRPMS/hello-1.0-1.src.rpm
 ],
 [0],
 [ignore],
@@ -54,7 +54,7 @@ AT_CLEANUP
 AT_SETUP([rpm -i <nonexistent file>])
 AT_KEYWORDS([install])
 AT_CHECK([
-run rpm \
+runroot rpm \
   -i no_such_file
 ],
 [1],
@@ -72,8 +72,8 @@ no_such.file
 not_an.rpm
 EOF
 
-run rpm \
-  -Uvv --nomanifest "${junk}"
+runroot rpm \
+  -Uvv --nomanifest /textfile
 ],
 [1],
 [ignore],
@@ -86,13 +86,237 @@ AT_CHECK([
 junk="${RPMTEST}/not_an.rpm"
 cat << EOF > "${junk}"
 no_such.file
-not_an.rpm
+not_pkg.rpm
 EOF
 
-run rpm \
-  -Uvv "${junk}"
+runroot rpm \
+  -Uvv /not_an.rpm
 ],
 [2],
 [ignore],
 [ignore])
+AT_CLEANUP
+
+# ------------------------------
+# Test normal upgrade
+AT_SETUP([rpm -U upgrade to newer])
+AT_CHECK([
+RPMDB_CLEAR
+RPMDB_INIT
+rm -rf "${TOPDIR}"
+
+for v in "1.0" "2.0"; do
+    runroot rpmbuild --quiet -bb \
+        --define "ver $v" \
+          /data/SPECS/versiontest.spec
+done
+
+runroot rpm -U "${TOPDIR}"/RPMS/noarch/versiontest-1.0-1.noarch.rpm
+runroot rpm -U "${TOPDIR}"/RPMS/noarch/versiontest-2.0-1.noarch.rpm
+runroot rpm -q versiontest
+],
+[0],
+[versiontest-2.0-1.noarch
+],
+[])
+AT_CLEANUP
+
+# Test upgrading to older package (should fail)
+AT_SETUP([rpm -U upgrade to older])
+AT_CHECK([
+RPMDB_CLEAR
+RPMDB_INIT
+
+runroot rpm -U "${TOPDIR}"/RPMS/noarch/versiontest-2.0-1.noarch.rpm
+runroot rpm -U "${TOPDIR}"/RPMS/noarch/versiontest-1.0-1.noarch.rpm
+],
+[2],
+[],
+[	package versiontest-2.0-1.noarch (which is newer than versiontest-1.0-1.noarch) is already installed
+])
+AT_CLEANUP
+
+# Test downgrading to older package with --oldpackage
+AT_SETUP([rpm -U --oldpackage downgrade])
+AT_CHECK([
+RPMDB_CLEAR
+RPMDB_INIT
+
+runroot rpm -U "${TOPDIR}"/RPMS/noarch/versiontest-2.0-1.noarch.rpm
+runroot rpm -U --oldpackage "${TOPDIR}"/RPMS/noarch/versiontest-1.0-1.noarch.rpm
+runroot rpm -q versiontest
+],
+[0],
+[versiontest-1.0-1.noarch
+],
+[ignore])
+AT_CLEANUP
+
+# Test upgrade of different versions in same transaction
+AT_SETUP([rpm -U two versions of same package 1])
+AT_CHECK([
+RPMDB_CLEAR
+RPMDB_INIT
+
+runroot rpm -Uv \
+  "${TOPDIR}"/RPMS/noarch/versiontest-1.0-1.noarch.rpm \
+  "${TOPDIR}"/RPMS/noarch/versiontest-2.0-1.noarch.rpm
+runroot rpm -q versiontest
+],
+[0],
+[Preparing packages...
+versiontest-2.0-1.noarch
+versiontest-2.0-1.noarch
+],
+[warning: package versiontest-1.0-1.noarch was already added, replacing with versiontest-2.0-1.noarch
+])
+AT_CLEANUP
+
+# Test upgrade of different versions in same transaction
+AT_SETUP([rpm -U two versions of same package 2])
+AT_CHECK([
+RPMDB_CLEAR
+RPMDB_INIT
+
+runroot rpm -Uv \
+  "${TOPDIR}"/RPMS/noarch/versiontest-2.0-1.noarch.rpm \
+  "${TOPDIR}"/RPMS/noarch/versiontest-1.0-1.noarch.rpm
+runroot rpm -q versiontest
+],
+[0],
+[Preparing packages...
+versiontest-2.0-1.noarch
+versiontest-2.0-1.noarch
+],
+[warning: package versiontest-2.0-1.noarch was already added, skipping versiontest-1.0-1.noarch
+])
+AT_CLEANUP
+
+# Test upgrade of obsoleted package in same transaction
+AT_SETUP([rpm -U obsoleted package 1])
+AT_CHECK([
+RPMDB_CLEAR
+RPMDB_INIT
+
+runroot rpmbuild --quiet -bb \
+	--define "pkg one" \
+	--define "obs deptest-two" \
+	/data/SPECS/deptest.spec
+runroot rpmbuild --quiet -bb \
+	--define "pkg two" \
+	/data/SPECS/deptest.spec
+
+
+runroot rpm -Uv \
+  "${TOPDIR}"/RPMS/noarch/deptest-two-1.0-1.noarch.rpm \
+  "${TOPDIR}"/RPMS/noarch/deptest-one-1.0-1.noarch.rpm
+runroot rpm -q deptest-one
+],
+[0],
+[Preparing packages...
+deptest-one-1.0-1.noarch
+deptest-one-1.0-1.noarch
+],
+[warning: package deptest-two-1.0-1.noarch was already added, replacing with deptest-one-1.0-1.noarch
+])
+AT_CLEANUP
+
+# Test upgrade of obsoleted package in same transaction
+AT_SETUP([rpm -U obsoleted package 2])
+AT_CHECK([
+RPMDB_CLEAR
+RPMDB_INIT
+
+runroot rpmbuild --quiet -bb \
+	--define "pkg one" \
+	--define "obs deptest-two" \
+	/data/SPECS/deptest.spec
+runroot rpmbuild --quiet -bb \
+	--define "pkg two" \
+	/data/SPECS/deptest.spec
+
+
+runroot rpm -Uv \
+  "${TOPDIR}"/RPMS/noarch/deptest-one-1.0-1.noarch.rpm \
+  "${TOPDIR}"/RPMS/noarch/deptest-two-1.0-1.noarch.rpm
+runroot rpm -q deptest-one
+],
+[0],
+[Preparing packages...
+deptest-one-1.0-1.noarch
+deptest-one-1.0-1.noarch
+],
+[warning: package deptest-one-1.0-1.noarch was already added, skipping deptest-two-1.0-1.noarch
+])
+AT_CLEANUP
+
+# Test install of two different versions in same transaction
+AT_SETUP([rpm -i two versions of same package])
+AT_CHECK([
+RPMDB_CLEAR
+RPMDB_INIT
+
+runroot rpm -i \
+  "${TOPDIR}"/RPMS/noarch/versiontest-1.0-1.noarch.rpm \
+  "${TOPDIR}"/RPMS/noarch/versiontest-2.0-1.noarch.rpm
+runroot rpm -q versiontest
+],
+[0],
+[versiontest-2.0-1.noarch
+versiontest-1.0-1.noarch
+],
+[])
+AT_CLEANUP
+
+# Test install of two different versions in same transaction
+# TODO: test only one was installed
+AT_SETUP([rpm -i identical versions of same package])
+AT_CHECK([
+RPMDB_CLEAR
+RPMDB_INIT
+
+runroot rpm -i \
+  "${TOPDIR}"/RPMS/noarch/versiontest-1.0-1.noarch.rpm \
+  "${TOPDIR}"/RPMS/noarch/versiontest-1.0-1.noarch.rpm
+runroot rpm -q versiontest
+],
+[0],
+[versiontest-1.0-1.noarch
+],
+[])
+AT_CLEANUP
+
+# TODO: the same with epoch vs no epoch
+
+AT_SETUP([rpm -U with invalid --relocate])
+AT_KEYWORDS([install relocate])
+AT_CHECK([
+RPMDB_CLEAR
+RPMDB_INIT
+
+runroot rpmbuild --quiet -bb /data/SPECS/hello-script.spec
+
+runroot rpm -U --test --ignoreos --relocate /usr=/opt \
+  "${TOPDIR}"/RPMS/noarch/hello-script-1.0-1.noarch.rpm
+],
+[1],
+[],
+[	path /usr in package hello-script-1.0-1.noarch is not relocatable
+])
+AT_CLEANUP
+
+AT_SETUP([rpm -U --badreloc with invalid --relocate])
+AT_KEYWORDS([install relocate])
+AT_CHECK([
+RPMDB_CLEAR
+RPMDB_INIT
+
+runroot rpmbuild --quiet -bb /data/SPECS/hello-script.spec
+
+runroot rpm -U --test --ignoreos --badreloc --relocate /usr=/opt \
+  "${TOPDIR}"/RPMS/noarch/hello-script-1.0-1.noarch.rpm
+],
+[0],
+[],
+[])
 AT_CLEANUP

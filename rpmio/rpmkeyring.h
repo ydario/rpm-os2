@@ -41,18 +41,20 @@ int rpmKeyringAddKey(rpmKeyring keyring, rpmPubkey key);
 rpmRC rpmKeyringLookup(rpmKeyring keyring, pgpDig sig);
 
 /** \ingroup rpmkeyring
+ * Perform combined keyring lookup and signature verification
+ * @param keyring	keyring handle
+ * @param sig		OpenPGP signature parameters
+ * @param ctx		signature hash context
+ * @return		RPMRC_OK / RPMRC_FAIL / RPMRC_NOKEY
+ */
+rpmRC rpmKeyringVerifySig(rpmKeyring keyring, pgpDigParams sig, DIGEST_CTX ctx);
+
+/** \ingroup rpmkeyring
  * Reference a keyring.
  * @param keyring	keyring handle
  * @return		new keyring reference
  */
 rpmKeyring rpmKeyringLink(rpmKeyring keyring);
-
-/** \ingroup rpmkeyring
- * Unreference a keyring.
- * @param keyring	keyring handle
- * @return		NULL always
- */
-rpmKeyring rpmKeyringUnlink(rpmKeyring keyring);
 
 /** \ingroup rpmkeyring
  * Create a new rpmPubkey from OpenPGP packet
@@ -82,13 +84,6 @@ rpmPubkey rpmPubkeyFree(rpmPubkey key);
  * @return		new pubkey reference
  */
 rpmPubkey rpmPubkeyLink(rpmPubkey key);
-
-/** \ingroup rpmkeyring
- * Unreference a pubkey.
- * @param key		Pubkey
- * @return		NULL always
- */
-rpmPubkey rpmPubkeyUnlink(rpmPubkey key);
 
 /** \ingroup rpmkeyring
  * Parse OpenPGP pubkey parameters.

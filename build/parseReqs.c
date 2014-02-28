@@ -5,9 +5,11 @@
 
 #include "system.h"
 
+#include <ctype.h>
 #include <rpm/rpmtypes.h>
-#include <rpm/rpmbuild.h>
 #include <rpm/rpmlog.h>
+#include "build/rpmbuild_internal.h"
+#include "build/rpmbuild_misc.h"
 #include "debug.h"
 
 /**
@@ -33,62 +35,62 @@ const char * token;
 #define	SKIPWHITE(_x)	{while(*(_x) && (risspace(*_x) || *(_x) == ',')) (_x)++;}
 #define	SKIPNONWHITE(_x){while(*(_x) &&!(risspace(*_x) || *(_x) == ',')) (_x)++;}
 
-rpmRC parseRCPOT(rpmSpec spec, Package pkg, const char *field, rpmTag tagN,
+rpmRC parseRCPOT(rpmSpec spec, Package pkg, const char *field, rpmTagVal tagN,
 	       int index, rpmsenseFlags tagflags)
 {
     const char *r, *re, *v, *ve;
+    const char *emsg = NULL;
     char * N = NULL, * EVR = NULL;
+    rpmTagVal nametag = RPMTAG_NOT_FOUND;
     rpmsenseFlags Flags;
-    Header h;
     rpmRC rc = RPMRC_FAIL; /* assume failure */
 
     switch (tagN) {
+    default:
+    case RPMTAG_REQUIREFLAGS:
+	nametag = RPMTAG_REQUIRENAME;
+	tagflags |= RPMSENSE_ANY;
+	break;
     case RPMTAG_PROVIDEFLAGS:
-	tagflags |= RPMSENSE_PROVIDES;
-	h = pkg->header;
+	nametag = RPMTAG_PROVIDENAME;
 	break;
     case RPMTAG_OBSOLETEFLAGS:
-	tagflags |= RPMSENSE_OBSOLETES;
-	h = pkg->header;
+	nametag = RPMTAG_OBSOLETENAME;
 	break;
     case RPMTAG_CONFLICTFLAGS:
-	tagflags |= RPMSENSE_CONFLICTS;
-	h = pkg->header;
+	nametag = RPMTAG_CONFLICTNAME;
 	break;
-    case RPMTAG_BUILDCONFLICTS:
-	tagflags |= RPMSENSE_CONFLICTS;
-	h = spec->buildRestrictions;
+    case RPMTAG_ORDERFLAGS:
+	nametag = RPMTAG_ORDERNAME;
 	break;
     case RPMTAG_PREREQ:
 	/* XXX map legacy PreReq into Requires(pre,preun) */
+	nametag = RPMTAG_REQUIRENAME;
 	tagflags |= (RPMSENSE_SCRIPT_PRE|RPMSENSE_SCRIPT_PREUN);
-	h = pkg->header;
 	break;
     case RPMTAG_TRIGGERPREIN:
+	nametag = RPMTAG_TRIGGERNAME;
 	tagflags |= RPMSENSE_TRIGGERPREIN;
-	h = pkg->header;
 	break;
     case RPMTAG_TRIGGERIN:
+	nametag = RPMTAG_TRIGGERNAME;
 	tagflags |= RPMSENSE_TRIGGERIN;
-	h = pkg->header;
 	break;
     case RPMTAG_TRIGGERPOSTUN:
+	nametag = RPMTAG_TRIGGERNAME;
 	tagflags |= RPMSENSE_TRIGGERPOSTUN;
-	h = pkg->header;
 	break;
     case RPMTAG_TRIGGERUN:
+	nametag = RPMTAG_TRIGGERNAME;
 	tagflags |= RPMSENSE_TRIGGERUN;
-	h = pkg->header;
 	break;
     case RPMTAG_BUILDPREREQ:
     case RPMTAG_BUILDREQUIRES:
+	nametag = RPMTAG_REQUIRENAME;
 	tagflags |= RPMSENSE_ANY;
-	h = spec->buildRestrictions;
 	break;
-    default:
-    case RPMTAG_REQUIREFLAGS:
-	tagflags |= RPMSENSE_ANY;
-	h = pkg->header;
+    case RPMTAG_BUILDCONFLICTS:
+	nametag = RPMTAG_CONFLICTNAME;
 	break;
     }
 
@@ -104,9 +106,7 @@ rpmRC parseRCPOT(rpmSpec spec, Package pkg, const char *field, rpmTag tagN,
 	 * the spec's encoding so we only check what we can: plain ascii.
 	 */
 	if (isascii(r[0]) && !(risalnum(r[0]) || r[0] == '_' || r[0] == '/')) {
-	    rpmlog(RPMLOG_ERR,
-		     _("line %d: Dependency tokens must begin with alpha-numeric, '_' or '/': %s\n"),
-		     spec->lineNum, spec->line);
+	    emsg = _("Dependency tokens must begin with alpha-numeric, '_' or '/'");
 	    goto exit;
 	}
 
@@ -131,24 +131,10 @@ rpmRC parseRCPOT(rpmSpec spec, Package pkg, const char *field, rpmTag tagN,
 		continue;
 
 	    if (r[0] == '/') {
-		rpmlog(RPMLOG_ERR,
-			 _("line %d: Versioned file name not permitted: %s\n"),
-			 spec->lineNum, spec->line);
+		emsg = _("Versioned file name not permitted");
 		goto exit;
 	    }
 
-	    switch(tagN) {
-	    case RPMTAG_BUILDPREREQ:
-	    case RPMTAG_PREREQ:
-	    case RPMTAG_PROVIDEFLAGS:
-	    case RPMTAG_OBSOLETEFLAGS:
-		/* Add prereq on rpmlib that has versioned dependencies. */
-		if (!rpmExpandNumeric("%{?_noVersionedDependencies}"))
-		    (void) rpmlibNeedsFeature(h, "VersionedDependencies", "3.0.3-1");
-		break;
-	    default:
-		break;
-	    }
 	    Flags |= rc->sense;
 
 	    /* now parse EVR */
@@ -162,20 +148,18 @@ rpmRC parseRCPOT(rpmSpec spec, Package pkg, const char *field, rpmTag tagN,
 
 	if (Flags & RPMSENSE_SENSEMASK) {
 	    if (*v == '\0' || ve == v) {
-		rpmlog(RPMLOG_ERR, _("line %d: Version required: %s\n"),
-			spec->lineNum, spec->line);
+		emsg = _("Version required");
 		goto exit;
 	    }
 	    EVR = xmalloc((ve-v) + 1);
 	    rstrlcpy(EVR, v, (ve-v) + 1);
-	    if (rpmCharCheck(spec, EVR, ve-v, ".-_+:%{}")) goto exit;
+	    if (rpmCharCheck(spec, EVR, ve-v, ".-_+:%{}~")) goto exit;
 	    re = ve;	/* ==> next token after EVR string starts here */
 	} else
 	    EVR = NULL;
 
-	if (addReqProv(spec, h, tagN, N, EVR, Flags, index)) {
-	    rpmlog(RPMLOG_ERR, _("line %d: invalid dependency: %s\n"),
-		   spec->lineNum, spec->line);
+	if (addReqProv(pkg, nametag, N, EVR, Flags, index)) {
+	    emsg = _("invalid dependency");
 	    goto exit;
 	}
 
@@ -186,6 +170,15 @@ rpmRC parseRCPOT(rpmSpec spec, Package pkg, const char *field, rpmTag tagN,
     rc = RPMRC_OK;
 
 exit:
+    if (emsg) {
+	/* Automatic dependencies don't relate to spec lines */
+	if (tagflags & (RPMSENSE_FIND_REQUIRES|RPMSENSE_FIND_PROVIDES)) {
+	    rpmlog(RPMLOG_ERR, "%s: %s\n", emsg, r);
+	} else {
+	    rpmlog(RPMLOG_ERR, _("line %d: %s: %s\n"),
+		   spec->lineNum, emsg, spec->line);
+	}
+    }
     free(N);
     free(EVR);
 

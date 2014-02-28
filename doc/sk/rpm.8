@@ -336,7 +336,7 @@ Ignoruje chyby kontrolných súčtov MD5 počas kontroly.
 .IP "\fB\-\-nopgp\fP"
 Ignoruje chyby PGP podpisov počas kontroly.
 
-Výstup má formát 8 znakového reťazca, s prípadným rozšírením výskytu
+Výstup má formát 9 znakového reťazca, s prípadným rozšírením výskytu
 "\fBc\fP", ktoré charakterizuje konfiguračný súbor a mena súboru.
 Každý z ôsmych znakov popisuje výsledok porovnania jedného konkrétneho
 atribútu súboru s údajmi zaznamenanými v RPM databáze. Jednoduchá "\fB.\fP"
@@ -500,8 +500,6 @@ podobným spôsobom vytvoriť váš verejný a tajný kľúčový pár (bližši
 sú v dokumentácii ku PGP).
 Taktiež potrebujete konfigurovať makrá:
 
-.IP "\fB_signature\fP"
-Typ podpisu. Momentálne je podporované iba pgp.
 .IP "\fB_pgp_name\fP"
 Meno "užívateľa", ktorého kľúčom sa má podpísať balík.
 .PP
@@ -514,8 +512,6 @@ Napríkad pre použitie PGP na podpísanie balíka ako užívateľ
 \fB"John Doe <jdoe@foo.com>"\fP zo zväzku kľúčov umiestnených
 v \fB/etc/rpm/.pgp\fP použitím \fB/usr/bin/pgp\fP zápis bude
 obsahovať
-
-.I "\fB%_signature pgp\fP"
 
 .I "\fB%_pgp_path /etc/rpm/.pgp\fP"
 
@@ -615,8 +611,6 @@ Táto voľba môže byť tiež špecifikovaná konfigurovaním makra
 /var/lib/rpm/triggerindex.rpm
 /tmp/rpm*
 .fi
-.El
-
 .SH PRÍBUZNÁ DOKUMENTÁCIA 
 .IR glint (8) ,
 .IR rpm2cpio (8) ,

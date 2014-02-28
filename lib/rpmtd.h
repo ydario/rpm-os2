@@ -8,21 +8,24 @@
 extern "C" {
 #endif
 
-typedef enum rpmtdFlags_e {
+enum rpmtdFlags_e {
     RPMTD_NONE		= 0,
     RPMTD_ALLOCED	= (1 << 0),	/* was memory allocated? */
     RPMTD_PTR_ALLOCED	= (1 << 1),	/* were array pointers allocated? */
     RPMTD_IMMUTABLE	= (1 << 2),	/* header data or modifiable? */
     RPMTD_ARGV		= (1 << 3),	/* string array is NULL-terminated? */
-} rpmtdFlags;
+    RPMTD_INVALID	= (1 << 4),	/* invalid data (in header) */
+};
+
+typedef rpmFlags rpmtdFlags;
 
 /** \ingroup rpmtd
  * Container for rpm tag data (from headers or extensions).
  * @todo		Make this opaque (at least outside rpm itself)
  */
 struct rpmtd_s {
-    rpmTag tag;		/* rpm tag of this data entry*/
-    rpmTagType type;	/* data type */
+    rpm_tag_t tag;	/* rpm tag of this data entry*/
+    rpm_tagtype_t type;	/* data type */
     rpm_count_t count;	/* number of entries */
     rpm_data_t data;	/* pointer to actual data */
     rpmtdFlags flags;	/* flags on memory allocation etc */
@@ -68,7 +71,7 @@ rpm_count_t rpmtdCount(rpmtd td);
  * @param td		Tag data container
  * @return		Rpm tag.
  */
-rpmTag rpmtdTag(rpmtd td);
+rpmTagVal rpmtdTag(rpmtd td);
 
 /** \ingroup rpmtd
  * Retrieve type of the container.
@@ -83,6 +86,13 @@ rpmTagType rpmtdType(rpmtd td);
  * @return		Rpm tag class
  */
 rpmTagClass rpmtdClass(rpmtd td);
+
+/** \ingroup rpmtd
+ * Retrieve flags of the container (allocation details etc)
+ * @param td		Tag data container
+ * @return		Container flags
+ */
+rpmtdFlags rpmtdGetFlags(rpmtd td);
 
 /** \ingroup rpmtd
  * Retrieve current iteration index of the container.
@@ -216,6 +226,8 @@ typedef enum rpmtdFormats_e {
     RPMTD_FORMAT_DEPTYPE	= 15,	/* dependency types (int types) */
     RPMTD_FORMAT_FSTATE		= 16,	/* file states (int types) */
     RPMTD_FORMAT_VFLAGS		= 17,	/* file verify flags (int types) */
+    RPMTD_FORMAT_EXPAND		= 18,	/* macro expansion (string types) */
+    RPMTD_FORMAT_FSTATUS	= 19,	/* file verify status (int types) */
 } rpmtdFormats;
 
 /** \ingroup rpmtd
@@ -239,7 +251,7 @@ char *rpmtdFormat(rpmtd td, rpmtdFormats fmt, const char *errmsg);
  * @param tag		New tag
  * @return		1 on success, 0 on error
  */
-int rpmtdSetTag(rpmtd td, rpmTag tag);
+int rpmtdSetTag(rpmtd td, rpmTagVal tag);
 
 /** \ingroup rpmtd
  * Construct tag container from uint8_t pointer.
@@ -252,7 +264,7 @@ int rpmtdSetTag(rpmtd td, rpmTag tag);
  * @param count		Number of entries
  * @return		1 on success, 0 on error (eg wrong type)
  */
-int rpmtdFromUint8(rpmtd td, rpmTag tag, uint8_t *data, rpm_count_t count);
+int rpmtdFromUint8(rpmtd td, rpmTagVal tag, uint8_t *data, rpm_count_t count);
 
 /** \ingroup rpmtd
  * Construct tag container from uint16_t pointer.
@@ -264,7 +276,7 @@ int rpmtdFromUint8(rpmtd td, rpmTag tag, uint8_t *data, rpm_count_t count);
  * @param count		Number of entries
  * @return		1 on success, 0 on error (eg wrong type)
  */
-int rpmtdFromUint16(rpmtd td, rpmTag tag, uint16_t *data, rpm_count_t count);
+int rpmtdFromUint16(rpmtd td, rpmTagVal tag, uint16_t *data, rpm_count_t count);
 
 /** \ingroup rpmtd
  * Construct tag container from uint32_t pointer.
@@ -276,7 +288,7 @@ int rpmtdFromUint16(rpmtd td, rpmTag tag, uint16_t *data, rpm_count_t count);
  * @param count		Number of entries
  * @return		1 on success, 0 on error (eg wrong type)
  */
-int rpmtdFromUint32(rpmtd td, rpmTag tag, uint32_t *data, rpm_count_t count);
+int rpmtdFromUint32(rpmtd td, rpmTagVal tag, uint32_t *data, rpm_count_t count);
 
 /** \ingroup rpmtd
  * Construct tag container from uint64_t pointer.
@@ -288,7 +300,7 @@ int rpmtdFromUint32(rpmtd td, rpmTag tag, uint32_t *data, rpm_count_t count);
  * @param count		Number of entries
  * @return		1 on success, 0 on error (eg wrong type)
  */
-int rpmtdFromUint64(rpmtd td, rpmTag tag, uint64_t *data, rpm_count_t count);
+int rpmtdFromUint64(rpmtd td, rpmTagVal tag, uint64_t *data, rpm_count_t count);
 
 /** \ingroup rpmtd
  * Construct tag container from a string.
@@ -298,7 +310,7 @@ int rpmtdFromUint64(rpmtd td, rpmTag tag, uint64_t *data, rpm_count_t count);
  * @param data		String to use
  * @return		1 on success, 0 on error (eg wrong type)
  */
-int rpmtdFromString(rpmtd td, rpmTag tag, const char *data);
+int rpmtdFromString(rpmtd td, rpmTagVal tag, const char *data);
 
 /** \ingroup rpmtd
  * Construct tag container from a string array.
@@ -310,7 +322,7 @@ int rpmtdFromString(rpmtd td, rpmTag tag, const char *data);
  * @param count		Number of entries
  * @return		1 on success, 0 on error (eg wrong type)
  */
-int rpmtdFromStringArray(rpmtd td, rpmTag tag, const char **data, rpm_count_t count);
+int rpmtdFromStringArray(rpmtd td, rpmTagVal tag, const char **data, rpm_count_t count);
 
 /** \ingroup rpmtd
  * Construct tag container from ARGV_t array.
@@ -321,7 +333,7 @@ int rpmtdFromStringArray(rpmtd td, rpmTag tag, const char **data, rpm_count_t co
  * @param argv		ARGV array
  * @return		1 on success, 0 on error (eg wrong type)
  */
-int rpmtdFromArgv(rpmtd td, rpmTag tag, ARGV_t argv);
+int rpmtdFromArgv(rpmtd td, rpmTagVal tag, ARGV_t argv);
 
 /** \ingroup rpmtd
  * Construct tag container from ARGI_t array.
@@ -332,7 +344,7 @@ int rpmtdFromArgv(rpmtd td, rpmTag tag, ARGV_t argv);
  * @param argi		ARGI array
  * @return		1 on success, 0 on error (eg wrong type)
  */
-int rpmtdFromArgi(rpmtd td, rpmTag tag, ARGI_t argi);
+int rpmtdFromArgi(rpmtd td, rpmTagVal tag, ARGI_t argi);
 
 /* \ingroup rpmtd
  * Perform deep copy of container.
@@ -343,6 +355,14 @@ int rpmtdFromArgi(rpmtd td, rpmTag tag, ARGI_t argi);
  * @return		New container or NULL on error
  */
 rpmtd rpmtdDup(rpmtd td);
+
+/* \ingroup rpmtd
+ * Push string array container contents to a string pool, return string ids.
+ * @param td		Tag data container
+ * @param pool		String pool
+ * @return		Array of string id's (malloced)
+ */
+rpmsid * rpmtdToPool(rpmtd td, rpmstrPool pool);
 
 #ifdef __cplusplus
 }

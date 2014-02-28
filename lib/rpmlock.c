@@ -1,12 +1,10 @@
 
 #include "system.h"
 
-#include <libgen.h>
+#include <errno.h>
 
 #include <rpm/rpmlog.h>
-#include <rpm/rpmmacro.h>
 #include <rpm/rpmfileutil.h>
-#include <rpm/rpmts.h>
 
 #include "lib/rpmlock.h"
 
@@ -14,41 +12,28 @@
 
 /* Internal interface */
 
-#define RPMLOCK_PATH LOCALSTATEDIR "/rpm/.rpm.lock"
-static const char * const rpmlock_path_default = "%{?_rpmlock_path}";
-static const char * rpmlock_path = NULL;
-
 enum {
     RPMLOCK_READ   = 1 << 0,
     RPMLOCK_WRITE  = 1 << 1,
     RPMLOCK_WAIT   = 1 << 2,
 };
 
-typedef struct {
+struct rpmlock_s {
     int fd;
     int openmode;
-} * rpmlock;
+};
 
-static rpmlock rpmlock_new(const char *rootdir)
+static rpmlock rpmlock_new(const char *lock_path)
 {
     rpmlock lock = (rpmlock) malloc(sizeof(*lock));
 
-    /* XXX oneshot to determine path for fcntl lock. */
-    if (rpmlock_path == NULL) {
-	char * t = rpmGenPath(rootdir, rpmlock_path_default, NULL);
-	if (t == NULL || *t == '\0' || *t == '%')
-	    t = xstrdup(RPMLOCK_PATH);
-	rpmlock_path = xstrdup(t);
-	(void) rpmioMkpath(dirname(t), 0755, getuid(), getgid());
-	t = _free(t);
-    }
     if (lock != NULL) {
 	mode_t oldmask = umask(022);
-	lock->fd = open(rpmlock_path, O_RDWR|O_CREAT, 0644);
+	lock->fd = open(lock_path, O_RDWR|O_CREAT, 0644);
 	(void) umask(oldmask);
 
 	if (lock->fd == -1) {
-	    lock->fd = open(rpmlock_path, O_RDONLY);
+	    lock->fd = open(lock_path, O_RDONLY);
 	    if (lock->fd == -1) {
 		free(lock);
 		lock = NULL;
@@ -110,26 +95,19 @@ static void rpmlock_release(rpmlock lock)
 
 /* External interface */
 
-void *rpmtsAcquireLock(rpmts ts)
+rpmlock rpmlockAcquire(const char *lock_path, const char *descr)
 {
-    const char *rootDir = rpmtsRootDir(ts);
-    rpmlock lock;
-
-    if (!rootDir || rpmtsChrootDone(ts))
-	rootDir = "/@unixroot";
-    lock = rpmlock_new(rootDir);
+    rpmlock lock = rpmlock_new(lock_path);
     if (!lock) {
-	rpmlog(RPMLOG_ERR, 
-		_("can't create transaction lock on %s (%s)\n"), 
-		rpmlock_path, strerror(errno));
+	rpmlog(RPMLOG_ERR, _("can't create %s lock on %s (%s)\n"), 
+		descr, lock_path, strerror(errno));
     } else if (!rpmlock_acquire(lock, RPMLOCK_WRITE)) {
 	if (lock->openmode & RPMLOCK_WRITE)
-	    rpmlog(RPMLOG_WARNING,
-		   _("waiting for transaction lock on %s\n"), rpmlock_path);
+	    rpmlog(RPMLOG_WARNING, _("waiting for %s lock on %s\n"),
+		    descr, lock_path);
 	if (!rpmlock_acquire(lock, RPMLOCK_WRITE|RPMLOCK_WAIT)) {
-	    rpmlog(RPMLOG_ERR,
-		   _("can't create transaction lock on %s (%s)\n"), 
-		   rpmlock_path, strerror(errno));
+	    rpmlog(RPMLOG_ERR, _("can't create %s lock on %s (%s)\n"), 
+		   descr, lock_path, strerror(errno));
 	    rpmlock_free(lock);
 	    lock = NULL;
 	}
@@ -137,10 +115,11 @@ void *rpmtsAcquireLock(rpmts ts)
     return lock;
 }
 
-void rpmtsFreeLock(void *lock)
+rpmlock rpmlockFree(rpmlock lock)
 {
-    rpmlock_release((rpmlock)lock); /* Not really needed here. */
-    rpmlock_free((rpmlock)lock);
+    rpmlock_release(lock); /* Not really needed here. */
+    rpmlock_free(lock);
+    return NULL;
 }
 
 

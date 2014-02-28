@@ -499,9 +499,9 @@ Ne pas vérifier les sommes de contrôle MD5.
 \fB--noscripts\fR
 Ne pas exécuter le scriptlet \fB%verifyscript\fR (s'il y en a un).
 .PP
-Le format de sortie est une chaîne de 8 caractères, un «\ \fBc\fR\ »
+Le format de sortie est une chaîne de 9 caractères, un «\ \fBc\fR\ »
 éventuel dénotant un fichier de configuration, et ensuite le nom du
-fichier. Chacun des 8 caractères indique le résultat d'une comparaison
+fichier. Chacun des 9 caractères indique le résultat d'une comparaison
 d'attribut(s) du fichier avec la valeur du (des) attribut(s) enregistré(s)
 dans la base de données. Un «\ \fB.\fR\ » (point) seul signifie que le test
 s'est bien passé, alors qu'un «\ \fB?\fR\ » seul indique que le test n'a
@@ -709,9 +709,6 @@ vous\-même, vous devrez également créer votre propre paire clé publique/clé
 secrète (voir le manuel GPG). Vous devrez également configurer les macros
 suivantes\ :
 .TP
-\fB%_signature\fR
-Le type de signature. Actuellement, seuls gpg et pgp sont supportés.
-.TP
 \fB%_gpg_name\fR
 Le nom de l'«\ utilisateur\ » dont vous voulez utiliser la clé pour
 signer vos paquetages.
@@ -726,7 +723,6 @@ devriez inclure
 .PP
 
 .nf
-%_signature gpg
 %_gpg_path /etc/rpm/.gpg
 %_gpg_name John Doe <jdoe@foo.com>
 %_gpgbin /usr/bin/gpg

@@ -26,7 +26,7 @@ static void compressFilelist(Header h)
     const char ** baseNames;
     uint32_t * dirIndexes;
     rpm_count_t count;
-    int xx, i;
+    int i;
     int dirIndex = -1;
 
     /*
@@ -36,7 +36,7 @@ static void compressFilelist(Header h)
      */
 
     if (headerIsEntry(h, RPMTAG_DIRNAMES)) {
-	xx = headerDel(h, RPMTAG_OLDFILENAMES);
+	headerDel(h, RPMTAG_OLDFILENAMES);
 	return;		/* Already converted. */
     }
 
@@ -63,12 +63,18 @@ static void compressFilelist(Header h)
 	}
     }
 
+    /* 
+     * XXX EVIL HACK, FIXME:
+     * This modifies (and then restores) a const string from rpmtd
+     * through basename retrieved from strrchr() which silently 
+     * casts away const on return.
+     */
     while ((i = rpmtdNext(&fileNames)) >= 0) {
 	char ** needle;
 	char savechar;
 	char * baseName;
 	size_t len;
-	const char *filename = rpmtdGetString(&fileNames);
+	char *filename = (char *) rpmtdGetString(&fileNames); /* HACK HACK */
 
 	if (filename == NULL)	/* XXX can't happen */
 	    continue;
@@ -106,7 +112,7 @@ exit:
     free(baseNames);
     free(dirIndexes);
 
-    xx = headerDel(h, RPMTAG_OLDFILENAMES);
+    headerDel(h, RPMTAG_OLDFILENAMES);
 }
 
 static void expandFilelist(Header h)
@@ -187,33 +193,6 @@ exit:
 
 static void legacyRetrofit(Header h)
 {
-    struct rpmtd_s dprefix;
-
-    /*
-     * We don't use these entries (and rpm >= 2 never has) and they are
-     * pretty misleading. Let's just get rid of them so they don't confuse
-     * anyone.
-     */
-    if (headerIsEntry(h, RPMTAG_FILEUSERNAME))
-	(void) headerDel(h, RPMTAG_FILEUIDS);
-    if (headerIsEntry(h, RPMTAG_FILEGROUPNAME))
-	(void) headerDel(h, RPMTAG_FILEGIDS);
-
-    /*
-     * We switched the way we do relocatable packages. We fix some of
-     * it up here, though the install code still has to be a bit 
-     * careful. This fixup makes queries give the new values though,
-     * which is quite handy.
-     */
-    if (headerGet(h, RPMTAG_DEFAULTPREFIX, &dprefix, HEADERGET_MINMEM)) {
-	const char *prefix = rpmtdGetString(&dprefix);
-	char * nprefix = stripTrailingChar(xstrdup(prefix), '/');
-	
-	headerPutString(h, RPMTAG_PREFIXES, nprefix);
-	free(nprefix);
-	rpmtdFreeData(&dprefix);
-    }
-
     /*
      * The file list was moved to a more compressed format which not
      * only saves memory (nice), but gives fingerprinting a nice, fat
@@ -228,7 +207,7 @@ static void legacyRetrofit(Header h)
     }
 }
 
-int headerConvert(Header h, headerConvOps op)
+int headerConvert(Header h, int op)
 {
     int rc = 1;
 
@@ -251,3 +230,150 @@ int headerConvert(Header h, headerConvOps op)
     }
     return rc;
 };
+
+/*
+ * Backwards compatibility wrappers for legacy interfaces.
+ * Remove these some day...
+ */
+#define _RPM_4_4_COMPAT
+#include <rpm/rpmlegacy.h>
+
+/* dumb macro to avoid 50 copies of this code while converting... */
+#define TDWRAP() \
+    if (type) \
+	*type = td.type; \
+    if (p) \
+	*p = td.data; \
+    else \
+	rpmtdFreeData(&td); \
+    if (c) \
+	*c = td.count
+
+int headerRemoveEntry(Header h, rpm_tag_t tag)
+{
+    return headerDel(h, tag);
+}
+
+static void *_headerFreeData(rpm_data_t data, rpm_tagtype_t type)
+{
+    if (data) {
+	if (type == RPM_FORCEFREE_TYPE ||
+	    type == RPM_STRING_ARRAY_TYPE ||
+	    type == RPM_I18NSTRING_TYPE ||
+	    type == RPM_BIN_TYPE)
+		free(data);
+    }
+    return NULL;
+}
+
+void * headerFreeData(rpm_data_t data, rpm_tagtype_t type)
+{
+    return _headerFreeData(data, type);
+}
+
+void * headerFreeTag(Header h, rpm_data_t data, rpm_tagtype_t type)
+{
+    return _headerFreeData(data, type);
+}
+
+static int headerGetWrap(Header h, rpm_tag_t tag,
+		rpm_tagtype_t * type,
+		rpm_data_t * p,
+		rpm_count_t * c,
+		headerGetFlags flags)
+{
+    struct rpmtd_s td;
+    int rc;
+
+    rc = headerGet(h, tag, &td, flags);
+    TDWRAP();
+    return rc;
+}
+
+int headerGetEntry(Header h, rpm_tag_t tag,
+			rpm_tagtype_t * type,
+			rpm_data_t * p,
+			rpm_count_t * c)
+{
+    return headerGetWrap(h, tag, type, p, c, HEADERGET_DEFAULT);
+}
+
+int headerGetEntryMinMemory(Header h, rpm_tag_t tag,
+			rpm_tagtype_t * type,
+			rpm_data_t * p,
+			rpm_count_t * c)
+{
+    return headerGetWrap(h, tag, type, (rpm_data_t) p, c, HEADERGET_MINMEM);
+}
+
+/* XXX shut up compiler warning from missing prototype */
+int headerGetRawEntry(Header h, rpm_tag_t tag, rpm_tagtype_t * type, rpm_data_t * p,
+		rpm_count_t * c);
+
+int headerGetRawEntry(Header h, rpm_tag_t tag, rpm_tagtype_t * type, rpm_data_t * p,
+		rpm_count_t * c)
+{
+    if (p == NULL) 
+	return headerIsEntry(h, tag);
+
+    return headerGetWrap(h, tag, type, p, c, HEADERGET_RAW);
+}
+
+int headerNextIterator(HeaderIterator hi,
+		rpm_tag_t * tag,
+		rpm_tagtype_t * type,
+		rpm_data_t * p,
+		rpm_count_t * c)
+{
+    struct rpmtd_s td;
+    int rc;
+
+    rc = headerNext(hi, &td);
+    if (tag)
+	*tag = td.tag;
+    TDWRAP();
+    return rc;
+}
+
+int headerModifyEntry(Header h, rpm_tag_t tag, rpm_tagtype_t type,
+			rpm_constdata_t p, rpm_count_t c)
+{
+    struct rpmtd_s td = {
+	.tag = tag,
+	.type = type,
+	.data = (void *) p,
+	.count = c,
+    };
+    return headerMod(h, &td);
+}
+
+static int headerPutWrap(Header h, rpm_tag_t tag, rpm_tagtype_t type,
+		rpm_constdata_t p, rpm_count_t c, headerPutFlags flags)
+{
+    struct rpmtd_s td = {
+	.tag = tag,
+	.type = type,
+	.data = (void *) p,
+	.count = c,
+    };
+    return headerPut(h, &td, flags);
+}
+
+int headerAddOrAppendEntry(Header h, rpm_tag_t tag, rpm_tagtype_t type,
+		rpm_constdata_t p, rpm_count_t c)
+{
+    return headerPutWrap(h, tag, type, p, c, HEADERPUT_APPEND);
+}
+
+int headerAppendEntry(Header h, rpm_tag_t tag, rpm_tagtype_t type,
+		rpm_constdata_t p, rpm_count_t c)
+{
+    return headerPutWrap(h, tag, type, p, c, HEADERPUT_APPEND);
+}
+
+int headerAddEntry(Header h, rpm_tag_t tag, rpm_tagtype_t type,
+		rpm_constdata_t p, rpm_count_t c)
+{
+    return headerPutWrap(h, tag, type, p, c, HEADERPUT_DEFAULT);
+}
+#undef _RPM_4_4_COMPAT

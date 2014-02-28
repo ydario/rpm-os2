@@ -5,38 +5,13 @@ pkglibdir="${pkglibdir:-/usr/lib/rpm}"
 platformdir="${pkglibdir}/platform"
 
 RPMRC="${1:-rpmrc}"
-MACROS="${2:-macros}"
-PLATFORM="${3:-platform}"
+PLATFORM="${2:-platform}"
+MACROS="${3:-macros}"
+VENDOR="${4}"
+OS="${5}"
+RPMRC_GNU="${6}"
 
-RPM="./rpm --rcfile=$RPMRC --macros=$MACROS"
-
-canonarch_sed='s_i.86_i386_;s_pentium[34]_i386_;s_athlon_i386_;s_sparc[^-]*_sparc_;s_alpha[^-]*_alpha_;s_arm[^-]*_arm_;s_\(powerpc\|ppc\)[^-]*_ppc_;s,\(ia32e\|amd64\),x86_64,;s_sh4a_sh4_'
-arch="`$RPM --eval '%{_arch}'|sed -e "$canonarch_sed"`"
-VENDOR="`$RPM --eval '%{_vendor}'`"
-OS="`$RPM --eval '%{_os}'`"
-RPMRC_GNU="`$RPM --eval '%{_gnu}'`"
-
-case "$arch" in
-  i[3456]86|pentium[34]|athlon|geode) SUBSTS='s_i386_i386_ s_i386_i486_ s_i386_i586_ s_i386_i686_ s_i386_pentium3_ s_i386_pentium4_ s_i386_athlon_ s_i386_geode_' ;;
-  alpha*) SUBSTS='s_alpha_alpha_ s_alpha_alphaev5_ s_alpha_alphaev56_ s_alpha_alphapca56_ s_alpha_alphaev6_ s_alpha_alphaev67_' ;;
-  arm*) SUBSTS='s_arm_armv3l_ s_arm_armv4l_ s_arm_armv4tl_ s_arm_armv5tel_ s_arm_armv5tejl_ s_arm_armv6l_ s_arm_armv7l_' ;;
-  sh4*) SUBSTS='s_sh4_sh4_ s_sh4_sh4a_' ;;
-  sparc*) SUBSTS='s_sparc\(64\|64v\|v9v\|v9\)_sparc_ s_sparc64_sparcv9_;s_sparc\([^v]\|$\)_sparcv9\1_ s_sparcv9_sparc64_;s_sparc\([^6]\|$\)_sparc64\1_' ;;
-  powerpc*|ppc*) SUBSTS='s_ppc64_ppc_ s_ppc\([^6ip]\|$\)_ppc64\1_ s_ppc\([^6ip]\|$\)_ppciseries_ s_ppc\([^6ip]\|$\)_ppcpseries_ s_ppc\([^6ip]\|$\)_ppc64iseries_ s_ppc\([^6ip]\|$\)_ppc64pseries_' ;;
-  s390*) SUBSTS='s_s390x_s390_ s_s390\([^x]\|$\)_s390x\1_' ;;
-  x86_64|amd64|ia32e) SUBSTS='s,x86_64,x86_64, s,x86_64,ia32e, s,x86_64,amd64, s,x86_64,i386, s,x86_64,i486, s,x86_64,i586, s,x86_64,i686, s,x86_64,pentium3, s,x86_64,pentium4, s,x86_64,athlon, s,x86_64,geode,' ;;
-  *) SUBSTS=y___ ;;
-esac
-
-for SUBST in $SUBSTS ; do
-  ARCH=`echo $arch | sed -e $SUBST`
-  TARGET_PLATFORM=`echo $target_platform | sed -e $SUBST`
-  TARGET=`echo $target | sed -e $SUBST`
-
-  PPD="${DESTDIR}/${platformdir}/${ARCH}-${OS}"
-
-  [ -d $PPD ] || mkdir -p $PPD
-
+for ARCH in noarch `grep ^arch_canon $RPMRC | cut -d: -f2`; do
   RPMRC_OPTFLAGS="`sed -n 's/^optflags: '$ARCH' //p' $RPMRC`"
   RPMRC_OPTFLAGS="`echo $RPMRC_OPTFLAGS | sed -e 's, ,\ ,g'`"
   case $RPMRC_OPTFLAGS in
@@ -45,111 +20,127 @@ for SUBST in $SUBSTS ; do
   esac
 
   ARCH_INSTALL_POST='%{nil}'
-  case "${ARCH}-${OS}" in
-    sparc64*-linux) LIB=lib64 ;;
-    s390x-linux) LIB=lib64 ;;
-    ppc64-linux|powerpc64-linux) LIB=lib64 ;;
-    x86_64-linux|amd64-linux|ia32e-linux) LIB=lib64 ;;
-    *) LIB=lib;;
-  esac
+  LIB=lib
 
   # XXX FIXME: incomplete and quite likely wrong too in places,
   # consult various arch folks for correct names etc.
   ISANAME=
   ISABITS=
+  CANONARCH=
+  CANONCOLOR=
+  FILTER=cat
   case "${ARCH}" in
     sparc64*) 
 	ISANAME=sparc
 	ISABITS=64
+	CANONARCH=sparc64
+	CANONCOLOR=3
 	;;
     sparc*) 
 	ISANAME=sparc
 	ISABITS=32
+	CANONARCH=sparc
+	CANONCOLOR=0
 	;;
     s390)
 	ISANAME=s390
 	ISABITS=32
+	CANONARCH=s390
+	CANONCOLOR=0
 	;;
     s390x)
 	ISANAME=s390
 	ISABITS=64
+	CANONARCH=s390x
+	CANONCOLOR=3
 	;;
     ppc64*)
 	ISANAME=ppc
 	ISABITS=64
+	CANONARCH=ppc64
+	CANONCOLOR=3
 	;;
     ppc*)
 	ISANAME=ppc
 	ISABITS=32
+	CANONARCH=ppc
+	CANONCOLOR=0
 	;;
     i?86|pentium?|athlon|geode)
 	ISANAME=x86
 	ISABITS=32
+	CANONARCH=i386
+	CANONCOLOR=0
 	;;
     x86_64|amd64|ia32e)
 	ISANAME=x86
 	ISABITS=64
+	CANONARCH=x86_64
+	CANONCOLOR=3
 	;;
     ia64)
 	ISANAME=ia
 	ISABITS=64
+	CANONARCH=ia64
+	CANONCOLOR=2
 	;;
     sh*)
 	ISANAME=sh
 	ISABITS=32
+	CANONARCH=${ARCH}
+	CANONCOLOR=0
 	;;
     arm*)
 	ISANAME=`echo ${ARCH} | sed "s/^\([^-]*\)-.*/\1/"`
 	ISABITS=32
+	CANONARCH=arm
+	CANONCOLOR=0
 	;;
     alpha*)
 	ISANAME=alpha
 	ISABITS=64
+	CANONARCH=alpha
+	CANONCOLOR=0
+	;;
+    aarch64)
+	ISANAME=aarch
+	ISABITS=64
+	CANONARCH=aarch64
+	CANONCOLOR=3
+	;;
+    noarch)
+	CANONARCH=noarch
+	CANONCOLOR=0
+	FILTER="grep -v -E ^(%optflag|%__isa)"
 	;;
   esac
 
-  case $VENDOR in
-  yellowdog)
-    VENDORSED='-e s,^@yellowdog@,,'
-    ;;
-  pld)
-    VENDORSED='-e s,^@pld@,,'
-    RPMRC_OPTFLAGS="`echo $RPMRC_OPTFLAGS | sed -e "s/ -g/ /"`"
-    ;;
-  mandrake)
-    VENDORSED='-e s,^@mandrake@,,'
-    RPMRC_OPTFLAGS="`echo $RPMRC_OPTFLAGS | sed -e s/i386/i686/`"
-    ;;
-  conectiva)
-    VENDORSED='-e s,^@conectiva@,,'
-    ;;
-  redhat)
-    VENDORSED='-e s,^@redhat@,,'
-    ;;
-  apple)
-    VENDORSED='-e s,^@apple@,,'
-    ;;
-  esac
+  # skip architectures for which we dont have full config parameters
+  [ -z "$CANONARCH" ] && continue
 
-  CANONARCH="`echo $ARCH|sed -e "$canonarch_sed"`"
+  if [ "$OS" = "linux" ] && [ "$CANONCOLOR" = 3 ]; then
+      LIB=${LIB}64
+  fi
+
+  PPD="${DESTDIR}/${platformdir}/${ARCH}-${OS}"
+  [ -d $PPD ] || mkdir -p $PPD
 
   cat $PLATFORM \
   | sed -e "s,@RPMRC_OPTFLAGS@,$RPMRC_OPTFLAGS," \
-	-e "s,$arch,$CANONARCH," \
+	-e "s,@RPMCANONARCH@,$CANONARCH,g" \
+	-e "s,@RPMCANONCOLOR@,$CANONCOLOR," \
 	-e "s,@RPMRC_GNU@,$RPMRC_GNU," \
 	-e "s,@LIB@,$LIB," \
 	-e "s,@ARCH_INSTALL_POST@,$ARCH_INSTALL_POST," \
 	-e '/\${\w*:-/!s,\${,%{_,' \
 	-e "s,@ISANAME@,$ISANAME," \
 	-e "s,@ISABITS@,$ISABITS," \
-	$VENDORSED \
+	-e "s,^@${VENDOR}@,," \
   | grep -v '^@' \
+  | ${FILTER} \
   > ${PPD}/macros
 
 done
 
-{ cd ${DESTDIR}/${platformdir}
-  [ -L noarch-${OS} ] && rm -f noarch-${OS} 2>/dev/null
-  mkdir -p noarch-${OS}
-  sed -e "/^%_arch/s,${arch},noarch," ${arch}-${OS}/macros | grep -v '^%optflags' | grep -v "^%__isa" > noarch-${OS}/macros
-}
+# gently adjust autoconf variables to rpm macros...
+cat $MACROS | sed -e '/\${\w*:-/!s,\${,%{_,' > ${DESTDIR}/${pkglibdir}/macros

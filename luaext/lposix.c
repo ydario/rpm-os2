@@ -5,6 +5,10 @@
 * 05 Nov 2003 22:09:10
 */
 
+#ifdef HAVE_CONFIG_H
+#include <config.h>
+#endif
+
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -22,6 +26,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <utime.h>
+#include <rpm/rpmutil.h>
 
 #define MYNAME		"posix"
 #define MYVERSION	MYNAME " library for " LUA_VERSION " / Nov 2003"
@@ -37,6 +42,8 @@
 
 #include "modemuncher.c"
 
+static int have_forked = 0;
+
 static const char *filetype(mode_t m)
 {
 	if (S_ISREG(m))		return "regular";
@@ -50,6 +57,15 @@ static const char *filetype(mode_t m)
 }
 
 typedef int (*Selector)(lua_State *L, int i, const void *data);
+
+/* implemented as luaL_typerror until lua 5.1, dropped in 5.2
+ * (C) 1994-2012 Lua.org, PUC-Rio. MIT license
+ */
+static int typerror (lua_State *L, int narg, const char *tname) {
+	const char *msg = lua_pushfstring(L, "%s expected, got %s",
+					  tname, luaL_typename(L, narg));
+	return luaL_argerror(L, narg, msg);
+}
 
 static int doselection(lua_State *L, int i, const char *const S[], Selector F, const void *data)
 {
@@ -132,7 +148,7 @@ static uid_t mygetuid(lua_State *L, int i)
 		return (p==NULL) ? -1 : p->pw_uid;
 	}
 	else
-		return luaL_typerror(L, i, "string or number");
+		return typerror(L, i, "string or number");
 }
 
 static gid_t mygetgid(lua_State *L, int i)
@@ -147,7 +163,7 @@ static gid_t mygetgid(lua_State *L, int i)
 		return (g==NULL) ? -1 : g->gr_gid;
 	}
 	else
-		return luaL_typerror(L, i, "string or number");
+		return typerror(L, i, "string or number");
 }
 
 
@@ -318,7 +334,12 @@ static int Pexec(lua_State *L)			/** exec(path,[args]) */
 {
 	const char *path = luaL_checkstring(L, 1);
 	int i,n=lua_gettop(L);
-	char **argv = malloc((n+1)*sizeof(char*));
+	char **argv;
+
+	if (!have_forked)
+	    return luaL_error(L, "exec not permitted in this context");
+
+	argv = malloc((n+1)*sizeof(char*));
 	if (argv==NULL) return luaL_error(L,"not enough memory");
 	argv[0] = (char*)path;
 	for (i=1; i<n; i++) argv[i] = (char*)luaL_checkstring(L, i+1);
@@ -330,7 +351,11 @@ static int Pexec(lua_State *L)			/** exec(path,[args]) */
 
 static int Pfork(lua_State *L)			/** fork() */
 {
-	return pushresult(L, fork(), NULL);
+	pid_t pid = fork();
+	if (pid == 0) {
+	    have_forked = 1;
+	}
+	return pushresult(L, pid, NULL);
 }
 
 
@@ -359,10 +384,14 @@ static int Psleep(lua_State *L)			/** sleep(seconds) */
 
 static int Pputenv(lua_State *L)		/** putenv(string) */
 {
+#if HAVE_PUTENV
 	size_t l;
 	const char *s=luaL_checklstring(L, 1, &l);
 	char *e=malloc(++l);
 	return pushresult(L, (e==NULL) ? -1 : putenv(memcpy(e,s,l)), s);
+#else
+	return -1;
+#endif
 }
 
 
@@ -553,7 +582,7 @@ static int Pgetpasswd(lua_State *L)		/** getpasswd(name or id) */
 	else if (lua_isstring(L, 1))
 		p = getpwnam(lua_tostring(L, 1));
 	else
-		luaL_typerror(L, 1, "string or number");
+		typerror(L, 1, "string or number");
 	if (p==NULL)
 		lua_pushnil(L);
 	else
@@ -570,7 +599,7 @@ static int Pgetgroup(lua_State *L)		/** getgroup(name or id) */
 	else if (lua_isstring(L, 1))
 		g = getgrnam(lua_tostring(L, 1));
 	else
-		luaL_typerror(L, 1, "string or number");
+		typerror(L, 1, "string or number");
 	if (g==NULL)
 		lua_pushnil(L);
 	else
@@ -689,10 +718,10 @@ static int Puname(lua_State *L)			/** uname([string]) */
 	luaL_buffinit(L, &b);
 	for (s=luaL_optstring(L, 1, "%s %n %r %v %m"); *s; s++)
 		if (*s!='%')
-			luaL_putchar(&b, *s);
+			luaL_addchar(&b, *s);
 		else switch (*++s)
 		{
-			case '%': luaL_putchar(&b, *s); break;
+			case '%': luaL_addchar(&b, *s); break;
 			case 'm': luaL_addstring(&b,u.machine); break;
 			case 'n': luaL_addstring(&b,u.nodename); break;
 			case 'r': luaL_addstring(&b,u.release); break;
@@ -768,7 +797,7 @@ static int Pmkstemp(lua_State *L)
 	path = luaL_checkstring(L, 1);
 	if (path == NULL)
 		return 0;
-	dynpath = strdup(path);
+	dynpath = rstrdup(path);
 	fd = mkstemp(dynpath);
 	f = (FILE**)lua_newuserdata(L, sizeof(FILE*));
 	if (f == NULL) {
@@ -790,7 +819,7 @@ static int Pmkstemp(lua_State *L)
 	return 2;
 }
 
-static const luaL_reg R[] =
+static const luaL_Reg R[] =
 {
 	{"access",		Paccess},
 	{"chdir",		Pchdir},
@@ -843,3 +872,31 @@ LUALIB_API int luaopen_posix (lua_State *L)
 	lua_settable(L,-3);
 	return 1;
 }
+
+/* RPM specific overrides for Lua standard library */
+
+static int exit_override(lua_State *L)
+{
+    if (!have_forked)
+	return luaL_error(L, "exit not permitted in this context");
+
+    exit(luaL_optint(L, 1, EXIT_SUCCESS));
+}
+
+static const luaL_Reg os_overrides[] =
+{
+    {"exit",    exit_override},
+    {NULL,      NULL}
+};
+
+#ifndef lua_pushglobaltable
+#define lua_pushglobaltable(L) lua_pushvalue(L, LUA_GLOBALSINDEX)
+#endif
+
+int luaopen_rpm_os(lua_State *L)
+{
+    lua_pushglobaltable(L);
+    luaL_openlib(L, "os", os_overrides, 0);
+    return 0;
+}
+

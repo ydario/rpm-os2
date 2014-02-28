@@ -5,33 +5,41 @@
 #include <stdlib.h>
 #endif
 
+#include <errno.h>
+#include <sys/select.h>
+#include <sys/wait.h>
 #include <signal.h>
 #include <magic.h>
+#include <regex.h>
 
 #ifdef __KLIBC__
 #include "lxlist.h"
 #endif
 
-#if HAVE_GELF_H
-#include <gelf.h>
-
-#if !defined(DT_GNU_HASH)
-#define	DT_GNU_HASH		0x6ffffef5
-#endif
-
-#endif
-
 #include <rpm/header.h>
-#include <rpm/rpmbuild.h>
 #include <rpm/argv.h>
 #include <rpm/rpmfc.h>
 #include <rpm/rpmlog.h>
 #include <rpm/rpmfileutil.h>
-
 #include <rpm/rpmds.h>
 #include <rpm/rpmfi.h>
+#include <rpm/rpmstrpool.h>
+
+#include "build/rpmbuild_internal.h"
 
 #include "debug.h"
+
+struct matchRule {
+    regex_t *path;
+    regex_t *magic;
+    ARGV_t flags;
+};
+
+typedef struct rpmfcAttr_s {
+    char *name;
+    struct matchRule incl;
+    struct matchRule excl;
+} * rpmfcAttr;
 
 /**
  */
@@ -42,28 +50,109 @@ struct rpmfc_s {
     int ix;		/*!< current file index */
     int skipProv;	/*!< Don't auto-generate Provides:? */
     int skipReq;	/*!< Don't auto-generate Requires:? */
-    int tracked;	/*!< Versioned Provides: tracking dependency added? */
-    size_t brlen;	/*!< strlen(spec->buildRoot) */
+    char *buildRoot;	/*!< (Build) root dir */
+    size_t brlen;	/*!< rootDir length */
 
-    ARGV_t fn;		/*!< (no. files) file names */
-    ARGI_t fcolor;	/*!< (no. files) file colors */
-    ARGI_t fcdictx;	/*!< (no. files) file class dictionary indices */
+    rpmfcAttr *atypes;	/*!< known file attribute types */
+
+    char ** fn;		/*!< (no. files) file names */
+    ARGV_t *fattrs;	/*!< (no. files) file attribute tokens */
+    rpm_color_t *fcolor;/*!< (no. files) file colors */
+    rpmsid *fcdictx;	/*!< (no. files) file class dictionary indices */
     ARGI_t fddictx;	/*!< (no. files) file depends dictionary start */
     ARGI_t fddictn;	/*!< (no. files) file depends dictionary no. entries */
-    ARGV_t cdict;	/*!< (no. classes) file class dictionary */
-    ARGV_t ddict;	/*!< (no. dependencies) file depends dictionary */
     ARGI_t ddictx;	/*!< (no. dependencies) file->dependency mapping */
+    rpmstrPool cdict;	/*!< file class dictionary */
+    rpmstrPool ddict;	/*!< file depends dictionary */
 
     rpmds provides;	/*!< (no. provides) package provides */
     rpmds requires;	/*!< (no. requires) package requires */
 };
 
-/**
- */
 struct rpmfcTokens_s {
     const char * token;
     rpm_color_t colors;
 };  
+
+static int regMatch(regex_t *reg, const char *val)
+{
+    return (reg && regexec(reg, val, 0, NULL, 0) == 0);
+}
+
+static regex_t * regFree(regex_t *reg)
+{
+    if (reg) {
+	regfree(reg);
+	free(reg);
+    }
+    return NULL;
+}
+
+static void ruleFree(struct matchRule *rule)
+{
+    regFree(rule->path);
+    regFree(rule->magic);
+    argvFree(rule->flags);
+}
+
+static char *rpmfcAttrMacro(const char *name,
+			    const char *attr_prefix, const char *attr)
+{
+    char *ret;
+    if (attr_prefix && attr_prefix[0] != '\0')
+	ret = rpmExpand("%{?__", name, "_", attr_prefix, "_", attr, "}", NULL);
+    else
+	ret = rpmExpand("%{?__", name, "_", attr, "}", NULL);
+    return rstreq(ret, "") ? _free(ret) : ret;
+}
+
+static regex_t *rpmfcAttrReg(const char *name,
+			     const char *attr_prefix, const char *attr)
+{
+    regex_t *reg = NULL;
+    char *pattern = rpmfcAttrMacro(name, attr_prefix, attr);
+    if (pattern) {
+	reg = xcalloc(1, sizeof(*reg));
+	if (regcomp(reg, pattern, REG_EXTENDED) != 0) { 
+	    rpmlog(RPMLOG_WARNING, _("Ignoring invalid regex %s\n"), pattern);
+	    reg = _free(reg);
+	}
+	rfree(pattern);
+    }
+    return reg;
+}
+
+static rpmfcAttr rpmfcAttrNew(const char *name)
+{
+    rpmfcAttr attr = xcalloc(1, sizeof(*attr));
+    struct matchRule *rules[] = { &attr->incl, &attr->excl, NULL };
+
+    attr->name = xstrdup(name);
+    for (struct matchRule **rule = rules; rule && *rule; rule++) {
+	const char *prefix = (*rule == &attr->incl) ? NULL : "exclude";
+	char *flags = rpmfcAttrMacro(name, prefix, "flags");
+
+	(*rule)->path = rpmfcAttrReg(name, prefix, "path");
+	(*rule)->magic = rpmfcAttrReg(name, prefix, "magic");
+	(*rule)->flags = argvSplitString(flags, ",", ARGV_SKIPEMPTY);
+	argvSort((*rule)->flags, NULL);
+
+	free(flags);
+    }
+
+    return attr;
+}
+
+static rpmfcAttr rpmfcAttrFree(rpmfcAttr attr)
+{
+    if (attr) {
+	ruleFree(&attr->incl);
+	ruleFree(&attr->excl);
+	rfree(attr->name);
+	rfree(attr);
+    }
+    return NULL;
+}
 
 /**
  */
@@ -82,27 +171,43 @@ static int rpmfcExpandAppend(ARGV_t * argvp, ARGV_const_t av)
     return 0;
 }
 
+static rpmds rpmdsSingleNS(rpmTagVal tagN, const char *namespace,
+			const char * N, const char * EVR, rpmsenseFlags Flags)
+{
+    rpmds ds = NULL;
+    if (namespace) {
+	char *NSN = rpmExpand(namespace, "(", N, ")", NULL);
+	ds = rpmdsSingle(tagN, NSN, EVR, Flags);
+	free(NSN);
+    } else {
+	ds = rpmdsSingle(tagN, N, EVR, Flags);
+    }
+    return ds;
+}
+
+#define max(x,y) ((x) > (y) ? (x) : (y))
+
 /** \ingroup rpmbuild
  * Return output from helper script.
  * @todo Use poll(2) rather than select(2), if available.
- * @param dir		directory to run in (or NULL)
  * @param argv		program and arguments to run
  * @param writePtr	bytes to feed to script on stdin (or NULL)
  * @param writeBytesLeft no. of bytes to feed to script on stdin
  * @param failNonZero	is script failure an error?
+ * @param buildRoot	buildRoot directory (or NULL)
  * @return		buffered stdout from script, NULL on error
  */     
-static StringBuf getOutputFrom(const char * dir, ARGV_t argv,
+static StringBuf getOutputFrom(ARGV_t argv,
                         const char * writePtr, size_t writeBytesLeft,
-                        int failNonZero)
+                        int failNonZero, const char *buildRoot)
 {
     pid_t child, reaped;
-    int toProg[2];
-    int fromProg[2];
+    int toProg[2] = { -1, -1 };
+    int fromProg[2] = { -1, -1 };
     int status;
-    void *oldhandler;
     StringBuf readBuff;
-    int done;
+    int myerrno = 0;
+    int ret = 1; /* assume failure */
 #ifdef __EMX__
     int i, fd, nbw, nbr;
 	FILE* in;
@@ -111,38 +216,32 @@ static StringBuf getOutputFrom(const char * dir, ARGV_t argv,
 #endif
 
 #ifndef __EMX__
-    /* FIX: cast? */
-    oldhandler = signal(SIGPIPE, SIG_IGN);
-
-    toProg[0] = toProg[1] = 0;
-    fromProg[0] = fromProg[1] = 0;
     if (pipe(toProg) < 0 || pipe(fromProg) < 0) {
 	rpmlog(RPMLOG_ERR, _("Couldn't create pipe for %s: %m\n"), argv[0]);
 	return NULL;
     }
     
-    if (!(child = fork())) {
-	(void) close(toProg[1]);
-	(void) close(fromProg[0]);
+    child = fork();
+    if (child == 0) {
+	/* NSPR messes with SIGPIPE, reset to default for the kids */
+	signal(SIGPIPE, SIG_DFL);
+	close(toProg[1]);
+	close(fromProg[0]);
 	
-	(void) dup2(toProg[0], STDIN_FILENO);   /* Make stdin the in pipe */
-	(void) dup2(fromProg[1], STDOUT_FILENO); /* Make stdout the out pipe */
+	dup2(toProg[0], STDIN_FILENO);   /* Make stdin the in pipe */
+	close(toProg[0]);
 
-	(void) close(toProg[0]);
-	(void) close(fromProg[1]);
+	dup2(fromProg[1], STDOUT_FILENO); /* Make stdout the out pipe */
+	close(fromProg[1]);
 
-	if (dir && chdir(dir)) {
-	    rpmlog(RPMLOG_ERR, _("Couldn't chdir to %s: %s\n"),
-		    dir, strerror(errno));
-	    _exit(EXIT_FAILURE);
-	}
-	
 	rpmlog(RPMLOG_DEBUG, "\texecv(%s) pid %d\n",
                         argv[0], (unsigned)getpid());
 
+	if (buildRoot)
+	    setenv("RPM_BUILD_ROOT", buildRoot, 1);
+
 	unsetenv("MALLOC_CHECK_");
-	(void) execvp(argv[0], (char *const *)argv);
-	/* XXX this error message is probably not seen. */
+	execvp(argv[0], (char *const *)argv);
 	rpmlog(RPMLOG_ERR, _("Couldn't exec %s: %s\n"),
 		argv[0], strerror(errno));
 	_exit(EXIT_FAILURE);
@@ -153,20 +252,18 @@ static StringBuf getOutputFrom(const char * dir, ARGV_t argv,
 	return NULL;
     }
 
-    (void) close(toProg[0]);
-    (void) close(fromProg[1]);
+    close(toProg[0]);
+    close(fromProg[1]);
 
-    /* Do not block reading or writing from/to prog. */
-    (void) fcntl(fromProg[0], F_SETFL, O_NONBLOCK);
-    (void) fcntl(toProg[1], F_SETFL, O_NONBLOCK);
-    
 #else
 
+#if 0
 	if (dir && chdir(dir)) {
 	    rpmlog(RPMLOG_ERR, _("Couldn't chdir to %s: %s\n"),
 		    dir, strerror(errno));
 	    _exit(EXIT_FAILURE);
 	}
+#endif
 
 	// write data to file
 	strcpy( tmpfile, "check-files-XXXXXX");
@@ -245,71 +342,72 @@ static StringBuf getOutputFrom(const char * dir, ARGV_t argv,
 #ifndef __EMX__
     readBuff = newStringBuf();
 
-    do {
+    while (1) {
 	fd_set ibits, obits;
-	struct timeval tv;
-	int nfd, nbw, nbr;
-	int rc;
+	int nfd = 0;
+	ssize_t iorc;
+	char buf[BUFSIZ+1];
 
-	done = 0;
-top:
 	FD_ZERO(&ibits);
 	FD_ZERO(&obits);
-	if (fromProg[0] >= 0) {
-	    FD_SET(fromProg[0], &ibits);
-	}
-	if (toProg[1] >= 0) {
+
+	FD_SET(fromProg[0], &ibits);
+	nfd = max(nfd, fromProg[0]);
+
+	if (writeBytesLeft > 0) {
 	    FD_SET(toProg[1], &obits);
+	    nfd = max(nfd, toProg[1]);
+	} else if (toProg[1] >= 0) {
+	    /* Close write-side pipe to notify child on EOF */
+	    close(toProg[1]);
+	    toProg[1] = -1;
 	}
-	/* XXX values set to limit spinning with perl doing ~100 forks/sec. */
-	tv.tv_sec = 0;
-	tv.tv_usec = 10000;
-	nfd = ((fromProg[0] > toProg[1]) ? fromProg[0] : toProg[1]);
-	if ((rc = select(nfd, &ibits, &obits, NULL, &tv)) < 0) {
-	    if (errno == EINTR)
-		goto top;
+
+	do {
+	    iorc = select(nfd + 1, &ibits, &obits, NULL, NULL);
+	} while (iorc == -1 && errno == EINTR);
+
+	if (iorc < 0) {
+	    myerrno = errno;
 	    break;
 	}
 
-	/* Write any data to program */
-	if (toProg[1] >= 0 && FD_ISSET(toProg[1], &obits)) {
-          if (writePtr && writeBytesLeft > 0) {
-	    if ((nbw = write(toProg[1], writePtr,
-		    (1024<writeBytesLeft) ? 1024 : writeBytesLeft)) < 0) {
-	        if (errno != EAGAIN) {
-		    perror("getOutputFrom()");
-	            exit(EXIT_FAILURE);
-		}
-	        nbw = 0;
+	/* Write data to child */
+	if (writeBytesLeft > 0 && FD_ISSET(toProg[1], &obits)) {
+	    size_t nb = (1024 < writeBytesLeft) ? 1024 : writeBytesLeft;
+	    do {
+		iorc = write(toProg[1], writePtr, nb);
+	    } while (iorc == -1 && errno == EINTR);
+
+	    if (iorc < 0) {
+		myerrno = errno;
+		break;
 	    }
-	    writeBytesLeft -= nbw;
-	    writePtr += nbw;
-	  } else if (toProg[1] >= 0) {	/* close write fd */
-	    (void) close(toProg[1]);
-	    toProg[1] = -1;
-	  }
+	    writeBytesLeft -= iorc;
+	    writePtr += iorc;
 	}
 	
-	/* Read any data from prog */
-	{   char buf[BUFSIZ+1];
-	    while ((nbr = read(fromProg[0], buf, sizeof(buf)-1)) > 0) {
-		buf[nbr] = '\0';
-		appendStringBuf(readBuff, buf);
+	/* Read when we get data back from the child */
+	if (FD_ISSET(fromProg[0], &ibits)) {
+	    do {
+		iorc = read(fromProg[0], buf, sizeof(buf)-1);
+	    } while (iorc == -1 && errno == EINTR);
+
+	    if (iorc == 0) break; /* EOF, we're done */
+	    if (iorc < 0) {
+		myerrno = errno;
+		break;
 	    }
+	    buf[iorc] = '\0';
+	    appendStringBuf(readBuff, buf);
 	}
-
-	/* terminate on (non-blocking) EOF or error */
-	done = (nbr == 0 || (nbr < 0 && errno != EAGAIN));
-
-    } while (!done);
+    }
 
     /* Clean up */
     if (toProg[1] >= 0)
-    	(void) close(toProg[1]);
+    	close(toProg[1]);
     if (fromProg[0] >= 0)
-	(void) close(fromProg[0]);
-    /* FIX: cast? */
-    (void) signal(SIGPIPE, oldhandler);
+	close(fromProg[0]);
 
     /* Collect status from prog */
     reaped = waitpid(child, &status, 0);
@@ -317,20 +415,28 @@ top:
         (unsigned)child, (unsigned)reaped, status);
 
     if (failNonZero && (!WIFEXITED(status) || WEXITSTATUS(status))) {
-	rpmlog(RPMLOG_ERR, _("%s failed\n"), argv[0]);
-	return NULL;
+	rpmlog(RPMLOG_ERR, _("%s failed: %x\n"), argv[0], status);
+	goto exit;
     }
-    if (writeBytesLeft) {
-	rpmlog(RPMLOG_ERR, _("failed to write all data to %s\n"), argv[0]);
-	return NULL;
+    if (writeBytesLeft || myerrno) {
+	rpmlog(RPMLOG_ERR, _("failed to write all data to %s: %s\n"), 
+		argv[0], strerror(myerrno));
+	goto exit;
     }
 #endif // __EMX__
+
+    ret = 0;
+
+exit:
+    if (ret) {
+	readBuff = freeStringBuf(readBuff);
+    }
 
     return readBuff;
 }
 
 int rpmfcExec(ARGV_const_t av, StringBuf sb_stdin, StringBuf * sb_stdoutp,
-		int failnonzero)
+		int failnonzero, const char *buildRoot)
 {
     char * s = NULL;
     ARGV_t xav = NULL;
@@ -340,7 +446,6 @@ int rpmfcExec(ARGV_const_t av, StringBuf sb_stdin, StringBuf * sb_stdoutp,
     StringBuf sb = NULL;
     const char * buf_stdin = NULL;
     size_t buf_stdin_len = 0;
-    int xx;
 
     if (sb_stdoutp)
 	*sb_stdoutp = NULL;
@@ -352,17 +457,14 @@ int rpmfcExec(ARGV_const_t av, StringBuf sb_stdin, StringBuf * sb_stdoutp,
     if (!(s && *s))
 	goto exit;
 
-    /* Parse args buried within expanded exacutable. */
-    pac = 0;
-    xx = poptParseArgvString(s, &pac, (const char ***)&pav);
-    if (!(xx == 0 && pac > 0 && pav != NULL))
+    /* Parse args buried within expanded executable. */
+    if (!(poptParseArgvString(s, &pac, (const char ***)&pav) == 0 && pac > 0 && pav != NULL))
 	goto exit;
 
     /* Build argv, appending args to the executable args. */
-    xav = NULL;
-    xx = argvAppend(&xav, pav);
+    argvAppend(&xav, pav);
     if (av[1])
-	xx = rpmfcExpandAppend(&xav, av + 1);
+	rpmfcExpandAppend(&xav, av + 1);
 
     if (sb_stdin != NULL) {
 	buf_stdin = getStringBuf(sb_stdin);
@@ -370,7 +472,7 @@ int rpmfcExec(ARGV_const_t av, StringBuf sb_stdin, StringBuf * sb_stdoutp,
     }
 
     /* Read output from exec'd helper. */
-    sb = getOutputFrom(NULL, xav, buf_stdin, buf_stdin_len, failnonzero);
+    sb = getOutputFrom(xav, buf_stdin, buf_stdin_len, failnonzero, buildRoot);
 
     if (sb_stdoutp != NULL) {
 	*sb_stdoutp = sb;
@@ -380,174 +482,176 @@ int rpmfcExec(ARGV_const_t av, StringBuf sb_stdin, StringBuf * sb_stdoutp,
     ec = 0;
 
 exit:
-    sb = freeStringBuf(sb);
-    xav = argvFree(xav);
-    pav = _free(pav);	/* XXX popt mallocs in single blob. */
-    s = _free(s);
+    freeStringBuf(sb);
+    argvFree(xav);
+    free(pav);	/* XXX popt mallocs in single blob. */
+    free(s);
     return ec;
 }
 
-/**
- */
-static int rpmfcSaveArg(ARGV_t * argvp, const char * key)
+static void argvAddUniq(ARGV_t * argvp, const char * key)
 {
-    int rc = 0;
-
     if (argvSearch(*argvp, key, NULL) == NULL) {
-	rc = argvAdd(argvp, key);
-	rc = argvSort(*argvp, NULL);
+	argvAdd(argvp, key);
+	argvSort(*argvp, NULL);
     }
-    return rc;
 }
 
-static void rpmfcAddFileDep(ARGV_t * argvp, int ix, rpmds ds)
+#define hasAttr(_a, _n) (argvSearch((_a), (_n), NULL) != NULL)
+
+static void rpmfcAddFileDep(rpmstrPool ddict, int ix, rpmds ds, char deptype)
 {
-    rpmTag tagN = rpmdsTagN(ds);
-    char *key = NULL;
-
-    if (ds == NULL) {
-	return;
+    if (ds) {
+	char *key = NULL;
+	rasprintf(&key, "%08d%c %s %s 0x%08x", ix, deptype,
+		  rpmdsN(ds), rpmdsEVR(ds), rpmdsFlags(ds));
+	rpmstrPoolId(ddict, key, 1);
+	free(key);
     }
+}
 
-    assert(tagN == RPMTAG_PROVIDENAME || tagN == RPMTAG_REQUIRENAME);
+static ARGV_t runCmd(const char *nsdep, const char *depname,
+		     const char *buildRoot, const char *fn)
+{
+    ARGV_t output = NULL;
+    char *buf = NULL;
+    char *mname = rstrscat(NULL, "__", nsdep, "_", depname, NULL);
 
-    rasprintf(&key, "%08d%c %s %s 0x%08x", ix, tagN == RPMTAG_PROVIDENAME ? 'P' : 'R',
-		rpmdsN(ds), rpmdsEVR(ds), rpmdsFlags(ds));
+    rasprintf(&buf, "%%{?%s:%%{%s} %%{?%s_opts}}", mname, mname, mname);
+    if (!rstreq(buf, "")) {
+	ARGV_t av = NULL;
+	StringBuf sb_stdout = NULL;
+	StringBuf sb_stdin = newStringBuf();
+	argvAdd(&av, buf);
 
-    rpmfcSaveArg(argvp, key);
-    free(key);
+	appendLineStringBuf(sb_stdin, fn);
+	if (rpmfcExec(av, sb_stdin, &sb_stdout, 0, buildRoot) == 0) {
+	    argvSplit(&output, getStringBuf(sb_stdout), " \t\n\r");
+	}
+
+	argvFree(av);
+	freeStringBuf(sb_stdin);
+	freeStringBuf(sb_stdout);
+    }
+    free(buf);
+    free(mname);
+    return output;
 }
 
 /**
  * Run per-interpreter dependency helper.
  * @param fc		file classifier
- * @param deptype	'P' == Provides:, 'R' == Requires:, helper
  * @param nsdep		class name for interpreter (e.g. "perl")
- * @return		0 on success
+ * @param depname	"provides" or "requires"
+ * @param depsp		fc->provides or fc->requires
+ * @param dsContext	RPMSENSE_FIND_PROVIDES or RPMSENSE_FIND_REQUIRES
+ * @param tagN		RPMTAG_PROVIDENAME or RPMTAG_REQUIRENAME
+ * @return		0
  */
-static int rpmfcHelper(rpmfc fc, unsigned char deptype, const char * nsdep)
+static int rpmfcHelper(rpmfc fc, const char *nsdep, const char *depname,
+		       rpmds *depsp, rpmsenseFlags dsContext, rpmTagVal tagN)
 {
+    ARGV_t pav = NULL;
     const char * fn = fc->fn[fc->ix];
-    char *buf = NULL;
-    char *mname = NULL;
-    StringBuf sb_stdout = NULL;
-    StringBuf sb_stdin;
-    char *av[2];
-    rpmds * depsp, ds;
-    const char * N;
-    const char * EVR;
-    rpmsenseFlags Flags, dsContext;
-    rpmTag tagN;
-    ARGV_t pav;
-    const char * s;
+    char *namespace = NULL;
     int pac;
-    int xx;
-    int i;
+    regex_t *exclude = NULL;
+    regex_t *exclude_from = NULL;
 
-    switch (deptype) {
-    default:
-	return -1;
-	break;
-    case 'P':
-	if (fc->skipProv)
-	    return 0;
-	mname = rstrscat(NULL, "__", nsdep, "_provides", NULL);
-	depsp = &fc->provides;
-	dsContext = RPMSENSE_FIND_PROVIDES;
-	tagN = RPMTAG_PROVIDENAME;
-	break;
-    case 'R':
-	if (fc->skipReq)
-	    return 0;
-	mname = rstrscat(NULL, "__", nsdep, "_requires", NULL);
-	depsp = &fc->requires;
-	dsContext = RPMSENSE_FIND_REQUIRES;
-	tagN = RPMTAG_REQUIRENAME;
-	break;
-    }
-    rasprintf(&buf, "%%{?%s:%%{%s} %%{?%s_opts}}", mname, mname, mname);
-    av[0] = buf;
-    av[1] = NULL;
+    /* If the entire path is filtered out, there's nothing more to do */
+    exclude_from = rpmfcAttrReg(depname, "exclude", "from");
+    if (regMatch(exclude_from, fn+fc->brlen))
+	goto exit;
 
-    sb_stdin = newStringBuf();
-    appendLineStringBuf(sb_stdin, fn);
-    sb_stdout = NULL;
-    xx = rpmfcExec(av, sb_stdin, &sb_stdout, 0);
-    sb_stdin = freeStringBuf(sb_stdin);
+    pav = runCmd(nsdep, depname, fc->buildRoot, fn);
+    if (pav == NULL)
+	goto exit;
 
-    if (xx == 0 && sb_stdout != NULL) {
-	pav = NULL;
-	xx = argvSplit(&pav, getStringBuf(sb_stdout), " \t\n\r");
-	pac = argvCount(pav);
-	if (pav)
-	for (i = 0; i < pac; i++) {
-	    N = pav[i];
-	    EVR = "";
-	    Flags = dsContext;
-	    if (pav[i+1] && strchr("=<>", *pav[i+1])) {
-		i++;
-		for (s = pav[i]; *s; s++) {
-		    switch(*s) {
-		    default:
-assert(*s != '\0');
-			break;
-		    case '=':
-			Flags |= RPMSENSE_EQUAL;
-			break;
-		    case '<':
-			Flags |= RPMSENSE_LESS;
-			break;
-		    case '>':
-			Flags |= RPMSENSE_GREATER;
-			break;
-		    }
+    pac = argvCount(pav);
+    namespace = rpmfcAttrMacro(nsdep, NULL, "namespace");
+    exclude = rpmfcAttrReg(depname, NULL, "exclude");
+
+    for (int i = 0; i < pac; i++) {
+	rpmds ds = NULL;
+	const char *N = pav[i];
+	const char *EVR = "";
+	rpmsenseFlags Flags = dsContext;
+	if (pav[i+1] && strchr("=<>", *pav[i+1])) {
+	    i++;
+	    for (const char *s = pav[i]; *s; s++) {
+		switch(*s) {
+		default:
+		    break;
+		case '=':
+		    Flags |= RPMSENSE_EQUAL;
+		    break;
+		case '<':
+		    Flags |= RPMSENSE_LESS;
+		    break;
+		case '>':
+		    Flags |= RPMSENSE_GREATER;
+		    break;
 		}
-		i++;
-		EVR = pav[i];
-assert(EVR != NULL);
 	    }
-
-
-	    /* Add tracking dependency for versioned Provides: */
-	    if (!fc->tracked && deptype == 'P' && *EVR != '\0') {
-		ds = rpmdsSingle(RPMTAG_REQUIRENAME,
-			"rpmlib(VersionedDependencies)", "3.0.3-1",
-			RPMSENSE_RPMLIB|(RPMSENSE_LESS|RPMSENSE_EQUAL));
-		xx = rpmdsMerge(&fc->requires, ds);
-		ds = rpmdsFree(ds);
-		fc->tracked = 1;
-	    }
-
-	    ds = rpmdsSingle(tagN, N, EVR, Flags);
-
-	    /* Add to package dependencies. */
-	    xx = rpmdsMerge(depsp, ds);
-
-	    /* Add to file dependencies. */
-	    rpmfcAddFileDep(&fc->ddict, fc->ix, ds);
-
-	    ds = rpmdsFree(ds);
+	    i++;
+	    EVR = pav[i];
 	}
 
-	pav = argvFree(pav);
+	ds = rpmdsSingleNS(tagN, namespace, N, EVR, Flags);
+
+	/* Add to package and file dependencies unless filtered */
+	if (regMatch(exclude, rpmdsDNEVR(ds)+2) == 0) {
+	    (void) rpmdsMerge(depsp, ds);
+	    rpmfcAddFileDep(fc->ddict, fc->ix, ds, tagN == RPMTAG_PROVIDENAME ? 'P' : 'R');
+	}
+
+	rpmdsFree(ds);
     }
-    sb_stdout = freeStringBuf(sb_stdout);
-    free(buf);
-    free(mname);
+
+    argvFree(pav);
+    regFree(exclude);
+    free(namespace);
+
+exit:
+    regFree(exclude_from);
+    return 0;
+}
+
+/**
+ * Run per-interpreter Provides: dependency helper.
+ * @param fc		file classifier
+ * @param nsdep		class name for interpreter (e.g. "perl")
+ * @return		0
+ */
+static int rpmfcHelperProvides(rpmfc fc, const char * nsdep)
+{
+    if (fc->skipProv)
+	return 0;
+
+    rpmfcHelper(fc, nsdep, "provides", &fc->provides, RPMSENSE_FIND_PROVIDES, RPMTAG_PROVIDENAME);
 
     return 0;
 }
 
 /**
+ * Run per-interpreter Requires: dependency helper.
+ * @param fc		file classifier
+ * @param nsdep		class name for interpreter (e.g. "perl")
+ * @return		0
  */
-static const struct rpmfcTokens_s const rpmfcTokens[] = {
-  { "directory",		RPMFC_DIRECTORY|RPMFC_INCLUDE },
+static int rpmfcHelperRequires(rpmfc fc, const char * nsdep)
+{
+    if (fc->skipReq)
+	return 0;
 
-  { " shared object",		RPMFC_LIBRARY },
-  { " executable",		RPMFC_EXECUTABLE },
-  { " statically linked",	RPMFC_STATIC },
-  { " not stripped",		RPMFC_NOTSTRIPPED },
-  { " archive",			RPMFC_ARCHIVE },
+    rpmfcHelper(fc, nsdep, "requires", &fc->requires, RPMSENSE_FIND_REQUIRES, RPMTAG_REQUIRENAME);
+
+    return 0;
+}
+
+/* Only used for elf coloring and controlling RPMTAG_FILECLASS inclusion now */
+static const struct rpmfcTokens_s rpmfcTokens[] = {
+  { "directory",		RPMFC_INCLUDE },
 
 #ifdef __KLIBC__
   { "32-bit DLL",		RPMFC_OS2|RPMFC_INCLUDE },
@@ -557,87 +661,94 @@ static const struct rpmfcTokens_s const rpmfcTokens[] = {
   { "ELF 32-bit",		RPMFC_ELF32|RPMFC_INCLUDE },
   { "ELF 64-bit",		RPMFC_ELF64|RPMFC_INCLUDE },
 
-  { " script",			RPMFC_SCRIPT },
-  { " document",		RPMFC_DOCUMENT },
+  { "troff or preprocessor input",	RPMFC_INCLUDE },
+  { "GNU Info",			RPMFC_INCLUDE },
 
-  { " compressed",		RPMFC_COMPRESSED },
+  { "perl ",			RPMFC_INCLUDE },
+  { "Perl5 module source text", RPMFC_INCLUDE },
+  { "python ",			RPMFC_INCLUDE },
 
-  { "troff or preprocessor input",	RPMFC_MANPAGE|RPMFC_INCLUDE },
-  { "GNU Info",			RPMFC_MANPAGE|RPMFC_INCLUDE },
+  { "libtool library ",         RPMFC_INCLUDE },
+  { "pkgconfig ",               RPMFC_INCLUDE },
 
-  { "perl script text",		RPMFC_PERL|RPMFC_INCLUDE },
-  { "Perl5 module source text", RPMFC_PERL|RPMFC_MODULE|RPMFC_INCLUDE },
+  { "Objective caml ",		RPMFC_INCLUDE },
+  { "Mono/.Net assembly",       RPMFC_INCLUDE },
 
-  { " /usr/bin/python",		RPMFC_PYTHON|RPMFC_INCLUDE },
+  { "current ar archive",	RPMFC_INCLUDE },
+  { "Zip archive data",		RPMFC_INCLUDE },
+  { "tar archive",		RPMFC_INCLUDE },
+  { "cpio archive",		RPMFC_INCLUDE },
+  { "RPM v3",			RPMFC_INCLUDE },
+  { "RPM v4",			RPMFC_INCLUDE },
 
-  /* XXX "a /usr/bin/python -t script text executable" */
-  /* XXX "python 2.3 byte-compiled" */
-  { "python ",			RPMFC_PYTHON|RPMFC_INCLUDE },
+  { " image",			RPMFC_INCLUDE },
+  { " font",			RPMFC_INCLUDE },
+  { " Font",			RPMFC_INCLUDE },
 
-  { "libtool library ",         RPMFC_LIBTOOL|RPMFC_INCLUDE },
-  { "pkgconfig ",               RPMFC_PKGCONFIG|RPMFC_INCLUDE },
+  { " commands",		RPMFC_INCLUDE },
+  { " script",			RPMFC_INCLUDE },
 
-  { "Objective caml ",		RPMFC_OCAML|RPMFC_INCLUDE },
+  { "empty",			RPMFC_INCLUDE },
 
-  /* XXX .NET executables and libraries.  file(1) cannot differ from win32 
-   * executables unfortunately :( */
-  { "Mono/.Net assembly",       RPMFC_MONO|RPMFC_INCLUDE },
+  { "HTML",			RPMFC_INCLUDE },
+  { "SGML",			RPMFC_INCLUDE },
+  { "XML",			RPMFC_INCLUDE },
 
-  { "current ar archive",	RPMFC_STATIC|RPMFC_LIBRARY|RPMFC_ARCHIVE|RPMFC_INCLUDE },
+  { " source",			RPMFC_INCLUDE },
+  { "GLS_BINARY_LSB_FIRST",	RPMFC_INCLUDE },
+  { " DB ",			RPMFC_INCLUDE },
 
-  { "Zip archive data",		RPMFC_COMPRESSED|RPMFC_ARCHIVE|RPMFC_INCLUDE },
-  { "tar archive",		RPMFC_ARCHIVE|RPMFC_INCLUDE },
-  { "cpio archive",		RPMFC_ARCHIVE|RPMFC_INCLUDE },
-  { "RPM v3",			RPMFC_ARCHIVE|RPMFC_INCLUDE },
-  { "RPM v4",			RPMFC_ARCHIVE|RPMFC_INCLUDE },
-
-  { " image",			RPMFC_IMAGE|RPMFC_INCLUDE },
-  { " font metrics",		RPMFC_WHITE|RPMFC_INCLUDE },
-  { " font",			RPMFC_FONT|RPMFC_INCLUDE },
-  { " Font",			RPMFC_FONT|RPMFC_INCLUDE },
-
-  { " commands",		RPMFC_SCRIPT|RPMFC_INCLUDE },
-  { " script",			RPMFC_SCRIPT|RPMFC_INCLUDE },
-
-  { "empty",			RPMFC_WHITE|RPMFC_INCLUDE },
-
-  { "HTML",			RPMFC_WHITE|RPMFC_INCLUDE },
-  { "SGML",			RPMFC_WHITE|RPMFC_INCLUDE },
-  { "XML",			RPMFC_WHITE|RPMFC_INCLUDE },
-
-  { " source",			RPMFC_WHITE|RPMFC_INCLUDE },
-  { "GLS_BINARY_LSB_FIRST",	RPMFC_WHITE|RPMFC_INCLUDE },
-  { " DB ",			RPMFC_WHITE|RPMFC_INCLUDE },
-
-  { "symbolic link to",		RPMFC_SYMLINK },
-  { "socket",			RPMFC_DEVICE },
-  { "special",			RPMFC_DEVICE },
-  { " text",			RPMFC_TEXT|RPMFC_INCLUDE },
-
-  { "ASCII",			RPMFC_WHITE },
-  { "ISO-8859",			RPMFC_WHITE },
-
-  { "data",			RPMFC_WHITE },
-
-  { "application",		RPMFC_WHITE },
-  { "boot",			RPMFC_WHITE },
-  { "catalog",			RPMFC_WHITE },
-  { "code",			RPMFC_WHITE },
-  { "file",			RPMFC_WHITE },
-  { "format",			RPMFC_WHITE },
-  { "message",			RPMFC_WHITE },
-  { "program",			RPMFC_WHITE },
-
-  { "broken symbolic link to ",	RPMFC_WHITE|RPMFC_ERROR },
-  { "can't read",		RPMFC_WHITE|RPMFC_ERROR },
-  { "can't stat",		RPMFC_WHITE|RPMFC_ERROR },
-  { "executable, can't read",	RPMFC_WHITE|RPMFC_ERROR },
-  { "core file",		RPMFC_WHITE|RPMFC_ERROR },
+  { " text",			RPMFC_INCLUDE },
 
   { NULL,			RPMFC_BLACK }
 };
 
-int rpmfcColoring(const char * fmstr)
+static void argvAddTokens(ARGV_t *argv, const char *tnames)
+{
+    if (tnames) {
+	ARGV_t tokens = NULL;
+	argvSplit(&tokens, tnames, ",");
+	for (ARGV_t token = tokens; token && *token; token++)
+	    argvAddUniq(argv, *token);
+	argvFree(tokens);
+    }
+}
+
+static int matches(const struct matchRule *rule,
+		   const char *ftype, const char *path, int executable)
+{
+    if (!executable && hasAttr(rule->flags, "exeonly"))
+	return 0;
+    if (rule->magic && rule->path && hasAttr(rule->flags, "magic_and_path")) {
+	return (regMatch(rule->magic, ftype) && regMatch(rule->path, path));
+    } else {
+	return (regMatch(rule->magic, ftype) || regMatch(rule->path, path));
+    }
+}
+
+static void rpmfcAttributes(rpmfc fc, const char *ftype, const char *fullpath)
+{
+    const char *path = fullpath + fc->brlen;
+    int is_executable = 0;
+    struct stat st;
+    if (stat(fullpath, &st) == 0) {
+	is_executable = (S_ISREG(st.st_mode)) &&
+			(st.st_mode & (S_IXUSR|S_IXGRP|S_IXOTH));
+    }
+
+    for (rpmfcAttr *attr = fc->atypes; attr && *attr; attr++) {
+	/* Filter out excludes */
+	if (matches(&(*attr)->excl, ftype, path, is_executable))
+	    continue;
+
+	/* Add attributes on libmagic type & path pattern matches */
+	if (matches(&(*attr)->incl, ftype, path, is_executable))
+	    argvAddTokens(&fc->fattrs[fc->ix], (*attr)->name);
+    }
+}
+
+/* Return color for a given libmagic classification string */
+static rpm_color_t rpmfcColor(const char * fmstr)
 {
     rpmfcToken fct;
     rpm_color_t fcolor = RPMFC_BLACK;
@@ -645,10 +756,12 @@ int rpmfcColoring(const char * fmstr)
     for (fct = rpmfcTokens; fct->token != NULL; fct++) {
 	if (strstr(fmstr, fct->token) == NULL)
 	    continue;
+
 	fcolor |= fct->colors;
 	if (fcolor & RPMFC_INCLUDE)
-	    return fcolor;
+	    break;
     }
+
     return fcolor;
 }
 
@@ -656,7 +769,6 @@ void rpmfcPrint(const char * msg, rpmfc fc, FILE * fp)
 {
     rpm_color_t fcolor;
     int ndx;
-    int cx;
     int dx;
     int fx;
 
@@ -673,16 +785,22 @@ nrequires = rpmdsCount(fc->requires);
 
     if (fc)
     for (fx = 0; fx < fc->nfiles; fx++) {
-assert(fx < fc->fcdictx->nvals);
-	cx = fc->fcdictx->vals[fx];
-assert(fx < fc->fcolor->nvals);
-	fcolor = fc->fcolor->vals[fx];
+	rpmsid cx = fc->fcdictx[fx] + 1; /* id's are one off */
+	fcolor = fc->fcolor[fx];
+	ARGV_t fattrs = fc->fattrs[fx];
 
 	fprintf(fp, "%3d %s", fx, fc->fn[fx]);
 	if (fcolor != RPMFC_BLACK)
-		fprintf(fp, "\t0x%x", fc->fcolor->vals[fx]);
+		fprintf(fp, "\t0x%x", fc->fcolor[fx]);
 	else
-		fprintf(fp, "\t%s", fc->cdict[cx]);
+		fprintf(fp, "\t%s", rpmstrPoolStr(fc->cdict, cx));
+	if (fattrs) {
+	    char *attrs = argvJoin(fattrs, ",");
+	    fprintf(fp, " [%s]", attrs);
+	    free(attrs);
+	} else {
+	    fprintf(fp, " [none]");
+	}
 	fprintf(fp, "\n");
 
 	if (fc->fddictx == NULL || fc->fddictn == NULL)
@@ -732,26 +850,46 @@ assert(ix < nrequires);
 rpmfc rpmfcFree(rpmfc fc)
 {
     if (fc) {
-	fc->fn = argvFree(fc->fn);
-	fc->fcolor = argiFree(fc->fcolor);
-	fc->fcdictx = argiFree(fc->fcdictx);
-	fc->fddictx = argiFree(fc->fddictx);
-	fc->fddictn = argiFree(fc->fddictn);
-	fc->cdict = argvFree(fc->cdict);
-	fc->ddict = argvFree(fc->ddict);
-	fc->ddictx = argiFree(fc->ddictx);
+	for (rpmfcAttr *attr = fc->atypes; attr && *attr; attr++)
+	    rpmfcAttrFree(*attr);
+	free(fc->atypes);
+	free(fc->buildRoot);
+	for (int i = 0; i < fc->nfiles; i++) {
+	    free(fc->fn[i]);
+	    argvFree(fc->fattrs[i]);
+	}
+	free(fc->fn);
+	free(fc->fattrs);
+	free(fc->fcolor);
+	free(fc->fcdictx);
+	argiFree(fc->fddictx);
+	argiFree(fc->fddictn);
+	argiFree(fc->ddictx);
 
-	fc->provides = rpmdsFree(fc->provides);
-	fc->requires = rpmdsFree(fc->requires);
+	rpmstrPoolFree(fc->ddict);
+	rpmstrPoolFree(fc->cdict);
+
+	rpmdsFree(fc->provides);
+	rpmdsFree(fc->requires);
+	memset(fc, 0, sizeof(*fc)); /* trash and burn */
+	free(fc);
     }
-    fc = _free(fc);
     return NULL;
+}
+
+rpmfc rpmfcCreate(const char *buildRoot, rpmFlags flags)
+{
+    rpmfc fc = xcalloc(1, sizeof(*fc));
+    if (buildRoot) {
+	fc->buildRoot = xstrdup(buildRoot);
+	fc->brlen = strlen(buildRoot);
+    }
+    return fc;
 }
 
 rpmfc rpmfcNew(void)
 {
-    rpmfc fc = xcalloc(1, sizeof(*fc));
-    return fc;
+    return rpmfcCreate(NULL, 0);
 }
 
 rpmds rpmfcProvides(rpmfc fc)
@@ -766,140 +904,13 @@ rpmds rpmfcRequires(rpmfc fc)
 
 
 /**
- * Extract script dependencies.
- * @param fc		file classifier
- * @return		0 on success
- */
-static int rpmfcSCRIPT(rpmfc fc)
-{
-    const char * fn = fc->fn[fc->ix];
-    const char * bn;
-    rpmds ds;
-    char buf[BUFSIZ];
-    FILE * fp;
-    char * s, * se;
-    int i;
-    struct stat sb, * st = &sb;
-    int is_executable;
-    int xx;
-
-    /* Only executable scripts are searched. */
-    if (stat(fn, st) < 0)
-	return -1;
-    is_executable = (st->st_mode & (S_IXUSR|S_IXGRP|S_IXOTH));
-
-    fp = fopen(fn, "r");
-    if (fp == NULL || ferror(fp)) {
-	if (fp) (void) fclose(fp);
-	return -1;
-    }
-
-    /* Look for #! interpreter in first 10 lines. */
-    for (i = 0; i < 10; i++) {
-
-	s = fgets(buf, sizeof(buf) - 1, fp);
-	if (s == NULL || ferror(fp) || feof(fp))
-	    break;
-	s[sizeof(buf)-1] = '\0';
-	if (!(s[0] == '#' && s[1] == '!'))
-	    continue;
-	s += 2;
-
-	while (*s && strchr(" \t\n\r", *s) != NULL)
-	    s++;
-	if (*s == '\0')
-	    continue;
-	if (*s != '/')
-	    continue;
-
-	for (se = s+1; *se; se++) {
-	    if (strchr(" \t\n\r", *se) != NULL)
-		break;
-	}
-	*se = '\0';
-	se++;
-
-	if (is_executable) {
-	    char s2[_MAX_PATH];
-	    /* Add to package requires. */
-	    strcpy( s2, "");
-#ifdef __KLIBC__
-		// YD need to add @unixroot remapping
-		if (!strncmp( s, "/bin", 4) || !strncmp( s, "/usr/bin", 8)
-			|| !strncmp( s, "/usr/local/bin", 14)) {
-		    strcpy( s2, "/@unixroot");
-		}
-#endif
-	    strcat( s2, s);
-	    ds = rpmdsSingle(RPMTAG_REQUIRENAME, s2, "", RPMSENSE_FIND_REQUIRES);
-	    xx = rpmdsMerge(&fc->requires, ds);
-
-	    /* Add to file requires. */
-	    rpmfcAddFileDep(&fc->ddict, fc->ix, ds);
-
-	    ds = rpmdsFree(ds);
-	}
-
-	/* Set color based on interpreter name. */
-	bn = basename(s);
-	if (rstreq(bn, "perl"))
-	    fc->fcolor->vals[fc->ix] |= RPMFC_PERL;
-	else if (rstreqn(bn, "python", sizeof("python")-1))
-	    fc->fcolor->vals[fc->ix] |= RPMFC_PYTHON;
-
-	break;
-    }
-
-    (void) fclose(fp);
-
-    if (fc->fcolor->vals[fc->ix] & RPMFC_PERL) {
-	if (fc->fcolor->vals[fc->ix] & RPMFC_MODULE)
-	    xx = rpmfcHelper(fc, 'P', "perl");
-	if (is_executable || (fc->fcolor->vals[fc->ix] & RPMFC_MODULE))
-	    xx = rpmfcHelper(fc, 'R', "perl");
-    }
-    if (fc->fcolor->vals[fc->ix] & RPMFC_PYTHON) {
-	xx = rpmfcHelper(fc, 'P', "python");
-#ifdef	NOTYET
-	if (is_executable)
-#endif
-	    xx = rpmfcHelper(fc, 'R', "python");
-    } else 
-    if (fc->fcolor->vals[fc->ix] & RPMFC_LIBTOOL) {
-        xx = rpmfcHelper(fc, 'P', "libtool");
-#ifdef  NOTYET
-        if (is_executable)
-#endif
-            xx = rpmfcHelper(fc, 'R', "libtool");
-    } else
-    if (fc->fcolor->vals[fc->ix] & RPMFC_PKGCONFIG) {
-        xx = rpmfcHelper(fc, 'P', "pkgconfig");
-#ifdef  NOTYET
-        if (is_executable)
-#endif
-            xx = rpmfcHelper(fc, 'R', "pkgconfig");
-    } else 
-    if (fc->fcolor->vals[fc->ix] & RPMFC_MONO) {
-        xx = rpmfcHelper(fc, 'P', "mono");
-        if (is_executable)
-            xx = rpmfcHelper(fc, 'R', "mono");
-    } else
-    if (fc->fcolor->vals[fc->ix] & RPMFC_OCAML) {
-	xx = rpmfcHelper(fc, 'P', "ocaml");
-	xx = rpmfcHelper(fc, 'R', "ocaml");
-    }
-
-    return 0;
-}
-
-/**
  * Extract OS/2 LX dependencies.
  * @param fc		file classifier
  * @return		0 on success
  */
 static int rpmfcOS2(rpmfc fc)
 {
-#ifdef __KLIBC__
+#ifdef __KLIBC__00
     const char * fn = fc->fn[fc->ix];
     char fname[_MAX_FNAME], ext[_MAX_EXT];
     FILE *in;
@@ -986,356 +997,8 @@ static int rpmfcOS2(rpmfc fc)
 #endif
 }
 
-/**
- * Extract Elf dependencies.
- * @param fc		file classifier
- * @return		0 on success
- */
-static int rpmfcELF(rpmfc fc)
-{
-#if HAVE_GELF_H && HAVE_LIBELF
-    const char * fn = fc->fn[fc->ix];
-    Elf * elf;
-    Elf_Scn * scn;
-    Elf_Data * data;
-    GElf_Ehdr ehdr_mem, * ehdr;
-    GElf_Shdr shdr_mem, * shdr;
-    GElf_Verdef def_mem, * def;
-    GElf_Verneed need_mem, * need;
-    GElf_Dyn dyn_mem, * dyn;
-    unsigned int auxoffset;
-    unsigned int offset;
-    int fdno;
-    int cnt2;
-    int cnt;
-    char *buf = NULL;
-    const char * s;
-    struct stat sb, * st = &sb;
-    char * soname = NULL;
-    rpmds * depsp, ds;
-    rpmTag tagN;
-    rpmsenseFlags dsContext;
-    int xx;
-    int isElf64;
-    int isDSO;
-    int gotSONAME = 0;
-    int gotDEBUG = 0;
-    int gotHASH = 0;
-    int gotGNUHASH = 0;
-    static int filter_GLIBC_PRIVATE = 0;
-    static int oneshot = 0;
-
-    if (oneshot == 0) {
-	oneshot = 1;
-	filter_GLIBC_PRIVATE = rpmExpandNumeric("%{?_filter_GLIBC_PRIVATE}");
-    }
-
-    /* Files with executable bit set only. */
-    if (stat(fn, st) != 0)
-	return(-1);
-
-    fdno = open(fn, O_RDONLY);
-    if (fdno < 0)
-	return fdno;
-
-    (void) elf_version(EV_CURRENT);
-
-    elf = NULL;
-    if ((elf = elf_begin (fdno, ELF_C_READ, NULL)) == NULL
-     || elf_kind(elf) != ELF_K_ELF
-     || (ehdr = gelf_getehdr(elf, &ehdr_mem)) == NULL
-     || !(ehdr->e_type == ET_DYN || ehdr->e_type == ET_EXEC))
-	goto exit;
-
-    isElf64 = ehdr->e_ident[EI_CLASS] == ELFCLASS64;
-    isDSO = ehdr->e_type == ET_DYN;
-
-    scn = NULL;
-    while ((scn = elf_nextscn(elf, scn)) != NULL) {
-	shdr = gelf_getshdr(scn, &shdr_mem);
-	if (shdr == NULL)
-	    break;
-
-	soname = _free(soname);
-	switch (shdr->sh_type) {
-	default:
-	    continue;
-	    break;
-	case SHT_GNU_verdef:
-	    data = NULL;
-	    if (!fc->skipProv)
-	    while ((data = elf_getdata (scn, data)) != NULL) {
-		offset = 0;
-		for (cnt = shdr->sh_info; --cnt >= 0; ) {
-		
-		    def = gelf_getverdef (data, offset, &def_mem);
-		    if (def == NULL)
-			break;
-		    auxoffset = offset + def->vd_aux;
-		    for (cnt2 = def->vd_cnt; --cnt2 >= 0; ) {
-			GElf_Verdaux aux_mem, * aux;
-
-			aux = gelf_getverdaux (data, auxoffset, &aux_mem);
-			if (aux == NULL)
-			    break;
-
-			s = elf_strptr(elf, shdr->sh_link, aux->vda_name);
-			if (s == NULL)
-			    break;
-			if (def->vd_flags & VER_FLG_BASE) {
-			    soname = _free(soname);
-			    soname = xstrdup(s);
-			    auxoffset += aux->vda_next;
-			    continue;
-			} else
-			if (soname != NULL
-			 && !(filter_GLIBC_PRIVATE != 0
-				&& rstreq(s, "GLIBC_PRIVATE")))
-			{
-			    rasprintf(&buf, "%s(%s)%s", soname, s,
-#if !defined(__alpha__)
-							isElf64 ? "(64bit)" : "");
-#else
-							"");
-#endif
-
-			    /* Add to package provides. */
-			    ds = rpmdsSingle(RPMTAG_PROVIDES,
-					buf, "", RPMSENSE_FIND_PROVIDES);
-			    xx = rpmdsMerge(&fc->provides, ds);
-
-			    /* Add to file dependencies. */
-			    rpmfcAddFileDep(&fc->ddict, fc->ix, ds);
-
-			    ds = rpmdsFree(ds);
-			    free(buf);
-			}
-			auxoffset += aux->vda_next;
-		    }
-		    offset += def->vd_next;
-		}
-	    }
-	    break;
-	case SHT_GNU_verneed:
-	    data = NULL;
-	    /* Files with executable bit set only. */
-	    if (!fc->skipReq && (st->st_mode & (S_IXUSR|S_IXGRP|S_IXOTH)))
-	    while ((data = elf_getdata (scn, data)) != NULL) {
-		offset = 0;
-		for (cnt = shdr->sh_info; --cnt >= 0; ) {
-		    need = gelf_getverneed (data, offset, &need_mem);
-		    if (need == NULL)
-			break;
-
-		    s = elf_strptr(elf, shdr->sh_link, need->vn_file);
-		    if (s == NULL)
-			break;
-		    soname = _free(soname);
-		    soname = xstrdup(s);
-		    auxoffset = offset + need->vn_aux;
-		    for (cnt2 = need->vn_cnt; --cnt2 >= 0; ) {
-			GElf_Vernaux aux_mem, * aux;
-
-			aux = gelf_getvernaux (data, auxoffset, &aux_mem);
-			if (aux == NULL)
-			    break;
-
-			s = elf_strptr(elf, shdr->sh_link, aux->vna_name);
-			if (s == NULL)
-			    break;
-
-			/* Filter dependencies that contain GLIBC_PRIVATE */
-			if (soname != NULL
-			 && !(filter_GLIBC_PRIVATE != 0
-				&& rstreq(s, "GLIBC_PRIVATE")))
-			{
-			    rasprintf(&buf, "%s(%s)%s", soname, s,
-#if !defined(__alpha__)
-							isElf64 ? "(64bit)" : "");
-#else
-							"");
-#endif
-
-			    /* Add to package dependencies. */
-			    ds = rpmdsSingle(RPMTAG_REQUIRENAME,
-					buf, "", RPMSENSE_FIND_REQUIRES);
-			    xx = rpmdsMerge(&fc->requires, ds);
-
-			    /* Add to file dependencies. */
-			    rpmfcAddFileDep(&fc->ddict, fc->ix, ds);
-			    ds = rpmdsFree(ds);
-			    free(buf);
-			}
-			auxoffset += aux->vna_next;
-		    }
-		    offset += need->vn_next;
-		}
-	    }
-	    break;
-	case SHT_DYNAMIC:
-	    data = NULL;
-	    while ((data = elf_getdata (scn, data)) != NULL) {
-		for (cnt = 0; cnt < (shdr->sh_size / shdr->sh_entsize); ++cnt) {
-		    dyn = gelf_getdyn (data, cnt, &dyn_mem);
-		    if (dyn == NULL)
-			break;
-		    s = NULL;
-		    switch (dyn->d_tag) {
-		    default:
-			continue;
-			break;
-                    case DT_HASH:    
-			gotHASH= 1;
-			continue;
-                    case DT_GNU_HASH:
-			gotGNUHASH= 1;
-			continue;
-                    case DT_DEBUG:    
-			gotDEBUG = 1;
-			continue;
-		    case DT_NEEDED:
-			/* Files with executable bit set only. */
-			if (fc->skipReq || !(st->st_mode & (S_IXUSR|S_IXGRP|S_IXOTH)))
-			    continue;
-			/* Add to package requires. */
-			depsp = &fc->requires;
-			tagN = RPMTAG_REQUIRENAME;
-			dsContext = RPMSENSE_FIND_REQUIRES;
-			s = elf_strptr(elf, shdr->sh_link, dyn->d_un.d_val);
-assert(s != NULL);
-			break;
-		    case DT_SONAME:
-			gotSONAME = 1;
-			/* Add to package provides. */
-			if (fc->skipProv)
-			    continue;
-			depsp = &fc->provides;
-			tagN = RPMTAG_PROVIDENAME;
-			dsContext = RPMSENSE_FIND_PROVIDES;
-			s = elf_strptr(elf, shdr->sh_link, dyn->d_un.d_val);
-assert(s != NULL);
-			break;
-		    }
-		    if (s == NULL)
-			continue;
-
-		    rasprintf(&buf, "%s%s", s,
-#if !defined(__alpha__)
-					    isElf64 ? "()(64bit)" : "");
-#else
-					    "");
-#endif
-
-		    /* Add to package dependencies. */
-		    ds = rpmdsSingle(tagN, buf, "", dsContext);
-		    xx = rpmdsMerge(depsp, ds);
-
-		    /* Add to file dependencies. */
-		    rpmfcAddFileDep(&fc->ddict, fc->ix, ds);
-
-		    ds = rpmdsFree(ds);
-		    free(buf);
-		}
-	    }
-	    break;
-	}
-    }
-
-    /* For DSOs which use the .gnu_hash section and don't have a .hash
-     * section, we need to ensure that we have a new enough glibc. */ 
-    if (gotGNUHASH && !gotHASH) {
-        ds = rpmdsSingle(RPMTAG_REQUIRENAME, "rtld(GNU_HASH)", "", 
-                         RPMSENSE_FIND_REQUIRES);
-        rpmdsMerge(&fc->requires, ds);
-        rpmfcAddFileDep(&fc->ddict, fc->ix, ds);
-        ds = rpmdsFree(ds);
-    }
-
-    /* For DSO's, provide the basename of the file if DT_SONAME not found. */
-    if (!fc->skipProv && isDSO && !gotDEBUG && !gotSONAME) {
-	depsp = &fc->provides;
-	tagN = RPMTAG_PROVIDENAME;
-	dsContext = RPMSENSE_FIND_PROVIDES;
-
-	s = strrchr(fn, '/');
-	if (s)
-	    s++;
-	else
-	    s = fn;
-
-	rasprintf(&buf, "%s%s", s,
-#if !defined(__alpha__)
-				isElf64 ? "()(64bit)" : "");
-#else
-				"");
-#endif
-
-	/* Add to package dependencies. */
-	ds = rpmdsSingle(tagN, buf, "", dsContext);
-	xx = rpmdsMerge(depsp, ds);
-
-	/* Add to file dependencies. */
-	rpmfcAddFileDep(&fc->ddict, fc->ix, ds);
-
-	ds = rpmdsFree(ds);
-	free(buf);
-    }
-
-exit:
-    soname = _free(soname);
-    if (elf) (void) elf_end(elf);
-    xx = close(fdno);
-    return 0;
-#else
-    return -1;
-#endif
-}
-
-static int rpmfcMISC(rpmfc fc)
-{
-    struct stat st;
-    int rc = -1;
-    const char *what = NULL;
-    const char * fn = fc->fn[fc->ix];
-    /* this part is enumerated, compare equality not bit flags */
-    int ftype = fc->fcolor->vals[fc->ix] & 0x000F0000;
-
-    if (ftype == RPMFC_FONT) {
-	what = "fontconfig";
-    } else if (ftype == RPMFC_TEXT && rpmFileHasSuffix(fn, ".desktop")) {
-	what = "desktop";
-    }
-
-    if (what == NULL || stat(fn, &st) < 0 || !S_ISREG(st.st_mode)) {
-	goto exit;
-    }
-
-    (void) rpmfcHelper(fc, 'P', what);
-    rc = 0;
-
-exit:
-    return rc;
-}
-typedef const struct rpmfcApplyTbl_s {
-    int (*func) (rpmfc fc);
-    int colormask;
-} * rpmfcApplyTbl;
-
-/**
- */
-static const struct rpmfcApplyTbl_s const rpmfcApplyTable[] = {
-    { rpmfcELF,		RPMFC_ELF },
-    { rpmfcOS2,		RPMFC_OS2 },
-    { rpmfcSCRIPT,	(RPMFC_SCRIPT|RPMFC_BOURNE|
-			 RPMFC_PERL|RPMFC_PYTHON|RPMFC_MONO|RPMFC_OCAML|
-			 RPMFC_PKGCONFIG|RPMFC_LIBTOOL) },
-    { rpmfcMISC,	RPMFC_FONT|RPMFC_TEXT },
-    { NULL, 0 }
-};
-
 rpmRC rpmfcApply(rpmfc fc)
 {
-    rpmfcApplyTbl fcat;
     const char * s;
     char * se;
     rpmds ds;
@@ -1348,37 +1011,22 @@ rpmRC rpmfcApply(rpmfc fc)
     unsigned int val;
     int dix;
     int ix;
-    int i;
-    int xx;
 
     /* Generate package and per-file dependencies. */
-    for (fc->ix = 0; fc->fn[fc->ix] != NULL; fc->ix++) {
-
-	/* XXX Insure that /usr/lib{,64}/python files are marked RPMFC_PYTHON */
-	/* XXX HACK: classification by path is intrinsically stupid. */
-	{   const char *fn = strstr(fc->fn[fc->ix], "/usr/lib");
-	    if (fn) {
-		fn += sizeof("/usr/lib")-1;
-		if (fn[0] == '6' && fn[1] == '4')
-		    fn += 2;
-		if (rstreqn(fn, "/python", sizeof("/python")-1))
-		    fc->fcolor->vals[fc->ix] |= RPMFC_PYTHON;
-	    }
-	}
-
-	if (fc->fcolor->vals[fc->ix])
-	for (fcat = rpmfcApplyTable; fcat->func != NULL; fcat++) {
-	    if (!(fc->fcolor->vals[fc->ix] & fcat->colormask))
-		continue;
-	    xx = (*fcat->func) (fc);
+    for (fc->ix = 0; fc->ix < fc->nfiles && fc->fn[fc->ix] != NULL; fc->ix++) {
+	for (ARGV_t fattr = fc->fattrs[fc->ix]; fattr && *fattr; fattr++) {
+	    rpmfcHelperProvides(fc, *fattr);
+	    rpmfcHelperRequires(fc, *fattr);
 	}
     }
+    /* No more additions after this, freeze pool to minimize memory use */
+    rpmstrPoolFreeze(fc->ddict, 0);
 
     /* Generate per-file indices into package dependencies. */
-    nddict = argvCount(fc->ddict);
+    nddict = rpmstrPoolNumStr(fc->ddict);
     previx = -1;
-    for (i = 0; i < nddict; i++) {
-	s = fc->ddict[i];
+    for (rpmsid id = 1; id <= nddict; id++) {
+	s = rpmstrPoolStr(fc->ddict, id);
 
 	/* Parse out (file#,deptype,N,EVR,Flags) */
 	ix = strtol(s, &se, 10);
@@ -1403,32 +1051,27 @@ rpmRC rpmfcApply(rpmfc fc)
 	switch (deptype) {
 	default:
 	    break;
-	case 'P':	
+	case 'P':
 	    ds = rpmdsSingle(RPMTAG_PROVIDENAME, N, EVR, Flags);
 	    dix = rpmdsFind(fc->provides, ds);
-	    ds = rpmdsFree(ds);
+	    rpmdsFree(ds);
 	    break;
 	case 'R':
 	    ds = rpmdsSingle(RPMTAG_REQUIRENAME, N, EVR, Flags);
 	    dix = rpmdsFind(fc->requires, ds);
-	    ds = rpmdsFree(ds);
+	    rpmdsFree(ds);
 	    break;
 	}
 
-/* XXX assertion incorrect while generating -debuginfo deps. */
-#if 0
-assert(dix >= 0);
-#else
 	if (dix < 0)
 	    continue;
-#endif
 
 	val = (deptype << 24) | (dix & 0x00ffffff);
-	xx = argiAdd(&fc->ddictx, -1, val);
+	argiAdd(&fc->ddictx, -1, val);
 
 	if (previx != ix) {
 	    previx = ix;
-	    xx = argiAdd(&fc->fddictx, ix, argiCount(fc->ddictx)-1);
+	    argiAdd(&fc->fddictx, ix, argiCount(fc->ddictx)-1);
 	}
 	if (fc->fddictn && fc->fddictn->vals)
 	    fc->fddictn->vals[ix]++;
@@ -1437,58 +1080,89 @@ assert(dix >= 0);
     return RPMRC_OK;
 }
 
+static int initAttrs(rpmfc fc)
+{
+    ARGV_t files = NULL;
+    char * attrPath = rpmExpand("%{_fileattrsdir}/*.attr", NULL);
+    int nattrs = 0;
+
+    /* Discover known attributes from pathnames + initialize them */
+    if (rpmGlob(attrPath, NULL, &files) == 0) {
+	nattrs = argvCount(files);
+	fc->atypes = xcalloc(nattrs + 1, sizeof(*fc->atypes));
+	for (int i = 0; i < nattrs; i++) {
+	    char *bn = basename(files[i]);
+	    bn[strlen(bn)-strlen(".attr")] = '\0';
+	    fc->atypes[i] = rpmfcAttrNew(bn);
+	}
+	fc->atypes[nattrs] = NULL;
+	argvFree(files);
+    }
+    free(attrPath);
+    return nattrs;
+}
+
 rpmRC rpmfcClassify(rpmfc fc, ARGV_t argv, rpm_mode_t * fmode)
 {
-    ARGV_t fcav = NULL;
-    ARGV_t dav;
-    const char * s, * se;
-    size_t slen;
-    int fcolor;
-    int xx;
     int msflags = MAGIC_CHECK | MAGIC_COMPRESS | MAGIC_NO_CHECK_TOKENS;
     magic_t ms = NULL;
+    rpmRC rc = RPMRC_FAIL;
 
-    if (fc == NULL || argv == NULL)
-	return 0;
+    if (fc == NULL) {
+	rpmlog(RPMLOG_ERR, _("Empty file classifier\n"));
+	goto exit;
+    }
+
+    /* It is OK when we have no files to classify. */
+    if (argv == NULL)
+	return RPMRC_OK;
+
+    if (initAttrs(fc) < 1) {
+	rpmlog(RPMLOG_ERR, _("No file attributes configured\n"));
+	goto exit;
+    }
 
     fc->nfiles = argvCount(argv);
+    fc->fn = xcalloc(fc->nfiles, sizeof(*fc->fn));
+    fc->fattrs = xcalloc(fc->nfiles, sizeof(*fc->fattrs));
+    fc->fcolor = xcalloc(fc->nfiles, sizeof(*fc->fcolor));
+    fc->fcdictx = xcalloc(fc->nfiles, sizeof(*fc->fcdictx));
 
     /* Initialize the per-file dictionary indices. */
-    xx = argiAdd(&fc->fddictx, fc->nfiles-1, 0);
-    xx = argiAdd(&fc->fddictn, fc->nfiles-1, 0);
+    argiAdd(&fc->fddictx, fc->nfiles-1, 0);
+    argiAdd(&fc->fddictn, fc->nfiles-1, 0);
 
     /* Build (sorted) file class dictionary. */
-    xx = argvAdd(&fc->cdict, "");
-    xx = argvAdd(&fc->cdict, "directory");
+    fc->cdict = rpmstrPoolCreate();
+    fc->ddict = rpmstrPoolCreate();
 
     ms = magic_open(msflags);
     if (ms == NULL) {
 	rpmlog(RPMLOG_ERR, _("magic_open(0x%x) failed: %s\n"),
 		msflags, strerror(errno));
-	return RPMRC_FAIL;
+	goto exit;
     }
 
-    xx = magic_load(ms, NULL);
-    if (xx == -1) {
+    if (magic_load(ms, NULL) == -1) {
 	rpmlog(RPMLOG_ERR, _("magic_load failed: %s\n"), magic_error(ms));
-	magic_close(ms);
-	return RPMRC_FAIL;
+	goto exit;
     }
 
     for (fc->ix = 0; fc->ix < fc->nfiles; fc->ix++) {
+	rpmsid ftypeId;
 	const char * ftype;
+	const char * s = argv[fc->ix];
+	size_t slen = strlen(s);
+	int fcolor = RPMFC_BLACK;
 	rpm_mode_t mode = (fmode ? fmode[fc->ix] : 0);
 	int is_executable = (mode & (S_IXUSR|S_IXGRP|S_IXOTH));
-
-	s = argv[fc->ix];
-	slen = strlen(s);
 
 	switch (mode & S_IFMT) {
 	case S_IFCHR:	ftype = "character special";	break;
 	case S_IFBLK:	ftype = "block special";	break;
 	case S_IFIFO:	ftype = "fifo (named pipe)";	break;
 	case S_IFSOCK:	ftype = "socket";		break;
-	case S_IFDIR:
+	case S_IFDIR:	ftype = "directory";		break;
 	case S_IFLNK:
 	case S_IFREG:
 	default:
@@ -1516,52 +1190,46 @@ rpmRC rpmfcClassify(rpmfc fc, ARGV_t argv, rpm_mode_t * fmode)
 		       s, mode, magic_error(ms));
 		/* only executable files are critical to dep extraction */
 		if (is_executable) {
-		    magic_close(ms);
-		    return RPMRC_FAIL;
+		    goto exit;
 		}
 		/* unrecognized non-executables get treated as "data" */
 		ftype = "data";
 	    }
 	}
 
-	se = ftype;
-        rpmlog(RPMLOG_DEBUG, "%s: %s\n", s, se);
+	rpmlog(RPMLOG_DEBUG, "%s: %s\n", s, ftype);
 
 	/* Save the path. */
-	xx = argvAdd(&fc->fn, s);
+	fc->fn[fc->ix] = xstrdup(s);
 
-	/* Save the file type string. */
-	xx = argvAdd(&fcav, se);
+	/* Add (filtered) file coloring */
+	fcolor |= rpmfcColor(ftype);
 
-	/* Add (filtered) entry to sorted class dictionary. */
-	fcolor = rpmfcColoring(se);
-	xx = argiAdd(&fc->fcolor, fc->ix, fcolor);
+	/* Add attributes based on file type and/or path */
+	rpmfcAttributes(fc, ftype, s);
 
-	if (fcolor != RPMFC_WHITE && (fcolor & RPMFC_INCLUDE))
-	    xx = rpmfcSaveArg(&fc->cdict, se);
-    }
+	fc->fcolor[fc->ix] = fcolor;
 
-    /* Build per-file class index array. */
-    fc->fknown = 0;
-    for (fc->ix = 0; fc->ix < fc->nfiles; fc->ix++) {
-	se = fcav[fc->ix];
-
-	dav = argvSearch(fc->cdict, se, NULL);
-	if (dav) {
-	    xx = argiAdd(&fc->fcdictx, fc->ix, (dav - fc->cdict));
+	/* Add to file class dictionary and index array */
+	if (fcolor != RPMFC_WHITE && (fcolor & RPMFC_INCLUDE)) {
+	    ftypeId = rpmstrPoolId(fc->cdict, ftype, 1);
 	    fc->fknown++;
 	} else {
-	    xx = argiAdd(&fc->fcdictx, fc->ix, 0);
+	    ftypeId = rpmstrPoolId(fc->cdict, "", 1);
 	    fc->fwhite++;
 	}
+	/* Pool id's start from 1, for headers we want it from 0 */
+	fc->fcdictx[fc->ix] = ftypeId - 1;
     }
+    rc = RPMRC_OK;
 
-    fcav = argvFree(fcav);
-
+exit:
+    /* No more additions after this, freeze pool to minimize memory use */
+    rpmstrPoolFreeze(fc->cdict, 0);
     if (ms != NULL)
 	magic_close(ms);
 
-    return RPMRC_OK;
+    return rc;
 }
 
 /**
@@ -1573,11 +1241,11 @@ typedef struct DepMsg_s * DepMsg_t;
 struct DepMsg_s {
     const char * msg;
     char * const argv[4];
-    rpmTag ntag;
-    rpmTag vtag;
-    rpmTag ftag;
+    rpmTagVal ntag;
+    rpmTagVal vtag;
+    rpmTagVal ftag;
     int mask;
-    int xor;
+    int xormask;
 };
 
 /**
@@ -1607,6 +1275,12 @@ static struct DepMsg_s depMsgs[] = {
   { "Requires(postun)",	{ NULL, "postun", NULL, NULL },
 	-1, -1, RPMTAG_REQUIREFLAGS,
 	RPMSENSE_SCRIPT_POSTUN, 0 },
+  { "Requires(pretrans)",	{ NULL, "pretrans", NULL, NULL },
+	-1, -1, RPMTAG_REQUIREFLAGS,
+	RPMSENSE_PRETRANS, 0 },
+  { "Requires(posttrans)",	{ NULL, "posttrans", NULL, NULL },
+	-1, -1, RPMTAG_REQUIREFLAGS,
+	RPMSENSE_POSTTRANS, 0 },
   { "Requires",		{ "%{?__find_requires}", NULL, NULL, NULL },
 	-1, -1, RPMTAG_REQUIREFLAGS,	/* XXX inherit name/version arrays */
 	RPMSENSE_FIND_REQUIRES|RPMSENSE_TRIGGERIN|RPMSENSE_TRIGGERUN|RPMSENSE_TRIGGERPOSTUN|RPMSENSE_TRIGGERPREIN, 0 },
@@ -1633,7 +1307,7 @@ static void printDeps(Header h)
 
     for (dm = DepMsgs; dm->msg != NULL; dm++) {
 	if (dm->ntag != -1) {
-	    ds = rpmdsFree(ds);
+	    rpmdsFree(ds);
 	    ds = rpmdsNew(h, dm->ntag, 0);
 	}
 	if (dm->ftag == 0)
@@ -1648,7 +1322,7 @@ static void printDeps(Header h)
 
 	    Flags = rpmdsFlags(ds);
 	
-	    if (!((Flags & dm->mask) ^ dm->xor))
+	    if (!((Flags & dm->mask) ^ dm->xormask))
 		continue;
 	    if (bingo == 0) {
 		rpmlog(RPMLOG_NOTICE, "%s:", (dm->msg ? dm->msg : ""));
@@ -1661,44 +1335,35 @@ static void printDeps(Header h)
 	if (bingo)
 	    rpmlog(RPMLOG_NOTICE, "\n");
     }
-    ds = rpmdsFree(ds);
+    rpmdsFree(ds);
 }
 
-/**
- */
-static int rpmfcGenerateDependsHelper(const rpmSpec spec, Package pkg, rpmfi fi)
+static rpmRC rpmfcGenerateDependsHelper(const rpmSpec spec, Package pkg, rpmfi fi)
 {
-    StringBuf sb_stdin;
-    StringBuf sb_stdout;
-    DepMsg_t dm;
-    int failnonzero = 0;
-    int rc = RPMRC_OK;
+    StringBuf sb_stdin = newStringBuf();
+    rpmRC rc = RPMRC_OK;
 
-    /*
-     * Create file manifest buffer to deliver to dependency finder.
-     */
-    sb_stdin = newStringBuf();
+    /* Create file manifest buffer to deliver to dependency finder. */
     fi = rpmfiInit(fi, 0);
-    if (fi != NULL)
     while (rpmfiNext(fi) >= 0)
 	appendLineStringBuf(sb_stdin, rpmfiFN(fi));
 
-    for (dm = DepMsgs; dm->msg != NULL; dm++) {
-	rpmTag tag = (dm->ftag > 0) ? dm->ftag : dm->ntag;
+    for (DepMsg_t dm = DepMsgs; dm->msg != NULL; dm++) {
+	rpmTagVal tag = (dm->ftag > 0) ? dm->ftag : dm->ntag;
 	rpmsenseFlags tagflags;
 	char * s = NULL;
+	StringBuf sb_stdout = NULL;
+	int failnonzero = (tag == RPMTAG_PROVIDEFLAGS);
 
 	switch(tag) {
 	case RPMTAG_PROVIDEFLAGS:
 	    if (!pkg->autoProv)
 		continue;
-	    failnonzero = 1;
 	    tagflags = RPMSENSE_FIND_PROVIDES;
 	    break;
 	case RPMTAG_REQUIREFLAGS:
 	    if (!pkg->autoReq)
 		continue;
-	    failnonzero = 0;
 	    tagflags = RPMSENSE_FIND_REQUIRES;
 	    break;
 	default:
@@ -1706,12 +1371,13 @@ static int rpmfcGenerateDependsHelper(const rpmSpec spec, Package pkg, rpmfi fi)
 	    break;
 	}
 
-	if (rpmfcExec(dm->argv, sb_stdin, &sb_stdout, failnonzero) == -1)
-	    continue;
-
 	s = rpmExpand(dm->argv[0], NULL);
-	rpmlog(RPMLOG_NOTICE, _("Finding  %s: %s\n"), dm->msg, (s ? s : ""));
+	rpmlog(RPMLOG_NOTICE, _("Finding  %s: %s\n"), dm->msg, s);
 	free(s);
+
+	if (rpmfcExec(dm->argv, sb_stdin, &sb_stdout,
+			failnonzero, spec->buildRoot) == -1)
+	    continue;
 
 	if (sb_stdout == NULL) {
 	    rc = RPMRC_FAIL;
@@ -1721,7 +1387,7 @@ static int rpmfcGenerateDependsHelper(const rpmSpec spec, Package pkg, rpmfi fi)
 
 	/* Parse dependencies into header */
 	rc = parseRCPOT(spec, pkg, getStringBuf(sb_stdout), tag, 0, tagflags);
-	sb_stdout = freeStringBuf(sb_stdout);
+	freeStringBuf(sb_stdout);
 
 	if (rc) {
 	    rpmlog(RPMLOG_ERR, _("Failed to find %s:\n"), dm->msg);
@@ -1729,7 +1395,7 @@ static int rpmfcGenerateDependsHelper(const rpmSpec spec, Package pkg, rpmfi fi)
 	}
     }
 
-    sb_stdin = freeStringBuf(sb_stdin);
+    freeStringBuf(sb_stdin);
 
     return rc;
 }
@@ -1738,120 +1404,79 @@ rpmRC rpmfcGenerateDepends(const rpmSpec spec, Package pkg)
 {
     rpmfi fi = pkg->cpioList;
     rpmfc fc = NULL;
-    rpmds ds;
-    ARGV_t av;
-    rpm_mode_t * fmode;
+    ARGV_t av = NULL;
+    rpm_mode_t * fmode = NULL;
     int ac = rpmfiFC(fi);
-    char *buf = NULL;
-    const char * N;
-    const char * EVR;
-    int genConfigDeps;
-    int rc = RPMRC_OK;
-    int xx;
+    int genConfigDeps = 0;
+    rpmRC rc = RPMRC_OK;
     int idx;
     struct rpmtd_s td;
 
     /* Skip packages with no files. */
     if (ac <= 0)
-	return 0;
+	goto exit;
 
     /* Skip packages that have dependency generation disabled. */
     if (! (pkg->autoReq || pkg->autoProv))
-	return 0;
+	goto exit;
 
     /* If new-fangled dependency generation is disabled ... */
     if (!rpmExpandNumeric("%{?_use_internal_dependency_generator}")) {
 	/* ... then generate dependencies using %{__find_requires} et al. */
 	rc = rpmfcGenerateDependsHelper(spec, pkg, fi);
-	printDeps(pkg->header);
-	return rc;
+	goto exit;
     }
 
     /* Extract absolute file paths in argv format. */
     av = xcalloc(ac+1, sizeof(*av));
     fmode = xcalloc(ac+1, sizeof(*fmode));
 
-    genConfigDeps = 0;
     fi = rpmfiInit(fi, 0);
-    if (fi != NULL)
     while ((idx = rpmfiNext(fi)) >= 0) {
-	rpmfileAttrs fileAttrs;
-
 	/* Does package have any %config files? */
-	fileAttrs = rpmfiFFlags(fi);
-	genConfigDeps |= (fileAttrs & RPMFILE_CONFIG);
+	genConfigDeps |= (rpmfiFFlags(fi) & RPMFILE_CONFIG);
 
 	av[idx] = xstrdup(rpmfiFN(fi));
 	fmode[idx] = rpmfiFMode(fi);
     }
     av[ac] = NULL;
 
-    fc = rpmfcNew();
+    fc = rpmfcCreate(spec->buildRoot, 0);
     fc->skipProv = !pkg->autoProv;
     fc->skipReq = !pkg->autoReq;
-    fc->tracked = 0;
-    fc->brlen = (spec->buildRoot ? strlen(spec->buildRoot) : 0);
 
     /* Copy (and delete) manually generated dependencies to dictionary. */
     if (!fc->skipProv) {
-	ds = rpmdsNew(pkg->header, RPMTAG_PROVIDENAME, 0);
-	xx = rpmdsMerge(&fc->provides, ds);
-	ds = rpmdsFree(ds);
-	xx = headerDel(pkg->header, RPMTAG_PROVIDENAME);
-	xx = headerDel(pkg->header, RPMTAG_PROVIDEVERSION);
-	xx = headerDel(pkg->header, RPMTAG_PROVIDEFLAGS);
+	rpmdsMerge(&fc->provides, pkg->provides);
+
+	headerDel(pkg->header, RPMTAG_PROVIDENAME);
+	headerDel(pkg->header, RPMTAG_PROVIDEVERSION);
+	headerDel(pkg->header, RPMTAG_PROVIDEFLAGS);
 
 	/* Add config dependency, Provides: config(N) = EVR */
 	if (genConfigDeps) {
-	    N = rpmdsN(pkg->ds);
-	    if (N == NULL) {
-		rc = RPMRC_FAIL;
-		rpmlog(RPMLOG_ERR, _("Unable to get current dependency name.\n"));
-		goto exit;
-	    }
-	    EVR = rpmdsEVR(pkg->ds);
-	    if (EVR == NULL) {
-		rc = RPMRC_FAIL;
-		rpmlog(RPMLOG_ERR, _("Unable to get current dependency epoch-version-release.\n"));
-		goto exit;
-	    }
-	    rasprintf(&buf, "config(%s)", N);
-	    ds = rpmdsSingle(RPMTAG_PROVIDENAME, buf, EVR,
-			(RPMSENSE_EQUAL|RPMSENSE_CONFIG));
-	    free(buf);
-	    xx = rpmdsMerge(&fc->provides, ds);
-	    ds = rpmdsFree(ds);
+	    rpmds ds = rpmdsSingleNS(RPMTAG_PROVIDENAME, "config",
+			       rpmdsN(pkg->ds), rpmdsEVR(pkg->ds),
+			       (RPMSENSE_EQUAL|RPMSENSE_CONFIG));
+	    rpmdsMerge(&fc->provides, ds);
+	    rpmdsFree(ds);
 	}
     }
 
     if (!fc->skipReq) {
-	ds = rpmdsNew(pkg->header, RPMTAG_REQUIRENAME, 0);
-	xx = rpmdsMerge(&fc->requires, ds);
-	ds = rpmdsFree(ds);
-	xx = headerDel(pkg->header, RPMTAG_REQUIRENAME);
-	xx = headerDel(pkg->header, RPMTAG_REQUIREVERSION);
-	xx = headerDel(pkg->header, RPMTAG_REQUIREFLAGS);
+	rpmdsMerge(&fc->requires, pkg->requires);
+
+	headerDel(pkg->header, RPMTAG_REQUIRENAME);
+	headerDel(pkg->header, RPMTAG_REQUIREVERSION);
+	headerDel(pkg->header, RPMTAG_REQUIREFLAGS);
 
 	/* Add config dependency,  Requires: config(N) = EVR */
 	if (genConfigDeps) {
-	    N = rpmdsN(pkg->ds);
-	    if (N == NULL) {
-		rc = RPMRC_FAIL;
-		rpmlog(RPMLOG_ERR, _("Unable to get current dependency name.\n"));
-		goto exit;
-	    }
-	    EVR = rpmdsEVR(pkg->ds);
-	    if (EVR == NULL) {
-		rc = RPMRC_FAIL;
-		rpmlog(RPMLOG_ERR, _("Unable to get current dependency epoch-version-release.\n"));
-		goto exit;
-	    }
-	    rasprintf(&buf, "config(%s)", N);
-	    ds = rpmdsSingle(RPMTAG_REQUIRENAME, buf, EVR,
-			(RPMSENSE_EQUAL|RPMSENSE_CONFIG));
-	    free(buf);
-	    xx = rpmdsMerge(&fc->requires, ds);
-	    ds = rpmdsFree(ds);
+	    rpmds ds = rpmdsSingleNS(RPMTAG_REQUIRENAME, "config",
+			       rpmdsN(pkg->ds), rpmdsEVR(pkg->ds),
+			       (RPMSENSE_EQUAL|RPMSENSE_CONFIG));
+	    rpmdsMerge(&fc->requires, ds);
+	    rpmdsFree(ds);
 	}
     }
 
@@ -1866,95 +1491,74 @@ rpmRC rpmfcGenerateDepends(const rpmSpec spec, Package pkg)
 	goto exit;
 
     /* Add per-file colors(#files) */
-    if (rpmtdFromArgi(&td, RPMTAG_FILECOLORS, fc->fcolor)) {
-	rpm_color_t *fcolor;
-	if (ac != rpmtdCount(&td)) {
-	    rc = RPMRC_FAIL;
-	    rpmlog(RPMLOG_ERR, _("File count from file info doesn't match file in container.\n"));
-	    goto exit;
-	}
-	assert(rpmtdType(&td) == RPM_INT32_TYPE);
-	/* XXX Make sure only primary (i.e. Elf32/Elf64) colors are added. */
-	while ((fcolor = rpmtdNextUint32(&td))) {
-	    *fcolor &= 0x0f;
-	}
-	headerPut(pkg->header, &td, HEADERPUT_DEFAULT);
-    }
-
+    /* XXX Make sure only primary (i.e. Elf32/Elf64) colors are added. */
+    for (int i = 0; i < fc->nfiles; i++)
+	fc->fcolor[i] &= 0x0f;
+    headerPutUint32(pkg->header, RPMTAG_FILECOLORS, fc->fcolor, fc->nfiles);
+    
     /* Add classes(#classes) */
-    if (rpmtdFromArgv(&td, RPMTAG_CLASSDICT, fc->cdict)) {
-	if (rpmtdType(&td) != RPM_STRING_ARRAY_TYPE) {
-	    rc = RPMRC_FAIL;
-	    rpmlog(RPMLOG_ERR, _("Container not of string array data type.\n"));
-	    goto exit;
-	}
-	headerPut(pkg->header, &td, HEADERPUT_DEFAULT);
+    for (rpmsid id = 1; id <= rpmstrPoolNumStr(fc->cdict); id++) {
+	headerPutString(pkg->header, RPMTAG_CLASSDICT,
+			rpmstrPoolStr(fc->cdict, id));
     }
 
     /* Add per-file classes(#files) */
-    if (rpmtdFromArgi(&td, RPMTAG_FILECLASS, fc->fcdictx)) {
-	assert(rpmtdType(&td) == RPM_INT32_TYPE);
-	headerPut(pkg->header, &td, HEADERPUT_DEFAULT);
-    }
+    headerPutUint32(pkg->header, RPMTAG_FILECLASS, fc->fcdictx, fc->nfiles);
 
     /* Add Provides: */
-    if (fc->provides != NULL && rpmdsCount(fc->provides) > 0 && !fc->skipProv) {
+    if (!fc->skipProv) {
 	rpmds pi = rpmdsInit(fc->provides);
 	while (rpmdsNext(pi) >= 0) {
-	    const char *name = rpmdsN(pi);
-	    const char *evr = rpmdsEVR(pi);
 	    rpmsenseFlags flags = rpmdsFlags(pi);
 	
-	    headerPutString(pkg->header, RPMTAG_PROVIDENAME, name);
-	    headerPutString(pkg->header, RPMTAG_PROVIDEVERSION, evr);
+	    headerPutString(pkg->header, RPMTAG_PROVIDENAME, rpmdsN(pi));
+	    headerPutString(pkg->header, RPMTAG_PROVIDEVERSION, rpmdsEVR(pi));
 	    headerPutUint32(pkg->header, RPMTAG_PROVIDEFLAGS, &flags, 1);
 	}
     }
 
     /* Add Requires: */
-    if (fc->requires != NULL && rpmdsCount(fc->requires) > 0 && !fc->skipReq) {
+    if (!fc->skipReq) {
 	rpmds pi = rpmdsInit(fc->requires);
 	while (rpmdsNext(pi) >= 0) {
-	    const char *name = rpmdsN(pi);
-	    const char *evr = rpmdsEVR(pi);
 	    rpmsenseFlags flags = rpmdsFlags(pi);
 	
-	    headerPutString(pkg->header, RPMTAG_REQUIRENAME, name);
-	    headerPutString(pkg->header, RPMTAG_REQUIREVERSION, evr);
+	    headerPutString(pkg->header, RPMTAG_REQUIRENAME, rpmdsN(pi));
+	    headerPutString(pkg->header, RPMTAG_REQUIREVERSION, rpmdsEVR(pi));
 	    headerPutUint32(pkg->header, RPMTAG_REQUIREFLAGS, &flags, 1);
 	}
     }
 
     /* Add dependency dictionary(#dependencies) */
     if (rpmtdFromArgi(&td, RPMTAG_DEPENDSDICT, fc->ddictx)) {
-	assert(rpmtdType(&td) == RPM_INT32_TYPE);
 	headerPut(pkg->header, &td, HEADERPUT_DEFAULT);
     }
 
     /* Add per-file dependency (start,number) pairs (#files) */
     if (rpmtdFromArgi(&td, RPMTAG_FILEDEPENDSX, fc->fddictx)) {
-	assert(rpmtdType(&td) == RPM_INT32_TYPE);
 	headerPut(pkg->header, &td, HEADERPUT_DEFAULT);
     }
 
     if (rpmtdFromArgi(&td, RPMTAG_FILEDEPENDSN, fc->fddictn)) {
-	assert(rpmtdType(&td) == RPM_INT32_TYPE);
 	headerPut(pkg->header, &td, HEADERPUT_DEFAULT);
     }
 
+
+    if (_rpmfc_debug) {
+	char *msg = NULL;
+	rasprintf(&msg, "final: files %d cdict[%d] %d%% ddictx[%d]",
+		  fc->nfiles, rpmstrPoolNumStr(fc->cdict),
+		  ((100 * fc->fknown)/fc->nfiles), argiCount(fc->ddictx));
+	rpmfcPrint(msg, fc, NULL);
+	free(msg);
+    }
+exit:
     printDeps(pkg->header);
 
-if (fc != NULL && _rpmfc_debug) {
-char *msg = NULL;
-rasprintf(&msg, "final: files %d cdict[%d] %d%% ddictx[%d]", fc->nfiles, argvCount(fc->cdict), ((100 * fc->fknown)/fc->nfiles), argiCount(fc->ddictx));
-rpmfcPrint(msg, fc, NULL);
-free(msg);
-}
-exit:
     /* Clean up. */
-    fmode = _free(fmode);
-    fc = rpmfcFree(fc);
-    av = argvFree(av);
+    free(fmode);
+    rpmfcFree(fc);
+    argvFree(av);
 
     return rc;
 }

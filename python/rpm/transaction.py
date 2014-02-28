@@ -1,10 +1,10 @@
 #!/usr/bin/python
 
 import rpm
-from rpm._rpm import ts as _rpmts
+from rpm._rpm import ts as TransactionSetCore
 
 # TODO: migrate relevant documentation from C-side
-class TransactionSet(_rpmts):
+class TransactionSet(TransactionSetCore):
     _probFilter = 0
 
     def _wrapSetGet(self, attr, val):
@@ -45,7 +45,7 @@ class TransactionSet(_rpmts):
             return tuple(keys)
 
     def addInstall(self, item, key, how="u"):
-        if isinstance(item, str):
+        if isinstance(item, basestring):
             f = file(item)
             header = self.hdrFromFdno(f)
             f.close()
@@ -58,7 +58,7 @@ class TransactionSet(_rpmts):
             raise ValueError('how argument must be "u" or "i"')
         upgrade = (how == "u")
 
-        if not _rpmts.addInstall(self, header, key, upgrade):
+        if not TransactionSetCore.addInstall(self, header, key, upgrade):
             raise rpm.error("adding package to transaction failed")
 
     def addErase(self, item):
@@ -69,13 +69,13 @@ class TransactionSet(_rpmts):
             hdrs = item
         elif isinstance(item, int):
             hdrs = self.dbMatch(rpm.RPMDBI_PACKAGES, item)
-        elif isinstance(item, str):
+        elif isinstance(item, basestring):
             hdrs = self.dbMatch(rpm.RPMDBI_LABEL, item)
         else:
             raise TypeError("invalid type %s" % type(item))
 
         for h in hdrs:
-            if not _rpmts.addErase(self, h):
+            if not TransactionSetCore.addErase(self, h):
                 raise rpm.error("package not installed")
 
         # garbage collection should take care but just in case...
@@ -83,10 +83,10 @@ class TransactionSet(_rpmts):
             del hdrs
 
     def run(self, callback, data):
-        rc = _rpmts.run(self, callback, data, self._probFilter)
+        rc = TransactionSetCore.run(self, callback, data, self._probFilter)
 
         # crazy backwards compatibility goo: None for ok, list of problems
-        # if transaction didnt complete and empty list if it completed
+        # if transaction didn't complete and empty list if it completed
         # with errors
         if rc == 0:
             return None
@@ -99,7 +99,7 @@ class TransactionSet(_rpmts):
         return res
 
     def check(self, *args, **kwds):
-        _rpmts.check(self, *args, **kwds)
+        TransactionSetCore.check(self, *args, **kwds)
 
         # compatibility: munge problem strings into dependency tuples of doom
         res = []
@@ -113,11 +113,11 @@ class TransactionSet(_rpmts):
                 continue
 
             # strip arch, split to name, version, release
-            nevr = p.pkgNEVR.rsplit('.', 1)[0]
+            nevr = p.altNEVR.rsplit('.', 1)[0]
             n, v, r = nevr.rsplit('-', 2)
 
             # extract the dependency information
-            needs = p.altNEVR.split()[1:]
+            needs = p._str.split()
             needname = needs[0]
             needflags = rpm.RPMSENSE_ANY
             if len(needs) == 3:
@@ -134,7 +134,7 @@ class TransactionSet(_rpmts):
         return res
 
     def hdrCheck(self, blob):
-        res, msg = _rpmts.hdrCheck(self, blob)
+        res, msg = TransactionSetCore.hdrCheck(self, blob)
         # generate backwards compatibly broken exceptions
         if res == rpm.RPMRC_NOKEY:
             raise rpm.error("public key not available")
@@ -144,7 +144,7 @@ class TransactionSet(_rpmts):
             raise rpm.error(msg)
 
     def hdrFromFdno(self, fd):
-        res, h = _rpmts.hdrFromFdno(self, fd)
+        res, h = TransactionSetCore.hdrFromFdno(self, fd)
         # generate backwards compatibly broken exceptions
         if res == rpm.RPMRC_NOKEY:
             raise rpm.error("public key not available")

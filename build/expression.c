@@ -13,9 +13,8 @@
 
 #include "system.h"
 
-#include <rpm/rpmbuild.h>
 #include <rpm/rpmlog.h>
-
+#include "build/rpmbuild_internal.h"
 #include "debug.h"
 
 /* #define DEBUG_PARSER 1 */
@@ -27,11 +26,16 @@
 #define DEBUG(x)
 #endif
 
+typedef enum { 
+    VALUE_TYPE_INTEGER,
+    VALUE_TYPE_STRING,
+} valueType;
+
 /**
  * Encapsulation of a "value"
  */
 typedef struct _value {
-  enum { VALUE_TYPE_INTEGER, VALUE_TYPE_STRING } type;
+  valueType type;
   union {
     char *s;
     int i;
@@ -69,7 +73,7 @@ static void valueFree( Value v)
   if (v) {
     if (v->type == VALUE_TYPE_STRING)
 	v->data.s = _free(v->data.s);
-    v = _free(v);
+    free(v);
   }
 }
 
@@ -677,53 +681,6 @@ int parseExpressionBoolean(rpmSpec spec, const char *expr)
     break;
   case VALUE_TYPE_STRING:
     result = v->data.s[0] != '\0';
-    break;
-  default:
-    break;
-  }
-
-  state.str = _free(state.str);
-  valueFree(v);
-  return result;
-}
-
-char * parseExpressionString(rpmSpec spec, const char *expr)
-{
-  struct _parseState state;
-  char *result = NULL;
-  Value v;
-
-  DEBUG(printf("parseExprString(?, '%s')\n", expr));
-
-  /* Initialize the expression parser state. */
-  state.p = state.str = xstrdup(expr);
-  state.spec = spec;
-  state.nextToken = 0;
-  state.tokenValue = NULL;
-  (void) rdToken(&state);
-
-  /* Parse the expression. */
-  v = doLogical(&state);
-  if (!v) {
-    state.str = _free(state.str);
-    return NULL;
-  }
-
-  /* If the next token is not TOK_EOF, we have a syntax error. */
-  if (state.nextToken != TOK_EOF) {
-    rpmlog(RPMLOG_ERR, _("syntax error in expression\n"));
-    state.str = _free(state.str);
-    return NULL;
-  }
-
-  DEBUG(valueDump("parseExprString:", v, stdout));
-
-  switch (v->type) {
-  case VALUE_TYPE_INTEGER: {
-    rasprintf(&result, "%d", v->data.i);
-  } break;
-  case VALUE_TYPE_STRING:
-    result = xstrdup(v->data.s);
     break;
   default:
     break;

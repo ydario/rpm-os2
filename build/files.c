@@ -8,23 +8,29 @@
 
 #define	MYALLPERMS	07777
 
+#include <errno.h>
 #include <regex.h>
+#if WITH_CAP
+#include <sys/capability.h>
+#endif
 
-#include <rpm/rpmbuild.h>
 #include <rpm/rpmpgp.h>
 #include <rpm/argv.h>
 #include <rpm/rpmfc.h>
 #include <rpm/rpmfileutil.h>	/* rpmDoDigest() */
 #include <rpm/rpmlog.h>
+#include <rpm/rpmbase64.h>
 
 #include "rpmio/rpmio_internal.h"	/* XXX rpmioSlurp */
-#include "rpmio/base64.h"
-#include "rpmio/fts.h"
+#include "misc/fts.h"
 #include "lib/cpio.h"
 #include "lib/rpmfi_internal.h"	/* XXX fi->apath */
-#include "build/buildio.h"
+#include "lib/rpmug.h"
+#include "build/rpmbuild_internal.h"
+#include "build/rpmbuild_misc.h"
 
 #include "debug.h"
+#include <libgen.h>
 
 #define SKIPSPACE(s) { while (*(s) && risspace(*(s))) (s)++; }
 #define	SKIPWHITE(_x)	{while(*(_x) && (risspace(*_x) || *(_x) == ',')) (_x)++;}
@@ -32,7 +38,7 @@
 
 /**
  */
-typedef enum specdFlags_e {
+enum specfFlags_e {
     SPECD_DEFFILEMODE	= (1 << 0),
     SPECD_DEFDIRMODE	= (1 << 1),
     SPECD_DEFUID	= (1 << 2),
@@ -44,7 +50,20 @@ typedef enum specdFlags_e {
     SPECD_UID		= (1 << 10),
     SPECD_GID		= (1 << 11),
     SPECD_VERIFY	= (1 << 12)
-} specdFlags;
+};
+
+typedef rpmFlags specfFlags;
+
+/* internal %files parsing state attributes */
+enum parseAttrs_e {
+    RPMFILE_EXCLUDE	= (1 << 16),	/*!< from %%exclude */
+    RPMFILE_DOCDIR	= (1 << 17),	/*!< from %%docdir */
+    RPMFILE_DIR		= (1 << 18),	/*!< from %%dir */
+    RPMFILE_SPECIALDIR	= (1 << 19),	/*!< from special %%doc */
+};
+
+/* bits up to 15 (for now) reserved for exported rpmfileAttrs */
+#define PARSEATTR_MASK 0x0000ffff
 
 /**
  */
@@ -65,7 +84,7 @@ typedef struct FileListRec_s {
     const char *uname;
     const char *gname;
     unsigned	flags;
-    specdFlags	specdFlags;	/* which attributes have been explicitly specified. */
+    specfFlags	specdFlags;	/* which attributes have been explicitly specified. */
     rpmVerifyFlags verifyFlags;
     char *langs;		/* XXX locales separated with | */
     char *caps;
@@ -87,43 +106,57 @@ static struct AttrRec_s root_ar = { NULL, NULL, "root", "root", 0, 0 };
 /* list of files */
 static StringBuf check_fileList = NULL;
 
+typedef struct specialDir_s {
+    char * dirname;
+    ARGV_t files;
+    struct AttrRec_s ar;
+    struct AttrRec_s def_ar;
+    rpmFlags sdtype;
+} * specialDir;
+
+typedef struct FileEntry_s {
+    rpmfileAttrs attrFlags;
+    specfFlags specdFlags;
+    rpmVerifyFlags verifyFlags;
+    struct AttrRec_s ar;
+
+    ARGV_t langs;
+    char *caps;
+
+    /* these are only ever relevant for current entry */
+    unsigned devtype;
+    unsigned devmajor;
+    int devminor;
+    int isDir;
+} * FileEntry;
+
+typedef struct FileRecords_s {
+    FileListRec recs;
+    int alloced;
+    int used;
+} * FileRecords;
+
 /**
  * Package file tree walk data.
  */
 typedef struct FileList_s {
+    /* global filelist state */
     char * buildRoot;
-    char * prefix;
-
-    int fileCount;
+    size_t buildRootLen;
     int processingFailed;
-
-    int passedSpecialDoc;
-    int isSpecialDoc;
-
-    int noGlob;
-    unsigned devtype;
-    unsigned devmajor;
-    int devminor;
-    
-    int isDir;
-    int inFtw;
-    rpmfileAttrs currentFlags;
-    specdFlags currentSpecdFlags;
-    rpmVerifyFlags currentVerifyFlags;
-    struct AttrRec_s cur_ar;
-    struct AttrRec_s def_ar;
-    specdFlags defSpecdFlags;
-    rpmVerifyFlags defVerifyFlags;
-    int nLangs;
-    char ** currentLangs;
     int haveCaps;
-    char *currentCaps;
-    ARGV_t docDirs;
-    
-    FileListRec fileList;
-    int fileListRecsAlloced;
-    int fileListRecsUsed;
     int largeFiles;
+    ARGV_t docDirs;
+    rpmBuildPkgFlags pkgFlags;
+
+    /* actual file records */
+    struct FileRecords_s files;
+
+    /* active defaults */
+    struct FileEntry_s def;
+
+    /* current file-entry state */
+    struct FileEntry_s cur;
 } * FileList;
 
 /**
@@ -180,6 +213,13 @@ static void dumpAttrRec(const char * msg, AttrRec ar)
 }
 #endif
 
+static void FileEntryFree(FileEntry entry)
+{
+    freeAttrRec(&(entry->ar));
+    argvFree(entry->langs);
+    memset(entry, 0, sizeof(*entry));
+}
+
 /**
  * strtokWithQuotes.
  * @param s
@@ -225,72 +265,57 @@ static char *strtokWithQuotes(char *s, const char *delim)
 
 /**
  */
-static void timeCheck(int tc, Header h)
-{
-    rpm_time_t * mtime;
-    time_t currentTime = time(NULL);
-    struct rpmtd_s files, mtimes;
-
-    headerGet(h, RPMTAG_FILENAMES, &files, HEADERGET_EXT);
-    headerGet(h, RPMTAG_FILEMTIMES, &mtimes, HEADERGET_MINMEM);
-    
-    while ((mtime = rpmtdNextUint32(&mtimes))) {
-	if ((currentTime - (time_t) *mtime) > tc) {
-	    rpmlog(RPMLOG_WARNING, _("TIMECHECK failure: %s\n"), 
-		    rpmtdGetString(&files));
-	}
-    }
-    rpmtdFreeData(&files);
-    rpmtdFreeData(&mtimes);
-}
-
-/**
- */
 typedef const struct VFA {
-    const char const * attribute;
-    int not;
+    const char * attribute;
     int	flag;
 } VFA_t;
 
 /**
  */
 static VFA_t const verifyAttrs[] = {
-    { "md5",		0,	RPMVERIFY_FILEDIGEST },
-    { "filedigest",	0,	RPMVERIFY_FILEDIGEST },
-    { "size",		0,	RPMVERIFY_FILESIZE },
-    { "link",		0,	RPMVERIFY_LINKTO },
-    { "user",		0,	RPMVERIFY_USER },
-    { "group",		0,	RPMVERIFY_GROUP },
-    { "mtime",		0,	RPMVERIFY_MTIME },
-    { "mode",		0,	RPMVERIFY_MODE },
-    { "rdev",		0,	RPMVERIFY_RDEV },
-    { "caps",		0,	RPMVERIFY_CAPS },
-    { NULL, 0,	0 }
+    { "md5",		RPMVERIFY_FILEDIGEST },
+    { "filedigest",	RPMVERIFY_FILEDIGEST },
+    { "size",		RPMVERIFY_FILESIZE },
+    { "link",		RPMVERIFY_LINKTO },
+    { "user",		RPMVERIFY_USER },
+    { "owner",		RPMVERIFY_USER },
+    { "group",		RPMVERIFY_GROUP },
+    { "mtime",		RPMVERIFY_MTIME },
+    { "mode",		RPMVERIFY_MODE },
+    { "rdev",		RPMVERIFY_RDEV },
+    { "caps",		RPMVERIFY_CAPS },
+    { NULL, 0 }
 };
+
+static rpmFlags vfaMatch(VFA_t *attrs, const char *token, rpmFlags *flags)
+{
+    VFA_t *vfa;
+
+    for (vfa = attrs; vfa->attribute != NULL; vfa++) {
+	if (rstreq(token, vfa->attribute)) {
+	    *flags |= vfa->flag;
+	    break;
+	}
+    }
+    return vfa->flag;
+}
 
 /**
  * Parse %verify and %defverify from file manifest.
  * @param buf		current spec file line
- * @param fl		package file tree walk data
+ * @param def		parse for %defverify or %verify?
+ * @param entry		file entry data (current or default)
  * @return		RPMRC_OK on success
  */
-static rpmRC parseForVerify(const char * buf, FileList fl)
+static rpmRC parseForVerify(char * buf, int def, FileEntry entry)
 {
     char *p, *pe, *q = NULL;
-    const char *name;
-    rpmVerifyFlags *resultVerify;
-    int negated;
-    rpmVerifyFlags verifyFlags;
-    specdFlags * specdFlags;
+    const char *name = def ? "%defverify" : "%verify";
+    int negated = 0;
+    rpmVerifyFlags verifyFlags = RPMVERIFY_NONE;
     rpmRC rc = RPMRC_FAIL;
 
-    if ((p = strstr(buf, (name = "%verify"))) != NULL) {
-	resultVerify = &(fl->currentVerifyFlags);
-	specdFlags = &fl->currentSpecdFlags;
-    } else if ((p = strstr(buf, (name = "%defverify"))) != NULL) {
-	resultVerify = &(fl->defVerifyFlags);
-	specdFlags = &fl->defSpecdFlags;
-    } else
+    if ((p = strstr(buf, name)) == NULL)
 	return RPMRC_OK;
 
     for (pe = p; (pe-p) < strlen(name); pe++)
@@ -319,9 +344,6 @@ static rpmRC parseForVerify(const char * buf, FileList fl)
     while (p <= pe)
 	*p++ = ' ';
 
-    negated = 0;
-    verifyFlags = RPMVERIFY_NONE;
-
     for (p = q; *p != '\0'; p = pe) {
 	SKIPWHITE(p);
 	if (*p == '\0')
@@ -331,16 +353,8 @@ static rpmRC parseForVerify(const char * buf, FileList fl)
 	if (*pe != '\0')
 	    *pe++ = '\0';
 
-	{   VFA_t *vfa;
-	    for (vfa = verifyAttrs; vfa->attribute != NULL; vfa++) {
-		if (!rstreq(p, vfa->attribute))
-		    continue;
-		verifyFlags |= vfa->flag;
-		break;
-	    }
-	    if (vfa->attribute)
-		continue;
-	}
+	if (vfaMatch(verifyAttrs, p, &verifyFlags))
+	    continue;
 
 	if (rstreq(p, "not")) {
 	    negated ^= 1;
@@ -350,15 +364,12 @@ static rpmRC parseForVerify(const char * buf, FileList fl)
 	}
     }
 
-    *resultVerify = negated ? ~(verifyFlags) : verifyFlags;
-    *specdFlags |= SPECD_VERIFY;
+    entry->verifyFlags = negated ? ~(verifyFlags) : verifyFlags;
+    entry->specdFlags |= SPECD_VERIFY;
     rc = RPMRC_OK;
 
 exit:
     free(q);
-    if (rc != RPMRC_OK) {
-	fl->processingFailed = 1;
-    }
 
     return rc;
 }
@@ -368,15 +379,15 @@ exit:
 /**
  * Parse %dev from file manifest.
  * @param buf		current spec file line
- * @param fl		package file tree walk data
+ * @param cur		current file entry data
  * @return		RPMRC_OK on success
  */
-static rpmRC parseForDev(const char * buf, FileList fl)
+static rpmRC parseForDev(char * buf, FileEntry cur)
 {
     const char * name;
     const char * errstr = NULL;
     char *p, *pe, *q = NULL;
-    int rc = RPMRC_FAIL;	/* assume error */
+    rpmRC rc = RPMRC_FAIL;	/* assume error */
 
     if ((p = strstr(buf, (name = "%dev"))) == NULL)
 	return RPMRC_OK;
@@ -408,21 +419,21 @@ static rpmRC parseForDev(const char * buf, FileList fl)
     p = q; SKIPWHITE(p);
     pe = p; SKIPNONWHITE(pe); if (*pe != '\0') *pe++ = '\0';
     if (*p == 'b')
-	fl->devtype = 'b';
+	cur->devtype = 'b';
     else if (*p == 'c')
-	fl->devtype = 'c';
+	cur->devtype = 'c';
     else {
 	errstr = "devtype";
 	goto exit;
     }
 
     p = pe; SKIPWHITE(p);
-    pe = p; SKIPNONWHITE(pe); if (*pe != '\0') *pe++ = '\0';
+    pe = p; SKIPNONWHITE(pe); if (*pe != '\0') *pe = '\0';
     for (pe = p; *pe && risdigit(*pe); pe++)
 	{} ;
     if (*pe == '\0') {
-	fl->devmajor = atoi(p);
-	if (!(fl->devmajor >= 0 && fl->devmajor < 256)) {
+	cur->devmajor = atoi(p);
+	if (!(cur->devmajor >= 0 && cur->devmajor < 256)) {
 	    errstr = "devmajor";
 	    goto exit;
 	}
@@ -433,29 +444,25 @@ static rpmRC parseForDev(const char * buf, FileList fl)
     }
 
     p = pe; SKIPWHITE(p);
-    pe = p; SKIPNONWHITE(pe); if (*pe != '\0') *pe++ = '\0';
+    pe = p; SKIPNONWHITE(pe); if (*pe != '\0') *pe = '\0';
     for (pe = p; *pe && risdigit(*pe); pe++)
 	{} ;
     if (*pe == '\0') {
-	fl->devminor = atoi(p);
-	if (!(fl->devminor >= 0 && fl->devminor < 256)) {
+	cur->devminor = atoi(p);
+	if (!(cur->devminor >= 0 && cur->devminor < 256)) {
 	    errstr = "devminor";
 	    goto exit;
 	}
-	pe++;
     } else {
 	errstr = "devminor";
 	goto exit;
     }
-
-    fl->noGlob = 1;
 
     rc = RPMRC_OK;
 
 exit:
     if (rc) {
 	rpmlog(RPMLOG_ERR, _("Missing %s in %s %s\n"), errstr, name, p);
-	fl->processingFailed = 1;
     }
     free(q);
     return rc;
@@ -464,26 +471,20 @@ exit:
 /**
  * Parse %attr and %defattr from file manifest.
  * @param buf		current spec file line
- * @param fl		package file tree walk data
+ * @param def		parse for %defattr or %attr?
+ * @param entry		file entry data (current / default)
  * @return		0 on success
  */
-static rpmRC parseForAttr(const char * buf, FileList fl)
+static rpmRC parseForAttr(char * buf, int def, FileEntry entry)
 {
-    const char *name;
+    const char *name = def ? "%defattr" : "%attr";
     char *p, *pe, *q = NULL;
     int x;
     struct AttrRec_s arbuf;
-    AttrRec ar = &arbuf, ret_ar;
-    specdFlags * specdFlags;
+    AttrRec ar = &arbuf;
     rpmRC rc = RPMRC_FAIL;
 
-    if ((p = strstr(buf, (name = "%attr"))) != NULL) {
-	ret_ar = &(fl->cur_ar);
-	specdFlags = &fl->currentSpecdFlags;
-    } else if ((p = strstr(buf, (name = "%defattr"))) != NULL) {
-	ret_ar = &(fl->def_ar);
-	specdFlags = &fl->defSpecdFlags;
-    } else
+    if ((p = strstr(buf, name)) == NULL)
 	return RPMRC_OK;
 
     for (pe = p; (pe-p) < strlen(name); pe++)
@@ -501,7 +502,7 @@ static rpmRC parseForAttr(const char * buf, FileList fl)
     for (p = pe; *pe && *pe != ')'; pe++)
 	{};
 
-    if (ret_ar == &(fl->def_ar)) {	/* %defattr */
+    if (def) {	/* %defattr */
 	char *r = pe;
 	r++;
 	SKIPSPACE(r);
@@ -536,7 +537,7 @@ static rpmRC parseForAttr(const char * buf, FileList fl)
 	ar->ar_group = p;
 	p = pe; SKIPWHITE(p);
     }
-    if (*p != '\0' && ret_ar == &(fl->def_ar)) {	/* %defattr */
+    if (*p != '\0' && def) {	/* %defattr */
 	pe = p; SKIPNONWHITE(pe); if (*pe != '\0') *pe++ = '\0';
 	ar->ar_dmodestr = p;
 	p = pe; SKIPWHITE(p);
@@ -557,13 +558,7 @@ static rpmRC parseForAttr(const char * buf, FileList fl)
 	}
 	ar->ar_fmode = ui;
     } else {
-	if (ret_ar == &(fl->def_ar)) {
-	    ar->ar_fmodestr = NULL;
-	    ar->ar_fmode = 0;
-	} else {
-	    ar->ar_fmodestr = fl->def_ar.ar_fmodestr;
-	    ar->ar_fmode = fl->def_ar.ar_fmode;
-	}
+	ar->ar_fmodestr = NULL;
     }
 
     if (ar->ar_dmodestr && !isAttrDefault(ar->ar_dmodestr)) {
@@ -575,53 +570,42 @@ static rpmRC parseForAttr(const char * buf, FileList fl)
 	}
 	ar->ar_dmode = ui;
     } else {
-	if (ret_ar == &(fl->def_ar)) {
-	    ar->ar_dmodestr = NULL;
-	    ar->ar_dmode = 0;
-	} else {
-	    ar->ar_dmodestr = fl->def_ar.ar_dmodestr;
-	    ar->ar_dmode = fl->def_ar.ar_dmode;
-	}
+	ar->ar_dmodestr = NULL;
     }
 
     if (!(ar->ar_user && !isAttrDefault(ar->ar_user))) {
-	if (ret_ar == &(fl->def_ar)) {
-	    ar->ar_user = NULL;
-	} else {
-	    ar->ar_user = fl->def_ar.ar_user;
-	}
+	ar->ar_user = NULL;
     }
 
     if (!(ar->ar_group && !isAttrDefault(ar->ar_group))) {
-	if (ret_ar == &(fl->def_ar)) {
-	    ar->ar_group = NULL;
-	} else {
-	    ar->ar_group = fl->def_ar.ar_group;
-	}
+	ar->ar_group = NULL;
     }
 
-    dupAttrRec(ar, ret_ar);
+    dupAttrRec(ar, &(entry->ar));
 
     /* XXX fix all this */
-    *specdFlags |= SPECD_UID | SPECD_GID | SPECD_FILEMODE | SPECD_DIRMODE;
+    entry->specdFlags |= SPECD_UID | SPECD_GID | SPECD_FILEMODE | SPECD_DIRMODE;
     rc = RPMRC_OK;
 
 exit:
     free(q);
-    if (rc != RPMRC_OK) {
-	fl->processingFailed = 1;
-    }
     
     return rc;
 }
 
+static VFA_t const configAttrs[] = {
+    { "missingok",	RPMFILE_MISSINGOK },
+    { "noreplace",	RPMFILE_NOREPLACE },
+    { NULL, 0 }
+};
+
 /**
  * Parse %config from file manifest.
  * @param buf		current spec file line
- * @param fl		package file tree walk data
+ * @param cur		current file entry data
  * @return		RPMRC_OK on success
  */
-static rpmRC parseForConfig(const char * buf, FileList fl)
+static rpmRC parseForConfig(char * buf, FileEntry cur)
 {
     char *p, *pe, *q = NULL;
     const char *name;
@@ -630,7 +614,7 @@ static rpmRC parseForConfig(const char * buf, FileList fl)
     if ((p = strstr(buf, (name = "%config"))) == NULL)
 	return RPMRC_OK;
 
-    fl->currentFlags |= RPMFILE_CONFIG;
+    cur->attrFlags |= RPMFILE_CONFIG;
 
     /* Erase "%config" token. */
     for (pe = p; (pe-p) < strlen(name); pe++)
@@ -663,11 +647,7 @@ static rpmRC parseForConfig(const char * buf, FileList fl)
 	SKIPNONWHITE(pe);
 	if (*pe != '\0')
 	    *pe++ = '\0';
-	if (rstreq(p, "missingok")) {
-	    fl->currentFlags |= RPMFILE_MISSINGOK;
-	} else if (rstreq(p, "noreplace")) {
-	    fl->currentFlags |= RPMFILE_NOREPLACE;
-	} else {
+	if (!vfaMatch(configAttrs, p, &(cur->attrFlags))) {
 	    rpmlog(RPMLOG_ERR, _("Invalid %s token: %s\n"), name, p);
 	    goto exit;
 	}
@@ -676,27 +656,45 @@ static rpmRC parseForConfig(const char * buf, FileList fl)
     
 exit:
     free(q);
-    if (rc != RPMRC_OK) {
-	fl->processingFailed = 1;
-    }
 
     return rc;
 }
 
-/**
- */
-static int langCmp(const void * ap, const void * bp)
+static rpmRC addLang(ARGV_t *av, const char *lang, size_t n, const char *ent)
 {
-    return strcmp(*(const char **)ap, *(const char **)bp);
+    rpmRC rc = RPMRC_FAIL;
+    char lbuf[n + 1];
+    rstrlcpy(lbuf, lang, sizeof(lbuf));
+    SKIPWHITE(ent);
+
+    /* Sanity check locale length */
+    if (n < 1 || (n == 1 && *lang != 'C') || n >= 32) {
+	rpmlog(RPMLOG_ERR, _("Unusual locale length: \"%s\" in %%lang(%s)\n"),
+		lbuf, ent);
+	goto exit;
+    }
+
+    /* Check for duplicate locales */
+    if (argvSearch(*av, lbuf, NULL)) {
+	rpmlog(RPMLOG_WARNING, _("Duplicate locale %s in %%lang(%s)\n"),
+		lbuf, ent);
+    } else {
+	argvAdd(av, lbuf);
+	argvSort(*av, NULL);
+    }
+    rc = RPMRC_OK;
+
+exit:
+    return rc;
 }
 
 /**
  * Parse %lang from file manifest.
  * @param buf		current spec file line
- * @param fl		package file tree walk data
+ * @param cur		current file entry data
  * @return		RPMRC_OK on success
  */
-static rpmRC parseForLang(const char * buf, FileList fl)
+static rpmRC parseForLang(char * buf, FileEntry cur)
 {
     char *p, *pe, *q = NULL;
     const char *name;
@@ -714,7 +712,7 @@ static rpmRC parseForLang(const char * buf, FileList fl)
     }
 
     /* Bracket %lang args */
-    *pe++ = ' ';
+    *pe = ' ';
     for (pe = p; *pe && *pe != ')'; pe++)
 	{};
 
@@ -731,54 +729,21 @@ static rpmRC parseForLang(const char * buf, FileList fl)
 
     /* Parse multiple arguments from %lang */
     for (p = q; *p != '\0'; p = pe) {
-	char *newp;
-	size_t np;
-	int i;
-
 	SKIPWHITE(p);
 	pe = p;
 	SKIPNONWHITE(pe);
 
-	np = pe - p;
-	
-	/* Sanity check on locale lengths */
-	if (np < 1 || (np == 1 && *p != 'C') || np >= 32) {
-	    rpmlog(RPMLOG_ERR,
-		_("Unusual locale length: \"%.*s\" in %%lang(%s)\n"),
-		(int)np, p, q);
+	if (addLang(&(cur->langs), p, (pe-p), q))
 	    goto exit;
-	}
 
-	/* Check for duplicate locales */
-	if (fl->currentLangs != NULL)
-	for (i = 0; i < fl->nLangs; i++) {
-	    if (!rstreqn(fl->currentLangs[i], p, np))
-		continue;
-	    rpmlog(RPMLOG_ERR, _("Duplicate locale %.*s in %%lang(%s)\n"),
-		(int)np, p, q);
-	    goto exit;
-	}
-
-	/* Add new locale */
-	fl->currentLangs = xrealloc(fl->currentLangs,
-				(fl->nLangs + 1) * sizeof(*fl->currentLangs));
-	newp = xmalloc( np+1 );
-	rstrlcpy(newp, p, np + 1);
-	fl->currentLangs[fl->nLangs++] = newp;
 	if (*pe == ',') pe++;	/* skip , if present */
     }
   }
 
-    /* Insure that locales are sorted. */
-    if (fl->currentLangs)
-	qsort(fl->currentLangs, fl->nLangs, sizeof(*fl->currentLangs), langCmp);
     rc = RPMRC_OK;
 
 exit:
     free(q);
-    if (rc != RPMRC_OK) {
-	fl->processingFailed = 1;
-    }
 
     return rc;
 }
@@ -786,10 +751,10 @@ exit:
 /**
  * Parse %caps from file manifest.
  * @param buf		current spec file line
- * @param fl		package file tree walk data
+ * @param cur		current file entry data
  * @return		RPMRC_OK on success
  */
-static rpmRC parseForCaps(const char * buf, FileList fl)
+static rpmRC parseForCaps(char * buf, FileEntry cur)
 {
     char *p, *pe, *q = NULL;
     const char *name;
@@ -831,8 +796,7 @@ static rpmRC parseForCaps(const char * buf, FileList fl)
 	}
 	/* run our string through cap_to_text() to get libcap presentation */
 	captxt = cap_to_text(fcaps, NULL);
-	fl->currentCaps = xstrdup(captxt);
-	fl->haveCaps = 1;
+	cur->caps = xstrdup(captxt);
 	cap_free(captxt);
 	cap_free(fcaps);
     }
@@ -845,133 +809,56 @@ static rpmRC parseForCaps(const char * buf, FileList fl)
     
 exit:
     free(q);
-    if (rc != RPMRC_OK) {
-	fl->processingFailed = 1;
-    }
 
     return rc;
 }
 /**
  */
-static VFA_t virtualFileAttributes[] = {
-	{ "%dir",	0,	0 },	/* XXX why not RPMFILE_DIR? */
-	{ "%doc",	0,	RPMFILE_DOC },
-	{ "%ghost",	0,	RPMFILE_GHOST },
-	{ "%exclude",	0,	RPMFILE_EXCLUDE },
-	{ "%readme",	0,	RPMFILE_README },
-	{ "%license",	0,	RPMFILE_LICENSE },
-	{ "%pubkey",	0,	RPMFILE_PUBKEY },
-	{ "%policy",	0,	RPMFILE_POLICY },
-	{ NULL, 0, 0 }
+static VFA_t const virtualAttrs[] = {
+    { "%dir",		RPMFILE_DIR },
+    { "%docdir",	RPMFILE_DOCDIR },
+    { "%doc",		RPMFILE_DOC },
+    { "%ghost",		RPMFILE_GHOST },
+    { "%exclude",	RPMFILE_EXCLUDE },
+    { "%readme",	RPMFILE_README },
+    { "%license",	RPMFILE_LICENSE },
+    { "%pubkey",	RPMFILE_PUBKEY },
+    { NULL, 0 }
 };
 
 /**
  * Parse simple attributes (e.g. %dir) from file manifest.
- * @param spec
- * @param pkg
  * @param buf		current spec file line
- * @param fl		package file tree walk data
- * @retval *fileName	file name
+ * @param cur		current file entry data
+ * @retval *fileNames	file names
  * @return		RPMRC_OK on success
  */
-static rpmRC parseForSimple(rpmSpec spec, Package pkg, char * buf,
-			  FileList fl, const char ** fileName)
+static rpmRC parseForSimple(char * buf, FileEntry cur, ARGV_t * fileNames)
 {
     char *s, *t;
-    int res;
-    char *specialDocBuf = NULL;
-
-    *fileName = NULL;
-    res = RPMRC_OK;
+    rpmRC res = RPMRC_OK;
+    int allow_relative = (RPMFILE_PUBKEY|RPMFILE_DOC|RPMFILE_LICENSE);
 
     t = buf;
     while ((s = strtokWithQuotes(t, " \t\r\n")) != NULL) {
-    	VFA_t *vfa;
 	t = NULL;
-	if (rstreq(s, "%docdir")) {
-	    s = strtokWithQuotes(NULL, " \t\r\n");
-	
-	    if (s == NULL || strtokWithQuotes(NULL, " \t\r\n")) {
-		rpmlog(RPMLOG_ERR, _("Only one arg for %%docdir\n"));
-		res = RPMRC_FAIL;
-	    } else {
-		argvAdd(&(fl->docDirs), s);
-	    }
-	    break;
-	}
 
     	/* Set flags for virtual file attributes */
-	for (vfa = virtualFileAttributes; vfa->attribute != NULL; vfa++) {
-	    if (!rstreq(s, vfa->attribute))
-		continue;
-	    if (!vfa->flag) {
-		if (rstreq(s, "%dir"))
-		    fl->isDir = 1;	/* XXX why not RPMFILE_DIR? */
-	    } else {
-		if (vfa->not)
-		    fl->currentFlags &= ~vfa->flag;
-		else
-		    fl->currentFlags |= vfa->flag;
-	    }
-	    break;
-	}
-	/* if we got an attribute, continue with next token */
-	if (vfa->attribute != NULL)
+	if (vfaMatch(virtualAttrs, s, &(cur->attrFlags)))
 	    continue;
 
-	if (*fileName) {
-	    /* We already got a file -- error */
-	    rpmlog(RPMLOG_ERR, _("Two files on one line: %s\n"), *fileName);
-	    res = RPMRC_FAIL;
-	}
-
+	/* normally paths need to be absolute */
 	if (*s != '/') {
-	    if (fl->currentFlags & RPMFILE_DOC) {
-		rstrscat(&specialDocBuf, " ", s, NULL);
-	    } else
-	    if (fl->currentFlags & (RPMFILE_POLICY|RPMFILE_PUBKEY))
-	    {
-		*fileName = s;
-	    } else {
-		/* not in %doc, does not begin with / -- error */
+	   if (!(cur->attrFlags & allow_relative)) {
 		rpmlog(RPMLOG_ERR, _("File must begin with \"/\": %s\n"), s);
 		res = RPMRC_FAIL;
+		continue;
 	    }
-	} else {
-	    *fileName = s;
+	    /* non-absolute %doc and %license paths are special */
+	    if (cur->attrFlags & (RPMFILE_DOC | RPMFILE_LICENSE))
+		cur->attrFlags |= RPMFILE_SPECIALDIR;
 	}
-    }
-
-    if (specialDocBuf) {
-	if (*fileName || (fl->currentFlags & ~(RPMFILE_DOC))) {
-	    rpmlog(RPMLOG_ERR,
-		     _("Can't mix special %%doc with other forms: %s\n"),
-		     (*fileName ? *fileName : ""));
-	    res = RPMRC_FAIL;
-	} else {
-	    /* XXX FIXME: this is easy to do as macro expansion */
-	    if (! fl->passedSpecialDoc) {
-		pkg->specialDoc = newStringBuf();
-		appendStringBuf(pkg->specialDoc, "DOCDIR=$RPM_BUILD_ROOT");
-		appendLineStringBuf(pkg->specialDoc, pkg->specialDocDir);
-		appendLineStringBuf(pkg->specialDoc, "export DOCDIR");
-		appendLineStringBuf(pkg->specialDoc, "rm -rf $DOCDIR");
-		appendLineStringBuf(pkg->specialDoc, RPM_MKDIR_P " $DOCDIR");
-
-		*fileName = pkg->specialDocDir;
-		fl->passedSpecialDoc = 1;
-		fl->isSpecialDoc = 1;
-	    }
-
-	    appendStringBuf(pkg->specialDoc, "cp -pr ");
-	    appendStringBuf(pkg->specialDoc, specialDocBuf);
-	    appendLineStringBuf(pkg->specialDoc, " $DOCDIR");
-	}
-	free(specialDocBuf);
-    }
-
-    if (res != RPMRC_OK) {
-	fl->processingFailed = 1;
+	argvAdd(fileNames, s);
     }
 
     return res;
@@ -988,17 +875,16 @@ static int compareFileListRecs(const void * ap, const void * bp)
 
 /**
  * Test if file is located in a %docdir.
- * @param fl		package file tree walk data
+ * @param docDirs	doc dirs
  * @param fileName	file path
  * @return		1 if doc file, 0 if not
  */
-static int isDoc(FileList fl, const char * fileName)	
+static int isDoc(ARGV_const_t docDirs, const char * fileName)	
 {
     size_t k, l;
-    ARGV_const_t dd;
 
     k = strlen(fileName);
-    for (dd = fl->docDirs; *dd; dd++) {
+    for (ARGV_const_t dd = docDirs; *dd; dd++) {
 	l = strlen(*dd);
 	if (l < k && rstreqn(fileName, *dd, l) && fileName[l] == '/')
 	    return 1;
@@ -1017,21 +903,21 @@ static int isHardLink(FileListRec flp, FileListRec tlp)
 /**
  * Verify that file attributes scope over hardlinks correctly.
  * If partial hardlink sets are possible, then add tracking dependency.
- * @param fl		package file tree walk data
+ * @param fl		package file records
  * @return		1 if partial hardlink sets can exist, 0 otherwise.
  */
-static int checkHardLinks(FileList fl)
+static int checkHardLinks(FileRecords files)
 {
     FileListRec ilp, jlp;
     int i, j;
 
-    for (i = 0;  i < fl->fileListRecsUsed; i++) {
-	ilp = fl->fileList + i;
+    for (i = 0;  i < files->used; i++) {
+	ilp = files->recs + i;
 	if (!(S_ISREG(ilp->fl_mode) && ilp->fl_nlink > 1))
 	    continue;
 
-	for (j = i + 1; j < fl->fileListRecsUsed; j++) {
-	    jlp = fl->fileList + j;
+	for (j = i + 1; j < files->used; j++) {
+	    jlp = files->recs + j;
 	    if (isHardLink(ilp, jlp)) {
 		return 1;
 	    }
@@ -1040,10 +926,11 @@ static int checkHardLinks(FileList fl)
     return 0;
 }
 
-static int seenHardLink(FileList fl, FileListRec flp)
+static int seenHardLink(FileRecords files, FileListRec flp, rpm_ino_t *fileid)
 {
-    for (FileListRec ilp = fl->fileList; ilp < flp; ilp++) {
+    for (FileListRec ilp = files->recs; ilp < flp; ilp++) {
 	if (isHardLink(flp, ilp)) {
+	    *fileid = ilp - files->recs;
 	    return 1;
 	}
     }
@@ -1059,8 +946,7 @@ static int seenHardLink(FileList fl, FileListRec flp)
  * @param h
  * @param isSrc
  */
-static void genCpioListAndHeader(FileList fl,
-		rpmfi * fip, Header h, int isSrc)
+static void genCpioListAndHeader(FileList fl, Package pkg, int isSrc)
 {
     int _addDotSlash = !(isSrc || rpmExpandNumeric("%{_noPayloadPrefix}"));
     size_t apathlen = 0;
@@ -1069,8 +955,9 @@ static void genCpioListAndHeader(FileList fl,
     FileListRec flp;
     char buf[BUFSIZ];
     int i;
-    pgpHashAlgo defaultalgo = PGPHASHALGO_MD5, digestalgo;
+    uint32_t defaultalgo = PGPHASHALGO_MD5, digestalgo;
     rpm_loff_t totalFileSize = 0;
+    Header h = pkg->header; /* just a shortcut */
 
     /*
      * See if non-md5 file digest algorithm is requested. If not
@@ -1090,19 +977,19 @@ static void genCpioListAndHeader(FileList fl,
     }
     
     /* Sort the big list */
-    qsort(fl->fileList, fl->fileListRecsUsed,
-	  sizeof(*(fl->fileList)), compareFileListRecs);
+    qsort(fl->files.recs, fl->files.used,
+	  sizeof(*(fl->files.recs)), compareFileListRecs);
     
     /* Generate the header. */
     if (! isSrc) {
 	skipLen = 1;
-	if (fl->prefix)
-	    skipLen += strlen(fl->prefix);
     }
 
-    for (i = 0, flp = fl->fileList; i < fl->fileListRecsUsed; i++, flp++) {
+    for (i = 0, flp = fl->files.recs; i < fl->files.used; i++, flp++) {
+	rpm_ino_t fileid = flp - fl->files.recs;
+
  	/* Merge duplicate entries. */
-	while (i < (fl->fileListRecsUsed - 1) &&
+	while (i < (fl->files.used - 1) &&
 	    rstreq(flp->cpioPath, flp[1].cpioPath)) {
 
 	    /* Two entries for the same file found, merge the entries. */
@@ -1171,11 +1058,7 @@ static void genCpioListAndHeader(FileList fl,
 	headerPutString(h, RPMTAG_FILEUSERNAME, flp->uname);
 	headerPutString(h, RPMTAG_FILEGROUPNAME, flp->gname);
 
-	/*
- 	 * Only use 64bit filesizes if file sizes require it. 
- 	 * This is basically no-op for now as we error out in addFile() if 
- 	 * any individual file size exceeds the cpio limit.
- 	 */
+	/* Only use 64bit filesizes tag if required. */
 	if (fl->largeFiles) {
 	    rpm_loff_t rsize64 = (rpm_loff_t)flp->fl_size;
 	    headerPutUint64(h, RPMTAG_LONGFILESIZES, &rsize64, 1);
@@ -1186,7 +1069,7 @@ static void genCpioListAndHeader(FileList fl,
 	}
 	/* Excludes and dupes have been filtered out by now. */
 	if (S_ISREG(flp->fl_mode)) {
-	    if (flp->fl_nlink == 1 || !seenHardLink(fl, flp)) {
+	    if (flp->fl_nlink == 1 || !seenHardLink(&fl->files, flp, &fileid)) {
 		totalFileSize += flp->fl_size;
 	    }
 	}
@@ -1208,12 +1091,18 @@ static void genCpioListAndHeader(FileList fl,
 	    headerPutUint16(h, RPMTAG_FILERDEVS, &rrdev, 1);
 	}
 	
-	{   rpm_dev_t rdev = (rpm_dev_t) flp->fl_dev;
-	    headerPutUint32(h, RPMTAG_FILEDEVICES, &rdev, 1);
-	}
-
-	{   rpm_ino_t rino = (rpm_ino_t) flp->fl_ino;
+	/*
+	 * To allow rpmbuild to work on filesystems with 64bit inodes numbers,
+	 * remap them into 32bit integers based on filelist index, just
+	 * preserving semantics for determining hardlinks.
+	 * Start at 1 as inode zero as that could be considered as an error.
+	 * Since we flatten all the inodes to appear within a single fs,
+	 * we also need to flatten the devices.
+	 */
+	{   rpm_ino_t rino = fileid + 1;
+	    rpm_dev_t rdev = flp->fl_dev ? 1 : 0;
 	    headerPutUint32(h, RPMTAG_FILEINODES, &rino, 1);
+	    headerPutUint32(h, RPMTAG_FILEDEVICES, &rdev, 1);
 	}
 	
 	headerPutString(h, RPMTAG_FILELANGS, flp->langs);
@@ -1230,11 +1119,16 @@ static void genCpioListAndHeader(FileList fl,
 	
 	buf[0] = '\0';
 	if (S_ISLNK(flp->fl_mode)) {
-	    buf[readlink(flp->diskPath, buf, BUFSIZ)] = '\0';
-	    if (fl->buildRoot) {
+	    ssize_t llen = readlink(flp->diskPath, buf, BUFSIZ-1);
+	    if (llen == -1) {
+		rpmlog(RPMLOG_ERR, _("reading symlink %s failed: %s\n"),
+			flp->diskPath, strerror(errno));
+		fl->processingFailed = 1;
+	    } else {
+		buf[llen] = '\0';
 		if (buf[0] == '/' && !rstreq(fl->buildRoot, "/") &&
-		    rstreqn(buf, fl->buildRoot, strlen(fl->buildRoot))) {
-		     rpmlog(RPMLOG_ERR,
+			rstreqn(buf, fl->buildRoot, fl->buildRootLen)) {
+		    rpmlog(RPMLOG_ERR,
 				_("Symlink points to BuildRoot: %s -> %s\n"),
 				flp->cpioPath, buf);
 		    fl->processingFailed = 1;
@@ -1249,11 +1143,13 @@ static void genCpioListAndHeader(FileList fl,
 	}
 	headerPutUint32(h, RPMTAG_FILEVERIFYFLAGS, &(flp->verifyFlags),1);
 	
-	if (!isSrc && isDoc(fl, flp->cpioPath))
+	if (!isSrc && isDoc(fl->docDirs, flp->cpioPath))
 	    flp->flags |= RPMFILE_DOC;
 	/* XXX Should directories have %doc/%config attributes? (#14531) */
 	if (S_ISDIR(flp->fl_mode))
-	    flp->flags &= ~(RPMFILE_CONFIG|RPMFILE_DOC);
+	    flp->flags &= ~(RPMFILE_CONFIG|RPMFILE_DOC|RPMFILE_LICENSE);
+	/* Strip internal parse data */
+	flp->flags &= PARSEATTR_MASK;
 
 	headerPutUint32(h, RPMTAG_FILEFLAGS, &(flp->flags) ,1);
     }
@@ -1268,15 +1164,15 @@ static void genCpioListAndHeader(FileList fl,
 
     if (digestalgo != defaultalgo) {
 	headerPutUint32(h, RPMTAG_FILEDIGESTALGO, &digestalgo, 1);
-	rpmlibNeedsFeature(h, "FileDigests", "4.6.0-1");
+	rpmlibNeedsFeature(pkg, "FileDigests", "4.6.0-1");
     }
 
     if (fl->haveCaps) {
-	rpmlibNeedsFeature(h, "FileCaps", "4.6.1-1");
+	rpmlibNeedsFeature(pkg, "FileCaps", "4.6.1-1");
     }
 
     if (_addDotSlash)
-	(void) rpmlibNeedsFeature(h, "PayloadFilesHavePrefix", "4.0-1");
+	(void) rpmlibNeedsFeature(pkg, "PayloadFilesHavePrefix", "4.0-1");
 
   {
     struct rpmtd_s filenames;
@@ -1289,6 +1185,11 @@ static void genCpioListAndHeader(FileList fl,
     /* rpmfiNew() only groks compressed filelists */
     headerConvert(h, HEADERCONV_COMPRESSFILELIST);
     fi = rpmfiNew(NULL, h, RPMTAG_BASENAMES, flags);
+
+    if (fi == NULL) {
+	fl->processingFailed = 1;
+	return;
+    }
 
     /* 
      * Grab the real filenames from ORIGFILENAMES and put into OLDFILENAMES,
@@ -1317,35 +1218,65 @@ static void genCpioListAndHeader(FileList fl,
 	a++;		/* skip apath NUL */
     }
     fi->apath = apath;
-    *fip = fi;
+    pkg->cpioList = fi;
     rpmtdFreeData(&filenames);
   }
 
     /* Compress filelist unless legacy format requested */
-    if (!_noDirTokens) {
+    if (!(fl->pkgFlags & RPMBUILD_PKG_NODIRTOKENS)) {
 	headerConvert(h, HEADERCONV_COMPRESSFILELIST);
 	/* Binary packages with dirNames cannot be installed by legacy rpm. */
-	(void) rpmlibNeedsFeature(h, "CompressedFileNames", "3.0.4-1");
+	(void) rpmlibNeedsFeature(pkg, "CompressedFileNames", "3.0.4-1");
     }
 }
 
-/**
- */
-static FileListRec freeFileList(FileListRec fileList,
-			int count)
+static FileRecords FileRecordsFree(FileRecords files)
 {
-    while (count--) {
-	fileList[count].diskPath = _free(fileList[count].diskPath);
-	fileList[count].cpioPath = _free(fileList[count].cpioPath);
-	fileList[count].langs = _free(fileList[count].langs);
-	fileList[count].caps = _free(fileList[count].caps);
+    for (int i = 0; i < files->used; i++) {
+	free(files->recs[i].diskPath);
+	free(files->recs[i].cpioPath);
+	free(files->recs[i].langs);
+	free(files->recs[i].caps);
     }
-    fileList = _free(fileList);
+    free(files->recs);
     return NULL;
+}
+
+static void FileListFree(FileList fl)
+{
+    FileEntryFree(&(fl->cur));
+    FileEntryFree(&(fl->def));
+    FileRecordsFree(&(fl->files));
+    free(fl->buildRoot);
+    argvFree(fl->docDirs);
 }
 
 /* forward ref */
 static rpmRC recurseDir(FileList fl, const char * diskPath);
+
+/* Hack up a stat structure for a %dev or non-existing %ghost */
+static struct stat * fakeStat(FileEntry cur, struct stat * statp)
+{
+    time_t now = time(NULL);
+
+    if (cur->devtype) {
+	statp->st_rdev = ((cur->devmajor & 0xff) << 8) | (cur->devminor & 0xff);
+	statp->st_dev = statp->st_rdev;
+	statp->st_mode = (cur->devtype == 'b' ? S_IFBLK : S_IFCHR);
+    } else {
+	/* non-existing %ghost file or directory */
+	statp->st_mode = cur->isDir ? S_IFDIR : S_IFREG;
+	/* can't recurse into non-existing directory */
+	if (cur->isDir)
+	    cur->isDir = 1;
+    }
+    statp->st_mode |= (cur->ar.ar_fmode & 0777);
+    statp->st_atime = now;
+    statp->st_mtime = now;
+    statp->st_ctime = now;
+    statp->st_nlink = 1;
+    return statp;
+}
 
 /**
  * Add a file to the package manifest.
@@ -1357,13 +1288,28 @@ static rpmRC recurseDir(FileList fl, const char * diskPath);
 static rpmRC addFile(FileList fl, const char * diskPath,
 		struct stat * statp)
 {
-    const char *cpioPath = diskPath;
+    size_t plen = strlen(diskPath);
+    char buf[plen + 1];
+    const char *cpioPath;
     struct stat statbuf;
     mode_t fileMode;
     uid_t fileUid;
     gid_t fileGid;
     const char *fileUname;
     const char *fileGname;
+    rpmRC rc = RPMRC_FAIL; /* assume failure */
+
+    /* Strip trailing slash. The special case of '/' path is handled below. */
+    if (plen > 0 && diskPath[plen - 1] == '/') {
+	diskPath = strcpy(buf, diskPath);
+	buf[plen - 1] = '\0';
+    }
+    cpioPath = diskPath;
+	
+    if (strncmp(diskPath, fl->buildRoot, fl->buildRootLen)) {
+	rpmlog(RPMLOG_ERR, _("Path is outside buildroot: %s\n"), diskPath);
+	goto exit;
+    }
     
     /* Path may have prepended buildRoot, so locate the original filename. */
     /*
@@ -1377,69 +1323,49 @@ static rpmRC addFile(FileList fl, const char * diskPath,
      *
      */
     if (fl->buildRoot && !rstreq(fl->buildRoot, "/"))
-    	cpioPath += strlen(fl->buildRoot);
+    	cpioPath += fl->buildRootLen;
 
     /* XXX make sure '/' can be packaged also */
     if (*cpioPath == '\0')
 	cpioPath = "/";
 
-    /* If we are using a prefix, validate the file */
-    if (!fl->inFtw && fl->prefix) {
-	const char *prefixPtr = fl->prefix;
-
-	while (*prefixPtr && *cpioPath && (*cpioPath == *prefixPtr)) {
-	    prefixPtr++;
-	    cpioPath++;
-	}
-	if (*prefixPtr || (*cpioPath && *cpioPath != '/')) {
-	    rpmlog(RPMLOG_ERR, _("File doesn't match prefix (%s): %s\n"),
-		     fl->prefix, cpioPath);
-	    fl->processingFailed = 1;
-	    return RPMRC_FAIL;
-	}
-    }
-
+    /*
+     * Unless recursing, we dont have stat() info at hand. Handle the
+     * various cases, preserving historical behavior wrt %dev():
+     * - for %dev() entries we fake it up whether the file exists or not
+     * - otherwise try to grab the data by lstat()
+     * - %ghost entries might not exist, fake it up
+     */
     if (statp == NULL) {
-	time_t now = time(NULL);
-	statp = &statbuf;
-	memset(statp, 0, sizeof(*statp));
-	if (fl->devtype) {
-	    /* XXX hack up a stat structure for a %dev(...) directive. */
-	    statp->st_nlink = 1;
-	    statp->st_rdev =
-		((fl->devmajor & 0xff) << 8) | (fl->devminor & 0xff);
-	    statp->st_dev = statp->st_rdev;
-	    statp->st_mode = (fl->devtype == 'b' ? S_IFBLK : S_IFCHR);
-	    statp->st_mode |= (fl->cur_ar.ar_fmode & 0777);
-	    statp->st_atime = now;
-	    statp->st_mtime = now;
-	    statp->st_ctime = now;
+	memset(&statbuf, 0, sizeof(statbuf));
+
+	if (fl->cur.devtype) {
+	    statp = fakeStat(&(fl->cur), &statbuf);
+	} else if (lstat(diskPath, &statbuf) == 0) {
+	    statp = &statbuf;
+	} else if (fl->cur.attrFlags & RPMFILE_GHOST) {
+	    statp = fakeStat(&(fl->cur), &statbuf);
 	} else {
-	    int is_ghost = fl->currentFlags & RPMFILE_GHOST;
-	
-	    if (lstat(diskPath, statp)) {
-		if (is_ghost) {	/* the file is %ghost missing from build root, assume regular file */
-		    if (fl->cur_ar.ar_fmodestr != NULL) {
-			statp->st_mode = S_IFREG | (fl->cur_ar.ar_fmode & 0777);
-		    } else {
-			rpmlog(RPMLOG_ERR, _("Explicit file attributes required in spec for: %s\n"), diskPath);
-		    	fl->processingFailed = 1;
-		    	return RPMRC_FAIL;
-		    }
-		    statp->st_atime = now;
-		    statp->st_mtime = now;
-		    statp->st_ctime = now;
-		} else {	
-		    rpmlog(RPMLOG_ERR, _("File not found: %s\n"), diskPath);
-		    fl->processingFailed = 1;
-		    return RPMRC_FAIL;
-		}
+	    int lvl = RPMLOG_ERR;
+	    const char *msg = fl->cur.isDir ? _("Directory not found: %s\n") :
+					      _("File not found: %s\n");
+	    if (fl->cur.attrFlags & RPMFILE_EXCLUDE) {
+		lvl = RPMLOG_WARNING;
+		rc = RPMRC_OK;
 	    }
+	    rpmlog(lvl, msg, diskPath);
+	    goto exit;
 	}
     }
 
-    if ((! fl->isDir) && S_ISDIR(statp->st_mode)) {
-/* FIX: fl->buildRoot may be NULL */
+    /* Error out when a non-directory is specified as one in spec */
+    if (fl->cur.isDir && (statp == &statbuf) && !S_ISDIR(statp->st_mode)) {
+	rpmlog(RPMLOG_ERR, _("Not a directory: %s\n"), diskPath);
+	goto exit;
+    }
+
+    /* Don't recurse into explicit %dir, don't double-recurse from fts */
+    if ((fl->cur.isDir != 1) && (statp == &statbuf) && S_ISDIR(statp->st_mode)) {
 	return recurseDir(fl, diskPath);
     }
 
@@ -1447,29 +1373,48 @@ static rpmRC addFile(FileList fl, const char * diskPath,
     fileUid = statp->st_uid;
     fileGid = statp->st_gid;
 
-    if (S_ISDIR(fileMode) && fl->cur_ar.ar_dmodestr) {
-	fileMode &= S_IFMT;
-	fileMode |= fl->cur_ar.ar_dmode;
-    } else if (fl->cur_ar.ar_fmodestr != NULL) {
-	fileMode &= S_IFMT;
-	fileMode |= fl->cur_ar.ar_fmode;
-    }
-    if (fl->cur_ar.ar_user) {
-	fileUname = getUnameS(fl->cur_ar.ar_user);
+    /* Explicit %attr() always wins */
+    if (fl->cur.ar.ar_fmodestr != NULL) {
+	if (S_ISLNK(fileMode)) {
+	    rpmlog(RPMLOG_WARNING,
+		   "Explicit %%attr() mode not applicaple to symlink: %s\n",
+		   diskPath);
+	} else {
+	    fileMode &= S_IFMT;
+	    fileMode |= fl->cur.ar.ar_fmode;
+	}
     } else {
-	fileUname = getUname(fileUid);
+	/* ...but %defattr() for directories and files is different */
+	if (S_ISDIR(fileMode)) {
+	    if (fl->def.ar.ar_dmodestr) {
+		fileMode &= S_IFMT;
+		fileMode |= fl->def.ar.ar_dmode;
+	    }
+	} else if (!S_ISLNK(fileMode) && fl->def.ar.ar_fmodestr) {
+	    fileMode &= S_IFMT;
+	    fileMode |= fl->def.ar.ar_fmode;
+	}
     }
-    if (fl->cur_ar.ar_group) {
-	fileGname = getGnameS(fl->cur_ar.ar_group);
+    if (fl->cur.ar.ar_user) {
+	fileUname = fl->cur.ar.ar_user;
+    } else if (fl->def.ar.ar_user) {
+	fileUname = fl->def.ar.ar_user;
     } else {
-	fileGname = getGname(fileGid);
+	fileUname = rpmugUname(fileUid);
+    }
+    if (fl->cur.ar.ar_group) {
+	fileGname = fl->cur.ar.ar_group;
+    } else if (fl->def.ar.ar_group) {
+	fileGname = fl->def.ar.ar_group;
+    } else {
+	fileGname = rpmugGname(fileGid);
     }
 	
     /* Default user/group to builder's user/group */
     if (fileUname == NULL)
-	fileUname = getUname(getuid());
+	fileUname = rpmugUname(getuid());
     if (fileGname == NULL)
-	fileGname = getGname(getgid());
+	fileGname = rpmugGname(getgid());
     
     /* S_XXX macro must be consistent with type in find call at check-files script */
     if (check_fileList && (S_ISREG(fileMode) || S_ISLNK(fileMode))) {
@@ -1478,14 +1423,13 @@ static rpmRC addFile(FileList fl, const char * diskPath,
     }
 
     /* Add to the file list */
-    if (fl->fileListRecsUsed == fl->fileListRecsAlloced) {
-	fl->fileListRecsAlloced += 128;
-	fl->fileList = xrealloc(fl->fileList,
-			fl->fileListRecsAlloced * sizeof(*(fl->fileList)));
+    if (fl->files.used == fl->files.alloced) {
+	fl->files.alloced += 128;
+	fl->files.recs = xrealloc(fl->files.recs,
+			fl->files.alloced * sizeof(*(fl->files.recs)));
     }
 	    
-    {	FileListRec flp = &fl->fileList[fl->fileListRecsUsed];
-	int i;
+    {	FileListRec flp = &fl->files.recs[fl->files.used];
 
 	flp->fl_st = *statp;	/* structure assignment */
 	flp->fl_mode = fileMode;
@@ -1494,56 +1438,40 @@ static rpmRC addFile(FileList fl, const char * diskPath,
 
 	flp->cpioPath = xstrdup(cpioPath);
 	flp->diskPath = xstrdup(diskPath);
-	flp->uname = fileUname;
-	flp->gname = fileGname;
+	flp->uname = rpmugStashStr(fileUname);
+	flp->gname = rpmugStashStr(fileGname);
 
-	if (fl->currentLangs && fl->nLangs > 0) {
-	    char * ncl;
-	    size_t nl = 0;
-	    
-	    for (i = 0; i < fl->nLangs; i++)
-		nl += strlen(fl->currentLangs[i]) + 1;
-
-	    flp->langs = ncl = xmalloc(nl);
-	    for (i = 0; i < fl->nLangs; i++) {
-	        const char *ocl;
-		if (i)	*ncl++ = '|';
-		for (ocl = fl->currentLangs[i]; *ocl != '\0'; ocl++)
-			*ncl++ = *ocl;
-		*ncl = '\0';
-	    }
+	if (fl->cur.langs) {
+	    flp->langs = argvJoin(fl->cur.langs, "|");
 	} else {
 	    flp->langs = xstrdup("");
 	}
 
-	if (fl->currentCaps) {
-	    flp->caps = fl->currentCaps;
+	if (fl->cur.caps) {
+	    flp->caps = fl->cur.caps;
 	} else {
 	    flp->caps = xstrdup("");
 	}
 
-	flp->flags = fl->currentFlags;
-	flp->specdFlags = fl->currentSpecdFlags;
-	flp->verifyFlags = fl->currentVerifyFlags;
+	flp->flags = fl->cur.attrFlags;
+	flp->specdFlags = fl->cur.specdFlags;
+	flp->verifyFlags = fl->cur.verifyFlags;
 
 	if (!(flp->flags & RPMFILE_EXCLUDE) && S_ISREG(flp->fl_mode)) {
-	    /*
-	     * XXX Simple and stupid check for now, this needs to be per-payload
-	     * format check once we have other payloads than good 'ole cpio.
-	     */
-	    if ((rpm_loff_t) flp->fl_size >= CPIO_FILESIZE_MAX) {
+	    if (flp->fl_size >= UINT32_MAX) {
 		fl->largeFiles = 1;
-		rpmlog(RPMLOG_ERR, _("File %s too large for payload\n"),
-		       flp->diskPath);
-		return RPMRC_FAIL;
 	    }
 	}
     }
 
-    fl->fileListRecsUsed++;
-    fl->fileCount++;
+    rc = RPMRC_OK;
+    fl->files.used++;
 
-    return RPMRC_OK;
+exit:
+    if (rc != RPMRC_OK)
+	fl->processingFailed = 1;
+
+    return rc;
 }
 
 /**
@@ -1558,10 +1486,7 @@ static rpmRC recurseDir(FileList fl, const char * diskPath)
     FTS * ftsp;
     FTSENT * fts;
     int myFtsOpts = (FTS_COMFOLLOW | FTS_NOCHDIR | FTS_PHYSICAL);
-    int rc = RPMRC_FAIL;
-
-    fl->inFtw = 1;  /* Flag to indicate file has buildRoot prefixed */
-    fl->isDir = 1;  /* Keep it from following myftw() again         */
+    rpmRC rc = RPMRC_FAIL;
 
     ftsSet[0] = (char *) diskPath;
     ftsSet[1] = NULL;
@@ -1577,7 +1502,7 @@ static rpmRC recurseDir(FileList fl, const char * diskPath)
 	    break;
 	case FTS_DOT:		/* dot or dot-dot */
 	case FTS_DP:		/* postorder directory */
-	    rc = 0;
+	    rc = RPMRC_OK;
 	    break;
 	case FTS_NS:		/* stat(2) failed */
 	case FTS_DNR:		/* unreadable directory */
@@ -1595,14 +1520,11 @@ static rpmRC recurseDir(FileList fl, const char * diskPath)
     }
     (void) Fts_close(ftsp);
 
-    fl->isDir = 0;
-    fl->inFtw = 0;
-
     return rc;
 }
 
 /**
- * Add a pubkey/policy/icon to a binary package.
+ * Add a pubkey/icon to a binary package.
  * @param pkg
  * @param fl		package file tree walk data
  * @param fileName	path to file, relative is builddir, absolute buildroot.
@@ -1610,7 +1532,7 @@ static rpmRC recurseDir(FileList fl, const char * diskPath)
  * @return		RPMRC_OK on success
  */
 static rpmRC processMetadataFile(Package pkg, FileList fl, 
-				 const char * fileName, rpmTag tag)
+				 const char * fileName, rpmTagVal tag)
 {
     const char * buildDir = "%{_builddir}/%{?buildsubdir}/";
     char * fn = NULL;
@@ -1618,7 +1540,7 @@ static rpmRC processMetadataFile(Package pkg, FileList fl,
     uint8_t * pkt = NULL;
     ssize_t pktlen = 0;
     int absolute = 0;
-    int rc = RPMRC_FAIL;
+    rpmRC rc = RPMRC_FAIL;
     int xx;
 
     if (*fileName == '/') {
@@ -1645,13 +1567,6 @@ static rpmRC processMetadataFile(Package pkg, FileList fl,
 	apkt = pgpArmorWrap(PGPARMOR_PUBKEY, pkt, pktlen);
 	break;
     }
-    case RPMTAG_POLICIES:
-	if ((xx = rpmioSlurp(fn, &pkt, &pktlen)) != 0 || pkt == NULL) {
-	    rpmlog(RPMLOG_ERR, _("%s: policy file read failed.\n"), fn);
-	    goto exit;
-	}
-	apkt = b64encode(pkt, pktlen, -1);
-	break;
     }
 
     if (!apkt) {
@@ -1666,9 +1581,9 @@ static rpmRC processMetadataFile(Package pkg, FileList fl,
 	rc = addFile(fl, fn, NULL);
 
 exit:
-    apkt = _free(apkt);
-    pkt = _free(pkt);
-    fn = _free(fn);
+    free(apkt);
+    free(pkt);
+    free(fn);
     if (rc) {
 	fl->processingFailed = 1;
 	rc = RPMRC_FAIL;
@@ -1688,9 +1603,15 @@ static rpmRC processBinaryFile(Package pkg, FileList fl, const char * fileName)
     int quote = 1;	/* XXX permit quoted glob characters. */
     int doGlob;
     char *diskPath = NULL;
-    int rc = RPMRC_OK;
+    rpmRC rc = RPMRC_OK;
+    size_t fnlen = strlen(fileName);
+    int trailing_slash = (fnlen > 0 && fileName[fnlen-1] == '/');
+
+    /* XXX differentiate other directories from explicit %dir */
+    if (trailing_slash && !fl->cur.isDir)
+	fl->cur.isDir = -1;
     
-    doGlob = glob_pattern_p(fileName, quote);
+    doGlob = rpmIsGlob(fileName, quote);
 
     /* Check that file starts with leading "/" */
     if (*fileName != '/') {
@@ -1708,28 +1629,36 @@ static rpmRC processBinaryFile(Package pkg, FileList fl, const char * fileName)
      *		/.././../usr/../bin//./sh
      */
     diskPath = rpmGenPath(fl->buildRoot, NULL, fileName);
+    /* Arrange trailing slash on directories */
+    if (fl->cur.isDir)
+	diskPath = rstrcat(&diskPath, "/");
 
     if (doGlob) {
 	ARGV_t argv = NULL;
 	int argc = 0;
 	int i;
 
-	/* XXX for %dev marker in file manifest only */
-	if (fl->noGlob) {
-	    rpmlog(RPMLOG_ERR, _("Glob not permitted: %s\n"), diskPath);
+	if (fl->cur.devtype) {
+	    rpmlog(RPMLOG_ERR, _("%%dev glob not permitted: %s\n"), diskPath);
 	    rc = RPMRC_FAIL;
 	    goto exit;
 	}
 
-	rc = rpmGlob(diskPath, &argc, &argv);
-	if (rc == 0 && argc >= 1) {
+	if (rpmGlob(diskPath, &argc, &argv) == 0 && argc >= 1) {
 	    for (i = 0; i < argc; i++) {
 		rc = addFile(fl, argv[i], NULL);
 	    }
 	    argvFree(argv);
 	} else {
-	    rpmlog(RPMLOG_ERR, _("File not found by glob: %s\n"), diskPath);
-	    rc = RPMRC_FAIL;
+	    int lvl = RPMLOG_WARNING;
+	    const char *msg = (fl->cur.isDir) ?
+				_("Directory not found by glob: %s\n") :
+				_("File not found by glob: %s\n");
+	    if (!(fl->cur.attrFlags & RPMFILE_EXCLUDE)) {
+		lvl = RPMLOG_ERR;
+		rc = RPMRC_FAIL;
+	    }
+	    rpmlog(lvl, msg, diskPath);
 	    goto exit;
 	}
     } else {
@@ -1745,273 +1674,274 @@ exit:
     return rc;
 }
 
-/**
- */
-static rpmRC processPackageFiles(rpmSpec spec, Package pkg,
-			       int installSpecialDoc, int test)
+static rpmRC readFilesManifest(rpmSpec spec, Package pkg, const char *path)
+{
+    char *fn, buf[BUFSIZ];
+    FILE *fd = NULL;
+    rpmRC rc = RPMRC_FAIL;
+
+    if (*path == '/') {
+	fn = rpmGetPath(path, NULL);
+    } else {
+	fn = rpmGetPath("%{_builddir}/",
+	    (spec->buildSubdir ? spec->buildSubdir : "") , "/", path, NULL);
+    }
+    fd = fopen(fn, "r");
+
+    if (fd == NULL) {
+	rpmlog(RPMLOG_ERR, _("Could not open %%files file %s: %m\n"), fn);
+	goto exit;
+    }
+
+    while (fgets(buf, sizeof(buf), fd)) {
+	handleComments(buf);
+	if (expandMacros(spec, spec->macros, buf, sizeof(buf))) {
+	    rpmlog(RPMLOG_ERR, _("line: %s\n"), buf);
+	    goto exit;
+	}
+	argvAdd(&(pkg->fileList), buf);
+    }
+
+    if (ferror(fd))
+	rpmlog(RPMLOG_ERR, _("Error reading %%files file %s: %m\n"), fn);
+    else
+	rc = RPMRC_OK;
+
+exit:
+    if (fd) fclose(fd);
+    free(fn);
+    return rc;
+}
+
+static char * getSpecialDocDir(Header h, rpmFlags sdtype)
+{
+    const char *errstr = NULL;
+    const char *dirtype = (sdtype == RPMFILE_DOC) ? "docdir" : "licensedir";
+    const char *fmt_default = "%{NAME}-%{VERSION}";
+    char *fmt_macro = rpmExpand("%{?_docdir_fmt}", NULL);
+    char *fmt = NULL; 
+    char *res = NULL;
+
+    if (fmt_macro && strlen(fmt_macro) > 0) {
+	fmt = headerFormat(h, fmt_macro, &errstr);
+	if (errstr) {
+	    rpmlog(RPMLOG_WARNING, _("illegal _docdir_fmt %s: %s\n"),
+		   fmt_macro, errstr);
+	}
+    }
+
+    if (fmt == NULL)
+	fmt = headerFormat(h, fmt_default, &errstr);
+
+    res = rpmGetPath("%{_", dirtype, "}/", fmt, NULL);
+
+    free(fmt);
+    free(fmt_macro);
+    return res;
+}
+
+static specialDir specialDirNew(Header h, rpmFlags sdtype,
+				AttrRec ar, AttrRec def_ar)
+{
+    specialDir sd = xcalloc(1, sizeof(*sd));
+    dupAttrRec(ar, &(sd->ar));
+    dupAttrRec(def_ar, &(sd->def_ar));
+    sd->dirname = getSpecialDocDir(h, sdtype);
+    sd->sdtype = sdtype;
+    return sd;
+}
+
+static specialDir specialDirFree(specialDir sd)
+{
+    if (sd) {
+	argvFree(sd->files);
+	freeAttrRec(&(sd->ar));
+	freeAttrRec(&(sd->def_ar));
+	free(sd->dirname);
+	free(sd);
+    }
+    return NULL;
+}
+
+static void processSpecialDir(rpmSpec spec, Package pkg, FileList fl,
+				specialDir sd, int install, int test)
+{
+    const char *sdenv = (sd->sdtype == RPMFILE_DOC) ? "DOCDIR" : "LICENSEDIR";
+    const char *sdname = (sd->sdtype == RPMFILE_DOC) ? "%doc" : "%license";
+    char *mkdocdir = rpmExpand("%{__mkdir_p} $", sdenv, NULL);
+    StringBuf docScript = newStringBuf();
+
+    appendStringBuf(docScript, sdenv);
+    appendStringBuf(docScript, "=$RPM_BUILD_ROOT");
+    appendLineStringBuf(docScript, sd->dirname);
+    appendStringBuf(docScript, "export ");
+    appendLineStringBuf(docScript, sdenv);
+    appendLineStringBuf(docScript, mkdocdir);
+
+    for (ARGV_const_t fn = sd->files; fn && *fn; fn++) {
+	/* Quotes would break globs, escape spaces instead */
+	char *efn = rpmEscapeSpaces(*fn);
+	appendStringBuf(docScript, "cp -pr ");
+	appendStringBuf(docScript, efn);
+	appendStringBuf(docScript, " $");
+	appendLineStringBuf(docScript, sdenv);
+	free(efn);
+    }
+
+    if (install) {
+	rpmRC rc = doScript(spec, RPMBUILD_STRINGBUF, sdname,
+			    getStringBuf(docScript), test);
+
+	if (rc && rpmExpandNumeric("%{?_missing_doc_files_terminate_build}"))
+	    fl->processingFailed = 1;
+    }
+
+    /* Reset for %doc */
+    FileEntryFree(&fl->cur);
+
+    fl->cur.attrFlags |= sd->sdtype;
+    fl->cur.verifyFlags = fl->def.verifyFlags;
+    dupAttrRec(&(sd->ar), &(fl->cur.ar));
+    dupAttrRec(&(sd->def_ar), &(fl->def.ar));
+
+    (void) processBinaryFile(pkg, fl, sd->dirname);
+
+    freeStringBuf(docScript);
+    free(mkdocdir);
+}
+				
+
+static rpmRC processPackageFiles(rpmSpec spec, rpmBuildPkgFlags pkgFlags,
+				 Package pkg, int installSpecialDoc, int test)
 {
     struct FileList_s fl;
-    char *s, **fp;
-    ARGV_t files = NULL;
-    const char *fileName;
-    char buf[BUFSIZ];
-    struct AttrRec_s arbuf;
-    AttrRec specialDocAttrRec = &arbuf;
-    char *specialDoc = NULL;
+    ARGV_t fileNames = NULL;
+    specialDir specialDoc = NULL;
+    specialDir specialLic = NULL;
 
-    nullAttrRec(specialDocAttrRec);
     pkg->cpioList = NULL;
 
-    if (pkg->fileFile) {
-	char *ffn;
-	ARGV_t filelists = NULL;
-	FILE *fd;
-
-	argvSplit(&filelists, getStringBuf(pkg->fileFile), "\n");
-	for (fp = filelists; *fp != NULL; fp++) {
-	    if (**fp == '/') {
-		ffn = rpmGetPath(*fp, NULL);
-	    } else {
-		ffn = rpmGetPath("%{_builddir}/",
-		    (spec->buildSubdir ? spec->buildSubdir : "") ,
-		    "/", *fp, NULL);
-	    }
-	    fd = fopen(ffn, "r");
-
-	    if (fd == NULL || ferror(fd)) {
-		rpmlog(RPMLOG_ERR, _("Could not open %%files file %s: %m\n"), ffn);
-		return RPMRC_FAIL;
-	    }
-	    ffn = _free(ffn);
-
-	    while (fgets(buf, sizeof(buf), fd)) {
-		handleComments(buf);
-		if (expandMacros(spec, spec->macros, buf, sizeof(buf))) {
-		    rpmlog(RPMLOG_ERR, _("line: %s\n"), buf);
-		    fclose(fd);
-		    return RPMRC_FAIL;
-		}
-		appendStringBuf(pkg->fileList, buf);
-	    }
-	    (void) fclose(fd);
-	}
-	argvFree(filelists);
+    for (ARGV_const_t fp = pkg->fileFile; fp && *fp != NULL; fp++) {
+	if (readFilesManifest(spec, pkg, *fp))
+	    return RPMRC_FAIL;
     }
-    
     /* Init the file list structure */
     memset(&fl, 0, sizeof(fl));
 
     /* XXX spec->buildRoot == NULL, then xstrdup("") is returned */
     fl.buildRoot = rpmGenPath(spec->rootDir, spec->buildRoot, NULL);
+    fl.buildRootLen = strlen(fl.buildRoot);
 
-    fl.prefix = headerGetAsString(pkg->header, RPMTAG_DEFAULTPREFIX);
+    dupAttrRec(&root_ar, &fl.def.ar);	/* XXX assume %defattr(-,root,root) */
+    fl.def.verifyFlags = RPMVERIFY_ALL;
 
-    fl.fileCount = 0;
-    fl.processingFailed = 0;
+    fl.pkgFlags = pkgFlags;
 
-    fl.passedSpecialDoc = 0;
-    fl.isSpecialDoc = 0;
-
-    fl.isDir = 0;
-    fl.inFtw = 0;
-    fl.currentFlags = 0;
-    fl.currentVerifyFlags = 0;
-    
-    fl.noGlob = 0;
-    fl.devtype = 0;
-    fl.devmajor = 0;
-    fl.devminor = 0;
-
-    nullAttrRec(&fl.cur_ar);
-    nullAttrRec(&fl.def_ar);
-    dupAttrRec(&root_ar, &fl.def_ar);	/* XXX assume %defattr(-,root,root) */
-
-    fl.defVerifyFlags = RPMVERIFY_ALL;
-    fl.nLangs = 0;
-    fl.currentLangs = NULL;
-    fl.haveCaps = 0;
-    fl.currentCaps = NULL;
-
-    fl.currentSpecdFlags = 0;
-    fl.defSpecdFlags = 0;
-
-    fl.largeFiles = 0;
-
-    fl.docDirs = NULL;
     {	char *docs = rpmGetPath("%{?__docdir_path}", NULL);
 	argvSplit(&fl.docDirs, docs, ":");
 	free(docs);
     }
     
-    fl.fileList = NULL;
-    fl.fileListRecsAlloced = 0;
-    fl.fileListRecsUsed = 0;
-
-    s = getStringBuf(pkg->fileList);
-    argvSplit(&files, s, "\n");
-
-    for (fp = files; *fp != NULL; fp++) {
-	s = *fp;
+    for (ARGV_const_t fp = pkg->fileList; *fp != NULL; fp++) {
+	char buf[strlen(*fp) + 1];
+	const char *s = *fp;
 	SKIPSPACE(s);
 	if (*s == '\0')
 	    continue;
-	fileName = NULL;
+	fileNames = argvFree(fileNames);
 	rstrlcpy(buf, s, sizeof(buf));
 	
 	/* Reset for a new line in %files */
-	fl.isDir = 0;
-	fl.inFtw = 0;
-	fl.currentFlags = 0;
+	FileEntryFree(&fl.cur);
+
 	/* turn explicit flags into %def'd ones (gosh this is hacky...) */
-	fl.currentSpecdFlags = ((unsigned)fl.defSpecdFlags) >> 8;
-	fl.currentVerifyFlags = fl.defVerifyFlags;
-	fl.isSpecialDoc = 0;
+	fl.cur.specdFlags = ((unsigned)fl.def.specdFlags) >> 8;
+	fl.cur.verifyFlags = fl.def.verifyFlags;
 
-	fl.noGlob = 0;
- 	fl.devtype = 0;
- 	fl.devmajor = 0;
- 	fl.devminor = 0;
-
-	/* XXX should reset to %deflang value */
-	if (fl.currentLangs) {
-	    int i;
-	    for (i = 0; i < fl.nLangs; i++)
-		fl.currentLangs[i] = _free(fl.currentLangs[i]);
-	    fl.currentLangs = _free(fl.currentLangs);
+	if (parseForVerify(buf, 0, &fl.cur) ||
+	    parseForVerify(buf, 1, &fl.def) ||
+	    parseForAttr(buf, 0, &fl.cur) ||
+	    parseForAttr(buf, 1, &fl.def) ||
+	    parseForDev(buf, &fl.cur) ||
+	    parseForConfig(buf, &fl.cur) ||
+	    parseForLang(buf, &fl.cur) ||
+	    parseForCaps(buf, &fl.cur) ||
+	    parseForSimple(buf, &fl.cur, &fileNames))
+	{
+	    fl.processingFailed = 1;
+	    continue;
 	}
-  	fl.nLangs = 0;
-	fl.currentCaps = NULL;
 
-	dupAttrRec(&fl.def_ar, &fl.cur_ar);
+	for (ARGV_const_t fn = fileNames; fn && *fn; fn++) {
+	    if (fl.cur.attrFlags & RPMFILE_SPECIALDIR) {
+		rpmFlags oattrs = (fl.cur.attrFlags & ~RPMFILE_SPECIALDIR);
+		specialDir *sdp = NULL;
+		if (oattrs == RPMFILE_DOC) {
+		    sdp = &specialDoc;
+		} else if (oattrs == RPMFILE_LICENSE) {
+		    sdp = &specialLic;
+		}
 
-	if (parseForVerify(buf, &fl))
-	    continue;
-	if (parseForAttr(buf, &fl))
-	    continue;
-	if (parseForDev(buf, &fl))
-	    continue;
-	if (parseForConfig(buf, &fl))
-	    continue;
-	if (parseForLang(buf, &fl))
-	    continue;
-	if (parseForCaps(buf, &fl))
-	    continue;
-	if (parseForSimple(spec, pkg, buf, &fl, &fileName))
-	    continue;
-	if (fileName == NULL)
-	    continue;
+		if (sdp == NULL || **fn == '/') {
+		    rpmlog(RPMLOG_ERR,
+			   _("Can't mix special %s with other forms: %s\n"),
+			   (oattrs & RPMFILE_DOC) ? "%doc" : "%license", *fn);
+		    fl.processingFailed = 1;
+		    continue;
+		}
 
-	if (fl.isSpecialDoc) {
-	    /* Save this stuff for last */
-	    specialDoc = _free(specialDoc);
-	    specialDoc = xstrdup(fileName);
-	    dupAttrRec(&fl.cur_ar, specialDocAttrRec);
-	} else if (fl.currentFlags & RPMFILE_PUBKEY) {
-	    (void) processMetadataFile(pkg, &fl, fileName, RPMTAG_PUBKEYS);
-	} else if (fl.currentFlags & RPMFILE_POLICY) {
-	    (void) processMetadataFile(pkg, &fl, fileName, RPMTAG_POLICIES);
-	} else {
-	    (void) processBinaryFile(pkg, &fl, fileName);
-	}
-    }
+		/* save attributes on first special doc/license for later use */
+		if (*sdp == NULL) {
+		    *sdp = specialDirNew(pkg->header, oattrs,
+					 &fl.cur.ar, &fl.def.ar);
+		}
+		argvAdd(&(*sdp)->files, *fn);
+		continue;
+	    }
 
-    /* Now process special doc, if there is one */
-    if (specialDoc) {
-	if (installSpecialDoc) {
-	    int _missing_doc_files_terminate_build =
-		    rpmExpandNumeric("%{?_missing_doc_files_terminate_build}");
-	    rpmRC rc;
-
-	    rc = doScript(spec, RPMBUILD_STRINGBUF, "%doc", pkg->specialDoc, test);
-	    if (rc != RPMRC_OK && _missing_doc_files_terminate_build)
+	    /* this is now an artificial limitation */
+	    if (fn != fileNames) {
+		rpmlog(RPMLOG_ERR, _("More than one file on a line: %s\n"),*fn);
 		fl.processingFailed = 1;
+		continue;
+	    }
+
+	    if (fl.cur.attrFlags & RPMFILE_DOCDIR) {
+		argvAdd(&(fl.docDirs), *fn);
+	    } else if (fl.cur.attrFlags & RPMFILE_PUBKEY) {
+		(void) processMetadataFile(pkg, &fl, *fn, RPMTAG_PUBKEYS);
+	    } else {
+		if (fl.cur.attrFlags & RPMFILE_DIR)
+		    fl.cur.isDir = 1;
+		(void) processBinaryFile(pkg, &fl, *fn);
+	    }
 	}
 
-	/* Reset for %doc */
-	fl.isDir = 0;
-	fl.inFtw = 0;
-	fl.currentFlags = 0;
-	fl.currentVerifyFlags = fl.defVerifyFlags;
-
-	fl.noGlob = 0;
- 	fl.devtype = 0;
- 	fl.devmajor = 0;
- 	fl.devminor = 0;
-
-	/* XXX should reset to %deflang value */
-	if (fl.currentLangs) {
-	    int i;
-	    for (i = 0; i < fl.nLangs; i++)
-		fl.currentLangs[i] = _free(fl.currentLangs[i]);
-	    fl.currentLangs = _free(fl.currentLangs);
-	}
-  	fl.nLangs = 0;
-
-	dupAttrRec(specialDocAttrRec, &fl.cur_ar);
-	freeAttrRec(specialDocAttrRec);
-
-	(void) processBinaryFile(pkg, &fl, specialDoc);
-
-	specialDoc = _free(specialDoc);
+	if (fl.cur.caps)
+	    fl.haveCaps = 1;
     }
-    
-    argvFree(files);
 
+    /* Now process special docs and licenses if present */
+    if (specialDoc)
+	processSpecialDir(spec, pkg, &fl, specialDoc, installSpecialDoc, test);
+    if (specialLic)
+	processSpecialDir(spec, pkg, &fl, specialLic, installSpecialDoc, test);
+    
     if (fl.processingFailed)
 	goto exit;
 
     /* Verify that file attributes scope over hardlinks correctly. */
-    if (checkHardLinks(&fl))
-	(void) rpmlibNeedsFeature(pkg->header,
-			"PartialHardlinkSets", "4.0.4-1");
+    if (checkHardLinks(&fl.files))
+	(void) rpmlibNeedsFeature(pkg, "PartialHardlinkSets", "4.0.4-1");
 
-    genCpioListAndHeader(&fl, &pkg->cpioList, pkg->header, 0);
+    genCpioListAndHeader(&fl, pkg, 0);
 
-    if (spec->timeCheck)
-	timeCheck(spec->timeCheck, pkg->header);
-    
 exit:
-    fl.buildRoot = _free(fl.buildRoot);
-    fl.prefix = _free(fl.prefix);
-
-    freeAttrRec(&fl.cur_ar);
-    freeAttrRec(&fl.def_ar);
-
-    if (fl.currentLangs) {
-	int i;
-	for (i = 0; i < fl.nLangs; i++)
-	    fl.currentLangs[i] = _free(fl.currentLangs[i]);
-	fl.currentLangs = _free(fl.currentLangs);
-    }
-
-    fl.fileList = freeFileList(fl.fileList, fl.fileListRecsUsed);
-    argvFree(fl.docDirs);
+    FileListFree(&fl);
+    specialDirFree(specialDoc);
+    specialDirFree(specialLic);
     return fl.processingFailed ? RPMRC_FAIL : RPMRC_OK;
 }
-
-static const rpmTag sourceTags[] = {
-    RPMTAG_NAME,
-    RPMTAG_VERSION,
-    RPMTAG_RELEASE,
-    RPMTAG_EPOCH,
-    RPMTAG_SUMMARY,
-    RPMTAG_DESCRIPTION,
-    RPMTAG_PACKAGER,
-    RPMTAG_DISTRIBUTION,
-    RPMTAG_DISTURL,
-    RPMTAG_VENDOR,
-    RPMTAG_LICENSE,
-    RPMTAG_GROUP,
-    RPMTAG_OS,
-    RPMTAG_ARCH,
-    RPMTAG_CHANGELOGTIME,
-    RPMTAG_CHANGELOGNAME,
-    RPMTAG_CHANGELOGTEXT,
-    RPMTAG_URL,
-    RPMTAG_BUGURL,
-    HEADER_I18NTABLE,
-    0
-};
 
 static void genSourceRpmName(rpmSpec spec)
 {
@@ -2023,40 +1953,13 @@ static void genSourceRpmName(rpmSpec spec)
     }
 }
 
-void initSourceHeader(rpmSpec spec)
-{
-    HeaderIterator hi;
-    struct rpmtd_s td;
-
-    spec->sourceHeader = headerNew();
-    /* Only specific tags are added to the source package header */
-    headerCopyTags(spec->packages->header, spec->sourceHeader, sourceTags);
-
-    /* Add the build restrictions */
-    hi = headerInitIterator(spec->buildRestrictions);
-    while (headerNext(hi, &td)) {
-	if (rpmtdCount(&td) > 0) {
-	    (void) headerPut(spec->sourceHeader, &td, HEADERPUT_DEFAULT);
-	}
-	rpmtdFreeData(&td);
-    }
-    hi = headerFreeIterator(hi);
-
-    if (spec->BANames && spec->BACount > 0) {
-	headerPutStringArray(spec->sourceHeader, RPMTAG_BUILDARCHS,
-		  spec->BANames, spec->BACount);
-    }
-}
-
-int processSourceFiles(rpmSpec spec)
+rpmRC processSourceFiles(rpmSpec spec, rpmBuildPkgFlags pkgFlags)
 {
     struct Source *srcPtr;
-    StringBuf sourceFiles;
-    int x, isSpec = 1;
     struct FileList_s fl;
-    char *s, **fp;
     ARGV_t files = NULL;
     Package pkg;
+    Package sourcePkg = spec->sourcePackage;
     static char *_srcdefattr;
     static int oneshot;
 
@@ -2066,41 +1969,15 @@ int processSourceFiles(rpmSpec spec)
 	    _srcdefattr = _free(_srcdefattr);
 	oneshot = 1;
     }
-    sourceFiles = newStringBuf();
-
-    /* XXX
-     * XXX This is where the source header for noarch packages needs
-     * XXX to be initialized.
-     */
-    if (spec->sourceHeader == NULL)
-	initSourceHeader(spec);
 
     genSourceRpmName(spec);
     /* Construct the file list and source entries */
-    appendLineStringBuf(sourceFiles, spec->specFile);
-    if (spec->sourceHeader != NULL)
+    argvAdd(&files, spec->specFile);
     for (srcPtr = spec->sources; srcPtr != NULL; srcPtr = srcPtr->next) {
-	if (srcPtr->flags & RPMBUILD_ISSOURCE) {
-	    headerPutString(spec->sourceHeader, RPMTAG_SOURCE, srcPtr->source);
-	    if (srcPtr->flags & RPMBUILD_ISNO) {
-		headerPutUint32(spec->sourceHeader, RPMTAG_NOSOURCE,
-				&srcPtr->num, 1);
-	    }
-	}
-	if (srcPtr->flags & RPMBUILD_ISPATCH) {
-	    headerPutString(spec->sourceHeader, RPMTAG_PATCH, srcPtr->source);
-	    if (srcPtr->flags & RPMBUILD_ISNO) {
-		headerPutUint32(spec->sourceHeader, RPMTAG_NOPATCH,
-				&srcPtr->num, 1);
-	    }
-	}
-
-      {	char * sfn;
-	sfn = rpmGetPath( ((srcPtr->flags & RPMBUILD_ISNO) ? "!" : ""),
+	char * sfn = rpmGetPath( ((srcPtr->flags & RPMBUILD_ISNO) ? "!" : ""),
 		"%{_sourcedir}/", srcPtr->source, NULL);
-	appendLineStringBuf(sourceFiles, sfn);
-	sfn = _free(sfn);
-      }
+	argvAdd(&files, sfn);
+	free(sfn);
     }
 
     for (pkg = spec->packages; pkg != NULL; pkg = pkg->next) {
@@ -2108,44 +1985,37 @@ int processSourceFiles(rpmSpec spec)
 	    char * sfn;
 	    sfn = rpmGetPath( ((srcPtr->flags & RPMBUILD_ISNO) ? "!" : ""),
 		"%{_sourcedir}/", srcPtr->source, NULL);
-	    appendLineStringBuf(sourceFiles, sfn);
-	    sfn = _free(sfn);
+	    argvAdd(&files, sfn);
+	    free(sfn);
 	}
     }
 
-    spec->sourceCpioList = NULL;
+    sourcePkg->cpioList = NULL;
 
     /* Init the file list structure */
     memset(&fl, 0, sizeof(fl));
     if (_srcdefattr) {
 	char *a = rstrscat(NULL, "%defattr ", _srcdefattr, NULL);
-	parseForAttr(a, &fl);
+	parseForAttr(a, 1, &fl.def);
 	free(a);
     }
-    fl.fileList = xcalloc((spec->numSources + 1), sizeof(*fl.fileList));
-    fl.processingFailed = 0;
-    fl.fileListRecsUsed = 0;
-    fl.prefix = NULL;
-    fl.buildRoot = NULL;
+    fl.files.alloced = spec->numSources + 1;
+    fl.files.recs = xcalloc(fl.files.alloced, sizeof(*fl.files.recs));
+    fl.pkgFlags = pkgFlags;
 
-    s = getStringBuf(sourceFiles);
-    argvSplit(&files, s, "\n");
-
-    /* The first source file is the spec file */
-    x = 0;
-    for (fp = files; *fp != NULL; fp++) {
-	const char *diskPath;
+    for (ARGV_const_t fp = files; *fp != NULL; fp++) {
+	const char *diskPath = *fp;
 	char *tmp;
 	FileListRec flp;
 
-	diskPath = *fp;
 	SKIPSPACE(diskPath);
 	if (! *diskPath)
 	    continue;
 
-	flp = &fl.fileList[x];
+	flp = &fl.files.recs[fl.files.used];
 
-	flp->flags = isSpec ? RPMFILE_SPECFILE : 0;
+	/* The first source file is the spec file */
+	flp->flags = (fl.files.used == 0) ? RPMFILE_SPECFILE : 0;
 	/* files with leading ! are no source files */
 	if (*diskPath == '!') {
 	    flp->flags |= RPMFILE_GHOST;
@@ -2162,21 +2032,24 @@ int processSourceFiles(rpmSpec spec)
 	    rpmlog(RPMLOG_ERR, _("Bad file: %s: %s\n"),
 		diskPath, strerror(errno));
 	    fl.processingFailed = 1;
+	} else {
+	    if (S_ISREG(flp->fl_mode) && flp->fl_size >= UINT32_MAX)
+		fl.largeFiles = 1;
 	}
 
-	if (fl.def_ar.ar_fmodestr) {
+	if (fl.def.ar.ar_fmodestr) {
 	    flp->fl_mode &= S_IFMT;
-	    flp->fl_mode |= fl.def_ar.ar_fmode;
+	    flp->fl_mode |= fl.def.ar.ar_fmode;
 	}
-	if (fl.def_ar.ar_user) {
-	    flp->uname = getUnameS(fl.def_ar.ar_user);
+	if (fl.def.ar.ar_user) {
+	    flp->uname = rpmugStashStr(fl.def.ar.ar_user);
 	} else {
-	    flp->uname = getUname(flp->fl_uid);
+	    flp->uname = rpmugStashStr(rpmugUname(flp->fl_uid));
 	}
-	if (fl.def_ar.ar_group) {
-	    flp->gname = getGnameS(fl.def_ar.ar_group);
+	if (fl.def.ar.ar_group) {
+	    flp->gname = rpmugStashStr(fl.def.ar.ar_group);
 	} else {
-	    flp->gname = getGname(flp->fl_gid);
+	    flp->gname = rpmugStashStr(rpmugGname(flp->fl_gid));
 	}
 	flp->langs = xstrdup("");
 	
@@ -2187,22 +2060,18 @@ int processSourceFiles(rpmSpec spec)
 	}
 #endif
 
-	isSpec = 0;
-	x++;
+	fl.files.used++;
     }
-    fl.fileListRecsUsed = x;
     argvFree(files);
 
     if (! fl.processingFailed) {
-	if (spec->sourceHeader != NULL)
-	    genCpioListAndHeader(&fl, &spec->sourceCpioList,
-			spec->sourceHeader, 1);
+	if (sourcePkg->header != NULL) {
+	    genCpioListAndHeader(&fl, sourcePkg, 1);
+	}
     }
 
-    sourceFiles = freeStringBuf(sourceFiles);
-    fl.fileList = freeFileList(fl.fileList, fl.fileListRecsUsed);
-    freeAttrRec(&fl.def_ar);
-    return fl.processingFailed;
+    FileListFree(&fl);
+    return fl.processingFailed ? RPMRC_FAIL : RPMRC_OK;
 }
 
 /**
@@ -2210,32 +2079,26 @@ int processSourceFiles(rpmSpec spec)
  * @param fileList	packaged file list
  * @return		-1 if skipped, 0 on OK, 1 on error
  */
-static int checkFiles(StringBuf fileList)
+static int checkFiles(const char *buildRoot, StringBuf fileList)
 {
     static char * const av_ckfile[] = { "%{?__check_files}", NULL };
     StringBuf sb_stdout = NULL;
-    char * s;
-    int rc;
+    int rc = -1;
+    char * s = rpmExpand(av_ckfile[0], NULL);
     
-    s = rpmExpand(av_ckfile[0], NULL);
-    if (!(s && *s)) {
-	rc = -1;
+    if (!(s && *s))
 	goto exit;
-    }
-    rc = 0;
 
     rpmlog(RPMLOG_NOTICE, _("Checking for unpackaged file(s): %s\n"), s);
 
-    rc = rpmfcExec(av_ckfile, fileList, &sb_stdout, 0);
+    rc = rpmfcExec(av_ckfile, fileList, &sb_stdout, 0, buildRoot);
     if (rc < 0)
 	goto exit;
     
     if (sb_stdout) {
 	int _unpackaged_files_terminate_build =
 		rpmExpandNumeric("%{?_unpackaged_files_terminate_build}");
-	const char * t;
-
-	t = getStringBuf(sb_stdout);
+	const char * t = getStringBuf(sb_stdout);
 	if ((*t != '\0') && (*t != '\n')) {
 	    rc = (_unpackaged_files_terminate_build) ? 1 : 0;
 	    rpmlog((rc ? RPMLOG_ERR : RPMLOG_WARNING),
@@ -2244,15 +2107,16 @@ static int checkFiles(StringBuf fileList)
     }
     
 exit:
-    sb_stdout = freeStringBuf(sb_stdout);
-    s = _free(s);
+    freeStringBuf(sb_stdout);
+    free(s);
     return rc;
 }
 
-int processBinaryFiles(rpmSpec spec, int installSpecialDoc, int test)
+rpmRC processBinaryFiles(rpmSpec spec, rpmBuildPkgFlags pkgFlags,
+			int installSpecialDoc, int test)
 {
     Package pkg;
-    int rc = RPMRC_OK;
+    rpmRC rc = RPMRC_OK;
     
     check_fileList = newStringBuf();
     genSourceRpmName(spec);
@@ -2260,21 +2124,33 @@ int processBinaryFiles(rpmSpec spec, int installSpecialDoc, int test)
     for (pkg = spec->packages; pkg != NULL; pkg = pkg->next) {
 	char *nvr;
 	const char *a;
-	headerPutString(pkg->header, RPMTAG_SOURCERPM, spec->sourceRpmName);
+	int header_color;
+	int arch_color;
 
 	if (pkg->fileList == NULL)
 	    continue;
+
+	headerPutString(pkg->header, RPMTAG_SOURCERPM, spec->sourceRpmName);
 
 	nvr = headerGetAsString(pkg->header, RPMTAG_NVRA);
 	rpmlog(RPMLOG_NOTICE, _("Processing files: %s\n"), nvr);
 	free(nvr);
 		   
-	if ((rc = processPackageFiles(spec, pkg, installSpecialDoc, test)) != RPMRC_OK ||
+	if ((rc = processPackageFiles(spec, pkgFlags, pkg, installSpecialDoc, test)) != RPMRC_OK ||
 	    (rc = rpmfcGenerateDepends(spec, pkg)) != RPMRC_OK)
 	    goto exit;
 
 	a = headerGetString(pkg->header, RPMTAG_ARCH);
-	if (rstreq(a, "noarch") && headerGetNumber(pkg->header, RPMTAG_HEADERCOLOR) != 0) {
+	header_color = headerGetNumber(pkg->header, RPMTAG_HEADERCOLOR);
+	if (!rstreq(a, "noarch")) {
+	    arch_color = rpmGetArchColor(a);
+	    if (arch_color > 0 && header_color > 0 &&
+					!(arch_color & header_color)) {
+		rpmlog(RPMLOG_WARNING,
+		       _("Binaries arch (%d) not matching the package arch (%d).\n"),
+		       header_color, arch_color);
+	    }
+	} else if (header_color != 0) {
 	    int terminate = rpmExpandNumeric("%{?_binaries_in_noarch_packages_terminate_build}");
 	    rpmlog(terminate ? RPMLOG_ERR : RPMLOG_WARNING, 
 		   _("Arch dependent binaries in noarch package\n"));
@@ -2291,7 +2167,7 @@ int processBinaryFiles(rpmSpec spec, int installSpecialDoc, int test)
      */
     
     
-    if (checkFiles(check_fileList) > 0) {
+    if (checkFiles(spec->buildRoot, check_fileList) > 0) {
 	rc = RPMRC_FAIL;
     }
 exit:

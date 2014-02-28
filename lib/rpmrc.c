@@ -1,10 +1,17 @@
 #include "system.h"
 
 #include <stdarg.h>
-#if defined(__linux__) && defined(__powerpc__)
-#include <setjmp.h>
+
+#if defined(__linux__)
+#include <elf.h>
+#include <link.h>
 #endif
 
+
+#if HAVE_SYS_UTSNAME_H
+#include <sys/utsname.h>
+#endif
+#include <netdb.h>
 #include <ctype.h>	/* XXX for /etc/rpm/platform contents */
 
 #if HAVE_SYS_SYSTEMCFG_H
@@ -73,11 +80,14 @@ struct rpmOption {
     char * name;
     int var;
     int archSpecific;
-int required;
     int macroize;
     int localize;
-struct rpmOptionValue * value;
 };
+
+static struct rpmat_s {
+    const char *platform;
+    uint64_t hwcap;
+} rpmat;
 
 typedef struct defaultEntry_s {
     char * name;
@@ -116,18 +126,20 @@ static struct tableType_s tables[RPM_MACHTABLE_COUNT] = {
 /* XXX get rid of this stuff... */
 /* Stuff for maintaining "variables" like SOURCEDIR, BUILDDIR, etc */
 #define RPMVAR_OPTFLAGS                 3
+#define RPMVAR_ARCHCOLOR                42
 #define RPMVAR_INCLUDE                  43
 #define RPMVAR_MACROFILES               49
 
 #define RPMVAR_NUM                      55      /* number of RPMVAR entries */
 
 /* this *must* be kept in alphabetical order */
-/* The order of the flags is archSpecific, required, macroize, localize */
+/* The order of the flags is archSpecific, macroize, localize */
 
-static const struct rpmOption const optionTable[] = {
-    { "include",		RPMVAR_INCLUDE,			0, 1,	0, 2 },
-    { "macrofiles",		RPMVAR_MACROFILES,		0, 0,	0, 1 },
-    { "optflags",		RPMVAR_OPTFLAGS,		1, 0,	1, 0 },
+static const struct rpmOption optionTable[] = {
+    { "archcolor",		RPMVAR_ARCHCOLOR,               1, 0, 0 },
+    { "include",		RPMVAR_INCLUDE,			0, 0, 2 },
+    { "macrofiles",		RPMVAR_MACROFILES,		0, 0, 1 },
+    { "optflags",		RPMVAR_OPTFLAGS,		1, 1, 0 },
 };
 
 static const size_t optionTableSize = sizeof(optionTable) / sizeof(*optionTable);
@@ -430,7 +442,9 @@ static void setDefaults(void)
 #ifndef MACROFILES
     if (!macrofiles) {
 	macrofiles = rstrscat(NULL, confdir, "/macros", ":",
+				confdir, "/macros.d/macros.*", ":",
 				confdir, "/platform/%{_target}/macros", ":",
+				confdir, "/fileattrs/*.attr", ":",
   				confdir, "/" RPMCANONVENDOR "/macros", ":",
 				SYSCONFDIR "/rpm/macros.*", ":",
 				SYSCONFDIR "/rpm/macros", ":",
@@ -505,26 +519,18 @@ static rpmRC doReadRC(const char * urlfn)
 		goto exit;
 	    }
 
-	    switch (option->var) {
-	    case RPMVAR_INCLUDE:
+	    if (option->var == RPMVAR_INCLUDE) {
 		s = se;
 		while (*se && !risspace(*se)) se++;
-		if (*se != '\0') *se++ = '\0';
-
-#if 0 /* XXX doesn't seem to do anything useful, only break things... */
-		rpmRebuildTargetVars(NULL, NULL);
-#endif
+		if (*se != '\0') *se = '\0';
 
 		if (doReadRC(s)) {
 		    rpmlog(RPMLOG_ERR, _("cannot open %s at %s:%d: %m\n"),
 			s, fn, linenum);
 		    goto exit;
-		} else {
-		    continue;	/* XXX don't save include value as var/macro */
 		}
-	      	break;
-	    default:
-		break;
+		/* XXX don't save include value as var/macro */
+		continue;
 	    }
 
 	    if (option->archSpecific) {
@@ -624,9 +630,9 @@ static rpmRC rpmPlatform(const char * platform)
     ssize_t blen = 0;
     int init_platform = 0;
     char * p, * pe;
-    int rc;
+    rpmRC rc;
 
-    rc = rpmioSlurp(platform, &b, &blen);
+    rc = (rpmioSlurp(platform, &b, &blen) == 0) ? RPMRC_OK : RPMRC_FAIL;
 
     if (rc || b == NULL || blen <= 0) {
 	rc = RPMRC_FAIL;
@@ -670,7 +676,7 @@ static rpmRC rpmPlatform(const char * platform)
 	while (*p && !(*p == '-' || isspace(*p)))
 	    p++;
 	if (*p != '-') {
-	    if (*p != '\0') *p++ = '\0';
+	    if (*p != '\0') *p = '\0';
 	    os = vendor;
 	    vendor = "unknown";
 	} else {
@@ -686,7 +692,7 @@ static rpmRC rpmPlatform(const char * platform)
 		while (*p && !(*p == '-' || isspace(*p)))
 		    p++;
 	    }
-	    if (*p != '\0') *p++ = '\0';
+	    if (*p != '\0') *p = '\0';
 	}
 
 	addMacro(NULL, "_host_cpu", NULL, cpu, -1);
@@ -812,8 +818,6 @@ static int is_athlon(void)
 	
 	cpuid (0, &eax, &ebx, &ecx, &edx);
 
- 	/* If you care about space, you can just check ebx, ecx and edx directly
- 	   instead of forming a string first and then doing a strcmp */
  	memset(vendor, 0, sizeof(vendor));
  	
  	for (i=0; i<4; i++)
@@ -829,7 +833,7 @@ static int is_athlon(void)
 	return 1;
 }
 
-static int is_pentium3()
+static int is_pentium3(void)
 {
     unsigned int eax, ebx, ecx, edx, family, model;
     char vendor[16];
@@ -849,18 +853,6 @@ static int is_pentium3()
 	    case 7:	// Pentium III, Pentium III Xeon (model 7)
 	    case 8:	// Pentium III, Pentium III Xeon, Celeron (model 8)
 	    case 9:	// Pentium M
-			/*
-			    Intel recently announced its new technology for mobile platforms,
-			    named Centrino, and presents it as a big advance in mobile PCs.
-			    One of the main part of Centrino consists in a brand new CPU,
-			    the Pentium M, codenamed Banias, that we'll study in this review.
-			    A particularity of this CPU is that it was designed for mobile platform
-			    exclusively, unlike previous mobile CPU (Pentium III-M, Pentium 4-M)
-			    that share the same micro-architecture as their desktop counterparts.
-			    The Pentium M introduces a new micro-architecture, adapted for mobility
-			    constraints, and that is halfway between the Pentium III and the Pentium 4.
-						    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-			*/
 	    case 10:	// Pentium III Xeon (model A)
 	    case 11:	// Pentium III (model B)
 		return 1;
@@ -868,7 +860,7 @@ static int is_pentium3()
     return 0;
 }
 
-static int is_pentium4()
+static int is_pentium4(void)
 {
     unsigned int eax, ebx, ecx, edx, family, model;
     char vendor[16];
@@ -896,12 +888,10 @@ static int is_pentium4()
     return 0;
 }
 
-static int is_geode()
+static int is_geode(void)
 {
     unsigned int eax, ebx, ecx, edx, family, model;
     char vendor[16];
-    /* If you care about space, you can just check ebx, ecx and edx directly
-       instead of forming a string first and then doing a strcmp */
     memset(vendor, 0, sizeof(vendor));
     
     cpuid(0, &eax, &ebx, &ecx, &edx);
@@ -924,12 +914,43 @@ static int is_geode()
 }
 #endif
 
-#if defined(__linux__) && defined(__powerpc__)
-static jmp_buf mfspr_jmpbuf;
 
-static void mfspr_ill(int notused)
+#if defined(__linux__)
+/**
+ * Populate rpmat structure with parsed info from /proc/self/auxv
+ */
+static void parse_auxv(void)
 {
-    longjmp(mfspr_jmpbuf, -1);
+    static int oneshot = 1;
+
+    if (oneshot) {
+	rpmat.platform = "";
+	int fd = open("/proc/self/auxv", O_RDONLY);
+
+	if (fd == -1) {
+	    rpmlog(RPMLOG_WARNING,
+		   _("Failed to read auxiliary vector, /proc not mounted?\n"));
+            return;
+	} else {
+	    ElfW(auxv_t) auxv;
+	    while (read(fd, &auxv, sizeof(auxv)) == sizeof(auxv)) {
+                switch (auxv.a_type)
+                {
+                    case AT_NULL:
+                        break;
+                    case AT_PLATFORM:
+                        rpmat.platform = strdup((char *) auxv.a_un.a_val);
+                        break;
+                    case AT_HWCAP:
+                        rpmat.hwcap = auxv.a_un.a_val;
+                        break;
+                }
+	    }
+	    close(fd);
+	}
+	oneshot = 0; /* only try once even if it fails */
+    }
+    return;
 }
 #endif
 
@@ -944,18 +965,22 @@ static void defaultMachine(const char ** arch,
     canonEntry canon;
     int rc;
 
+#if defined(__linux__)
+    /* Populate rpmat struct with hw info */
+    parse_auxv();
+#endif
+
     while (!gotDefaults) {
 	if (!rpmPlatform(platform)) {
-	    char * s;
-	    s = rpmExpand("%{_host_cpu}", NULL);
+	    char * s = rpmExpand("%{_host_cpu}", NULL);
 	    if (s) {
 		rstrlcpy(un.machine, s, sizeof(un.machine));
-		s = _free(s);
+		free(s);
 	    }
 	    s = rpmExpand("%{_host_os}", NULL);
 	    if (s) {
 		rstrlcpy(un.sysname, s, sizeof(un.sysname));
-		s = _free(s);
+		free(s);
 	    }
 	    gotDefaults = 1;
 	    break;
@@ -964,12 +989,6 @@ static void defaultMachine(const char ** arch,
 	if (rc < 0) return;
 
 #if !defined(__linux__)
-#ifdef SNI
-	/* USUALLY un.sysname on sinix does start with the word "SINIX"
-	 * let's be absolutely sure
-	 */
-	strncpy(un.sysname, "SINIX", sizeof(un.sysname));
-#endif
 	if (rstreq(un.sysname, "AIX")) {
 	    strcpy(un.machine, __power_pc() ? "ppc" : "rs6000");
 	    sprintf(un.sysname,"aix%s.%s", un.version, un.release);
@@ -982,22 +1001,9 @@ static void defaultMachine(const char ** arch,
 #endif 
 	}
 	else if (rstreq(un.sysname, "SunOS")) {
-	    if (rstreqn(un.release,"4", 1)) /* SunOS 4.x */ {
-		int fd;
-		for (fd = 0;
-		    (un.release[fd] != 0 && (fd < sizeof(un.release)));
-		    fd++) {
-		      if (!risdigit(un.release[fd]) && (un.release[fd] != '.')) {
-			un.release[fd] = 0;
-			break;
-		      }
-		    }
-		    sprintf(un.sysname,"sunos%s",un.release);
-	    }
-
-	    else /* Solaris 2.x: n.x.x becomes n-3.x.x */
-		sprintf(un.sysname, "solaris%1d%s", atoi(un.release)-3,
-			un.release+1+(atoi(un.release)/10));
+	    /* Solaris 2.x: n.x.x becomes n-3.x.x */
+	    sprintf(un.sysname, "solaris%1d%s", atoi(un.release)-3,
+		    un.release+1+(atoi(un.release)/10));
 
 	    /* Solaris on Intel hardware reports i86pc instead of i386
 	     * (at least on 2.6 and 2.8)
@@ -1011,41 +1017,6 @@ static void defaultMachine(const char ** arch,
 	else if (rstreq(un.sysname, "OSF1"))
 	    /*make un.sysname look like osf3.2 for example*/
 	    sprintf(un.sysname, "osf%s", strpbrk(un.release, "123456789"));
-	else if (rstreqn(un.sysname, "IP", 2))
-	    un.sysname[2] = '\0';
-	else if (rstreqn(un.sysname, "SINIX", 5)) {
-	    sprintf(un.sysname, "sinix%s",un.release);
-	    if (rstreqn(un.machine, "RM", 2))
-		sprintf(un.machine, "mips");
-	}
-	else if ((rstreqn(un.machine, "34", 2) ||
-		rstreqn(un.machine, "33", 2)) && \
-		rstreqn(un.release, "4.0", 3))
-	{
-	    /* we are on ncr-sysv4 */
-	    char * prelid = NULL;
-	    FD_t fd = Fopen("/etc/.relid", "r.fdio");
-	    int gotit = 0;
-	    if (fd != NULL && !Ferror(fd)) {
-		chptr = xcalloc(1, 256);
-		{   int irelid = Fread(chptr, sizeof(*chptr), 256, fd);
-		    (void) Fclose(fd);
-		    /* example: "112393 RELEASE 020200 Version 01 OS" */
-		    if (irelid > 0) {
-			if ((prelid = strstr(chptr, "RELEASE "))){
-			    prelid += strlen("RELEASE ")+1;
-			    sprintf(un.sysname,"ncr-sysv4.%.*s",1,prelid);
-			    gotit = 1;
-			}
-		    }
-		}
-		chptr = _free (chptr);
-	    }
-	    if (!gotit)	/* parsing /etc/.relid file failed? */
-		strcpy(un.sysname,"ncr-sysv4");
-	    /* wrong, just for now, find out how to look for i586 later*/
-	    strcpy(un.machine,"i486");
-	}
 #endif	/* __linux__ */
 
 	/* get rid of the hyphens in the sysname */
@@ -1125,6 +1096,17 @@ static void defaultMachine(const char ** arch,
 	}
 #	endif	/* sparc*-linux */
 
+#	if defined(__linux__) && defined(__powerpc__)
+	{
+            int powerlvl;
+            if (!rstreq(un.machine, "ppc") &&
+		    sscanf(rpmat.platform, "power%d", &powerlvl) == 1 &&
+		    powerlvl > 6) {
+                strcpy(un.machine, "ppc64p7");
+	    }
+        }
+#	endif	/* ppc64*-linux */
+
 #	if defined(__GNUC__) && defined(__alpha__)
 	{
 	    unsigned long amask, implver;
@@ -1153,9 +1135,9 @@ static void defaultMachine(const char ** arch,
 
 #	if defined(__linux__) && defined(__i386__)
 	{
-	    char class = (char) (RPMClass() | '0');
+	    char mclass = (char) (RPMClass() | '0');
 
-	    if ((class == '6' && is_athlon()) || class == '7')
+	    if ((mclass == '6' && is_athlon()) || mclass == '7')
 	    	strcpy(un.machine, "athlon");
 	    else if (is_pentium4())
 		strcpy(un.machine, "pentium4");
@@ -1163,8 +1145,8 @@ static void defaultMachine(const char ** arch,
 		strcpy(un.machine, "pentium3");
 	    else if (is_geode())
 		strcpy(un.machine, "geode");
-	    else if (strchr("3456", un.machine[1]) && un.machine[1] != class)
-		un.machine[1] = class;
+	    else if (strchr("3456", un.machine[1]) && un.machine[1] != mclass)
+		un.machine[1] = mclass;
 	}
 #	endif
 
@@ -1263,7 +1245,7 @@ static void rpmSetVarArch(int var, const char * val, const char * arch)
     next->arch = (arch ? xstrdup(arch) : NULL);
 }
 
-void rpmSetTables(int archTable, int osTable)
+static void rpmSetTables(int archTable, int osTable)
 {
     const char * arch, * os;
 
@@ -1282,8 +1264,10 @@ void rpmSetTables(int archTable, int osTable)
 
 int rpmMachineScore(int type, const char * name)
 {
-    machEquivInfo info = machEquivSearch(&tables[type].equiv, name);
-    return (info != NULL ? info->score : 0);
+    machEquivInfo info = NULL;
+    if (name)
+	info = machEquivSearch(&tables[type].equiv, name);
+    return info ? info->score : 0;
 }
 
 int rpmIsKnownArch(const char *name)
@@ -1393,6 +1377,28 @@ void rpmGetArchInfo(const char ** name, int * num)
     getMachineInfo(ARCH, name, num);
 }
 
+int rpmGetArchColor(const char *arch)
+{
+    const char *color;
+    char *e;
+    int color_i;
+
+    arch = lookupInDefaultTable(arch,
+				tables[currTables[ARCH]].defaults,
+				tables[currTables[ARCH]].defaultsLength);
+    color = rpmGetVarArch(RPMVAR_ARCHCOLOR, arch);
+    if (color == NULL) {
+	return -1;
+    }
+
+    color_i = strtol(color, &e, 10);
+    if (!(e && *e == '\0')) {
+	return -1;
+    }
+
+    return color_i;
+}
+
 void rpmGetOsInfo(const char ** name, int * num)
 {
     getMachineInfo(OS, name, num);
@@ -1458,8 +1464,7 @@ static void rpmRebuildTargetVars(const char ** target, const char ** canontarget
 
     /* XXX For now, set canonical target to arch-os */
     if (ct == NULL) {
-	ct = xmalloc(strlen(ca) + sizeof("-") + strlen(co));
-	sprintf(ct, "%s-%s", ca, co);
+	rasprintf(&ct, "%s-%s", ca, co);
     }
 
 /*
@@ -1485,9 +1490,9 @@ static void rpmRebuildTargetVars(const char ** target, const char ** canontarget
     if (canontarget)
 	*canontarget = ct;
     else
-	ct = _free(ct);
-    ca = _free(ca);
-    co = _free(co);
+	free(ct);
+    free(ca);
+    free(co);
 }
 
 void rpmFreeRpmrc(void)
@@ -1620,13 +1625,10 @@ exit:
 
 int rpmReadConfigFiles(const char * file, const char * target)
 {
-    mode_t mode = 0022;
-    /* Reset umask to its default umask(2) value. */
-    mode = umask(mode);
-
     /* Force preloading of dlopen()'ed libraries in case we go chrooting */
     (void) gethostbyname("localhost");
-    (void) rpmInitCrypto();
+    if (rpmInitCrypto())
+	return -1;
 
     /* Preset target macros */
    	/* FIX: target can be NULL */
@@ -1648,8 +1650,8 @@ int rpmReadConfigFiles(const char * file, const char * target)
     {	char *cpu = rpmExpand("%{_target_cpu}", NULL);
 	char *os = rpmExpand("%{_target_os}", NULL);
 	rpmSetMachine(cpu, os);
-	cpu = _free(cpu);
-	os = _free(os);
+	free(cpu);
+	free(os);
     }
 
 #ifdef WITH_LUA
@@ -1664,7 +1666,7 @@ int rpmShowRC(FILE * fp)
 {
     const struct rpmOption *opt;
     rpmds ds = NULL;
-    int i, xx;
+    int i;
     machEquivTable equivTable;
 
     /* the caller may set the build arch which should be printed here */
@@ -1712,7 +1714,7 @@ int rpmShowRC(FILE * fp)
     fprintf(fp, "\n");
 
     fprintf(fp, "Features supported by rpmlib:\n");
-    xx = rpmdsRpmlib(&ds, NULL);
+    rpmdsRpmlib(&ds, NULL);
     ds = rpmdsInit(ds);
     while (rpmdsNext(ds) >= 0) {
         const char * DNEVR = rpmdsDNEVR(ds);
@@ -1720,6 +1722,9 @@ int rpmShowRC(FILE * fp)
             fprintf(fp, "    %s\n", DNEVR+2);
     }
     ds = rpmdsFree(ds);
+    fprintf(fp, "\n");
+
+    fprintf(fp, "Macro path: %s\n", macrofiles);
     fprintf(fp, "\n");
 
     rpmDumpMacroTable(NULL, fp);

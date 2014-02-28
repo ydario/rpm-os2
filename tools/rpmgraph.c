@@ -19,30 +19,9 @@ static int noDeps = 1;
 
 static rpmVSFlags vsflags = 0;
 
-static inline const char * identifyDepend(int32_t f)
-{
-    if (isLegacyPreReq(f))
-	return "PreReq:";
-    f = _notpre(f);
-    if (f & RPMSENSE_SCRIPT_PRE)
-	return "Requires(pre):";
-    if (f & RPMSENSE_SCRIPT_POST)
-	return "Requires(post):";
-    if (f & RPMSENSE_SCRIPT_PREUN)
-	return "Requires(preun):";
-    if (f & RPMSENSE_SCRIPT_POSTUN)
-	return "Requires(postun):";
-    if (f & RPMSENSE_SCRIPT_VERIFY)
-	return "Requires(verify):";
-    if (f & RPMSENSE_FIND_REQUIRES)
-	return "Requires(auto):";
-    return "Requires:";
-}
-
 static int
 rpmGraph(rpmts ts, struct rpmInstallArguments_s * ia, const char ** fileArgv)
 {
-    rpmps ps;
     char ** pkgURL = NULL;
     char * pkgState = NULL;
     const char ** fnp;
@@ -63,12 +42,6 @@ rpmGraph(rpmts ts, struct rpmInstallArguments_s * ia, const char ** fileArgv)
 
     if (fileArgv == NULL)
 	return 0;
-
-    if (ia->qva_flags & VERIFY_DIGEST)
-	vsflags |= _RPMVSF_NODIGESTS;
-    if (ia->qva_flags & VERIFY_SIGNATURE)
-	vsflags |= _RPMVSF_NOSIGNATURES;
-    ovsflags = rpmtsSetVSFlags(ts, vsflags);
 
     /* Build fully globbed list of arguments in argv[argc]. */
     for (fnp = fileArgv; *fnp; fnp++) {
@@ -129,7 +102,7 @@ restart:
 	/* Read the header, verifying signatures (if present). */
 	ovsflags = rpmtsSetVSFlags(ts, vsflags);
 	rpmrc = rpmReadPackageFile(ts, fd, *fnp, &h);
-	ovsflags = rpmtsSetVSFlags(ts, ovsflags);
+	rpmtsSetVSFlags(ts, ovsflags);
 	Fclose(fd);
 	fd = NULL;
 
@@ -151,7 +124,7 @@ restart:
 
 maybe_manifest:
 	/* Try to read a package manifest. */
-	fd = Fopen(*fnp, "r.fpio");
+	fd = Fopen(*fnp, "r.ufdio");
 	if (fd == NULL || Ferror(fd)) {
 	    rpmlog(RPMLOG_ERR, _("open of %s failed: %s\n"), *fnp,
 			Fstrerror(fd));
@@ -184,6 +157,7 @@ maybe_manifest:
     if (numFailed > 0) goto exit;
 
     if (!noDeps) {
+	rpmps ps;
 	rc = rpmtsCheck(ts);
 	if (rc) {
 	    numFailed += numPkgs;
@@ -195,7 +169,7 @@ maybe_manifest:
 	    rpmpsPrint(NULL, ps);
 	    numFailed += numPkgs;
 	}
-	ps = rpmpsFree(ps);
+	rpmpsFree(ps);
     }
 
     rc = rpmtsOrder(ts);
@@ -214,7 +188,6 @@ maybe_manifest:
 	fprintf(stdout, "//===== Packages:\n");
 	pi = rpmtsiInit(ts);
 	while ((p = rpmtsiNext(pi, oType)) != NULL) {
-	    fprintf(stdout, "//%5d%5d %s\n", rpmteTree(p), rpmteDepth(p), rpmteN(p));
 	    q = rpmteParent(p);
 	    if (q != NULL)
 		fprintf(stdout, "  \"%s\" -> \"%s\"\n", rpmteN(p), rpmteN(q));
@@ -223,7 +196,7 @@ maybe_manifest:
 		fprintf(stdout, "  { rank=max ; \"%s\" }\n", rpmteN(p));
 	    }
 	}
-	pi = rpmtsiFree(pi);
+	rpmtsiFree(pi);
 
 	fprintf(stdout, "}\n");
     }
@@ -277,9 +250,9 @@ main(int argc, char *argv[])
 
     ec = rpmGraph(ts, ia, poptGetArgs(optCon));
 
-    ts = rpmtsFree(ts);
+    rpmtsFree(ts);
 
-    optCon = rpmcliFini(optCon);
+    rpmcliFini(optCon);
 
     return ec;
 }

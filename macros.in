@@ -31,6 +31,7 @@
 #==============================================================================
 # ---- Generally useful path macros.
 #
+%__7zip			@__7ZIP@
 %__awk			@AWK@
 %__bzip2		@__BZIP2@
 %__cat			@__CAT@
@@ -44,24 +45,33 @@
 %__grep			@__GREP@
 %__gzip			@__GZIP@
 %__id			@__ID@
+%__id_u			%{__id} -u
 %__install		@__INSTALL@
 %__ln_s			@LN_S@
+%__lrzip		@__LRZIP@
+%__lzip			@__LZIP@
 # Deprecated, use %__xz instead.
 %__lzma			%__xz --format=lzma
 %__xz			@__XZ@
 %__make			@__MAKE@
 %__mkdir		@__MKDIR@
-%__mkdir_p		@MKDIR_P@
+%__mkdir_p		@__MKDIR_P@
 %__mv			@__MV@
 %__patch		@__PATCH@
 %__perl			@__PERL@
 %__python		@__PYTHON@
+%__restorecon		@__RESTORECON@
 %__rm			@__RM@
 %__rsh			@__RSH@
 %__sed			@__SED@
+%__semodule		@__SEMODULE@
 %__ssh			@__SSH@
 %__tar			@__TAR@
 %__unzip		@__UNZIP@
+%__git			@__GIT@
+%__hg			@__HG@
+%__bzr			@__BZR@
+%__quilt		@__QUILT@
 
 #==============================================================================
 # ---- Build system path macros.
@@ -177,20 +187,21 @@
 %debug_package \
 %ifnarch noarch\
 %global __debug_package 1\
-%package debug\
+%package debuginfo\
 Summary: Debug information for package %{name}\
 Group: Development/Debug\
 AutoReqProv: 0\
-%description debug\
+%description debuginfo\
 This package provides debug information for package %{name}.\
 Debug information is useful when developing applications that use this\
 package or when debugging this package.\
-%files debug -f debugfiles.list\
+%files debuginfo -f debugfiles.list\
 %defattr(-,root,root)\
 %endif\
 %{nil}
 
 %_defaultdocdir		%{_datadir}/doc
+%_defaultlicensedir	%{_datadir}/licenses
 
 #	The path to the gzip executable (legacy, use %{__gzip} instead).
 %_gzipbin		%{__gzip}
@@ -205,9 +216,6 @@ package or when debugging this package.\
 #	A template used to generate the output binary package file name
 #	(legacy).
 %_rpmfilename		%{_build_name_fmt}
-
-#	The default signature type.
-%_signature		gpg
 
 #	The directory where sources/patches from a source package will be
 #	installed. This is also where sources/patches are found when building.
@@ -357,7 +365,7 @@ package or when debugging this package.\
 %_default_patch_fuzz	0
 
 #	Default patch flags
-%_default_patch_flags	-s
+#%_default_patch_flags	-s
 
 #==============================================================================
 # ---- Build configuration macros.
@@ -383,6 +391,12 @@ package or when debugging this package.\
 #
 # Should binaries in noarch packages terminate a build?
 %_binaries_in_noarch_packages_terminate_build	1
+
+#
+# Should rpm try to download missing sources at build-time?
+# Enabling this is dangerous as long as rpm has no means to validate
+# the integrity of the download with a digest or signature.
+%_disable_source_fetch 1
 
 #
 # Program to call for each successfully built and written binary package.
@@ -423,45 +437,8 @@ package or when debugging this package.\
 # Filter GLIBC_PRIVATE Provides: and Requires:
 %_filter_GLIBC_PRIVATE			0
 
-# Desired selinux policy tree
-%__policy_tree	%{expand:%%global __policy_tree %{lua:\
-t="targeted"\
-f = io.open("/etc/selinux/config")\
-if f then\
-  for l in f:lines() do\
-    if "SELINUXTYPE=" == string.sub(l,0,12) then t=string.sub(l,13); end\
-  end\
-  f:close()\
-end\
-print (t)\
-}}%{__policy_tree}
-
-# Path to selinux file context patterns.
-%__file_context_path /etc/selinux/%{__policy_tree}/contexts/files/file_contexts
-
 # Directories whose contents should be considered as documentation.
 %__docdir_path %{_datadir}/doc:%{_datadir}/man:%{_datadir}/info:%{_datadir}/gtk-doc/html:%{?_docdir}:%{?_mandir}:%{?_infodir}:%{?_javadocdir}:/usr/doc:/usr/man:/usr/info:/usr/X11R6/man
-
-#
-# Path to selinux file context patterns used to add
-# RPMTAG_FILECONTEXTS to packages when building.
-#
-# Undefined, missing or %{nil} will disable.
-%_build_file_context_path	%{nil}
-
-#
-# Path to selinux file context patterns used to set
-# (or override package content) file contexts when installing.
-#
-# Undefined, missing or %{nil} will use package content (if available).
-%_install_file_context_path 	%{__file_context_path}
-
-#
-# Path to selinux file context patterns used to verify
-# file contexts on file system.
-#
-# Undefined, missing or %{nil} will use package content (if available).
-%_verify_file_context_path 	%{__file_context_path}
 
 #
 # Path to scripts to autogenerate package dependencies,
@@ -474,36 +451,26 @@ print (t)\
 #%__find_conflicts	???
 #%__find_obsoletes	???
 
+# 
+# Path to file attribute classifications for automatic dependency 
+# extraction, used when _use_internal_dependency_generator
+# is used (on by default). Files can have any number of attributes
+# attached to them, and dependencies are separately extracted for
+# each attribute.
+# 
+# To define a new file attribute called "myattr", add a file named
+# "myattr" to this directory, defining the requires and/or provides
+# finder script(s) + magic and/or path pattern regex(es).
+# provides finder and 
+# %__myattr_requires	path + args to requires finder script for <myattr>
+# %__myattr_provides	path + args to provides finder script for <myattr>
+# %__myattr_magic	libmagic classification match regex
+# %__myattr_path	path based classification match regex
+# %__myattr_flags	flags to control behavior (just "exeonly" for now)
+# %__myattr_exclude_magic	exclude by magic regex
+# %__myattr_exclude_path	exclude by path regex
 #
-# Path to scripts to autogenerate per-interpreter package dependencies.
-# If the script supports extra options they can be passed by defining 
-# <helper_macro>_opts macro(s), eg in spec:
-# %define __ocaml_requires_opts -i Warnings
-#
-# Note: Used iff _use_internal_dependency_generator is non-zero. The
-# helpers are also used by %{_rpmconfigdir}/rpmdeps {--provides|--requires}.
-#%__perl_provides	%{_rpmconfigdir}/perldeps.pl --provides
-#%__perl_requires	%{_rpmconfigdir}/perldeps.pl --requires
-%__perl_provides	%{_rpmconfigdir}/perl.prov
-%__perl_requires	%{_rpmconfigdir}/perl.req
-
-#%__python_provides	%{_rpmconfigdir}/pythondeps.sh --provides
-#%__python_requires	%{_rpmconfigdir}/pythondeps.sh --requires
-
-%__mono_provides        %{_rpmconfigdir}/mono-find-provides %{_builddir}/%{?buildsubdir} %{buildroot} %{_libdir}
-%__mono_requires        %{_rpmconfigdir}/mono-find-requires %{_builddir}/%{?buildsubdir} %{buildroot} %{_libdir}
-
-%__libtool_provides	%{_rpmconfigdir}/libtooldeps.sh --provides %{buildroot} %{name}
-%__libtool_requires     %{_rpmconfigdir}/libtooldeps.sh --requires %{buildroot} %{name}
-
-%__pkgconfig_provides   %{_rpmconfigdir}/pkgconfigdeps.sh --provides
-%__pkgconfig_requires   %{_rpmconfigdir}/pkgconfigdeps.sh --requires
-
-%__ocaml_provides       %{_rpmconfigdir}/ocaml-find-provides.sh
-%__ocaml_requires       %{_rpmconfigdir}/ocaml-find-requires.sh
-
-%__fontconfig_provides	%{_rpmconfigdir}/fontconfig.prov
-%__desktop_provides	%{_rpmconfigdir}/desktop-file.prov
+%_fileattrsdir		%{_rpmconfigdir}/fileattrs
 
 #==============================================================================
 # ---- Database configuration macros.
@@ -513,14 +480,7 @@ print (t)\
 # list of tokens, with an optional '!' negation to explicitly disable bit
 # values, or a "=value" if a parameter. A per-tag value is used (e.g.
 # %_dbi_config_Packages) if defined, otherwise a per-rpmdb default
-# (e.g. %_dbi_config). The configuration is also conditioned on the
-# existence of an internal %{_rpmdb_rebuild} switch to permit changing
-# the configuration while rebuilding an rpmdb database.
-#
-# The rpmdb configuration tokens are in a popt table in rpmdb/dbconfig.c,
-# see that for the latest gory details. Note carefully that, unless you
-# are writing an rpm installer, you shouldn't have to touch *any* of these
-# parameters.
+# (e.g. %_dbi_config).
 #
 # Here's a short list of the tokens, with a guess of whether the option is
 # useful:
@@ -536,132 +496,26 @@ print (t)\
 #    I believe that you will find pagesize=512 "best".
 # 3) Adding nofsync increases speed, but risks total data loss. Fiddle shared
 #    and/or mp_size instead.
-# 4) btree is faster than hash, but would require some painful rpm release
-#    engineering to convert everbody's databases to btree, not gonna happen
-#    soon.
-#
-# See the db3-devel package, or http://www.sleepycat.com for Berkeley db-3.x
-# documentation.
 #
 #   token	works?	Berkeley db flag or value
 #==================================================
-#---------------------- DBENV->open parameters and tunable values:
+#---------------------- DBENV tunable values:
 #   mmapsize=16Mb	DBENV->set_mp_mmapsize
 #   cachesize=1Mb	DBENV->set_cachesize, DB->set_cachesize
-#---------------------- DBENV->open and DB->open common bits:
-#   create		DB_CREATE
-#   thread	???	DB_THREAD	(useless w/o posix mutexes on linux)
-#---------------------- DBENV->open bits:
-#   joinenv		DB_JOIN_ENV
-#   mpool		DB_INIT_MPOOL
-#   cdb		+++	DB_INIT_CDB
-#   txn		???	DB_INIT_TXN
-#   log		???	DB_INIT_LOG
-#   lock	???	DB_INIT_LOCK
-#   recover	???	DB_RECOVER
-#   recover_fatal ???	DB_RECOVER_FATAL
-#   use_environ	???	DB_USE_ENVIRON
-#   use_environ_root ??? DB_USE_ENVIRON_ROOT
-#   private	+++	DB_PRIVATE
-#   lockdown	???	DB_LOCKDOWN
-#   shared	+++	DB_SYSTEM_MEM
-#---------------------- DB->open parameters and tunable values:
-#   pagesize=512 +++	DB->set_pagesize
 #---------------------- DB->open bits:
-#   excl	???	DB_EXCL
 #   nommap	???	DB_NOMMAP
-#   rdonly		DB_RDONLY
-#---------------------- DB->open types:
-#   btree		DB_BTREE
-#   hash		DB_HASH
-#   recno	???	DB_RECNO
-#   queue	???	DB_QUEUE
-#   unknown	+++	DB_UNKNOWN
-#---------------------- DB->set_flags bits:
-#   bt_dup	+++	(btree only) DB_DUP
-#   bt_dupsort	+++	(btree only) DB_DUPSORT
-#   ht_dup	+++	(hash only) DB_DUP
-#   ht_dupsort	+++	(hash only) DB_DUPSORT
 #----------------------- rpmdb specific configuration:
-#   usedbenv		(always on) Use db3 environment?
-#   verify		(db3 only) Verify Packages db after RW close?
 #   lockdbfd		(always on for Packages) Use fcntl(2) locking ?
 #   nofsync		Disable fsync(2) call performed after db3 writes?
-#   temporary		Unlink file when closing.
 #
 
-# XXX Use transactions and logs for rpmdb durability (no clue yet):
-#%__dbi_other			create joinenv mpool txn log \
-#				mp_mmapsize=8Mb mp_size=512Kb
+# Misc BDB tuning options
+%__dbi_other			mp_mmapsize=128Mb mp_size=1Mb
 
-# Use a CDB database model for concurrent access.
-# XXX Add "private" here for legacy interoperation transiting to glibc+nptl.
-%__dbi_cdb			create cdb mpool mp_mmapsize=16Mb mp_size=1Mb
-
-%__dbi_other			%{?_tmppath:tmpdir=%{_tmppath}} %{?__dbi_cdb}
-
-# Note: adding nofsync here speeds up --rebuilddb a lot.
-%__dbi_rebuild			nofsync !log !txn !cdb
-%__dbi_transient		%{__dbi_rebuild} temporary private
-%__dbi_perms			perms=0644
-
-#
-#--- Hash database configuration
-%__dbi_htconfig	\
-  hash		\
-  %{__dbi_other}\
-  %{__dbi_perms}\
-%{nil}
-
-%__dbi_htconfig_current		%{__dbi_htconfig}
-%__dbi_htconfig_rebuild		%{__dbi_htconfig} %{__dbi_rebuild}
-
-%_dbi_htconfig		\
-  %{?_rpmdb_rebuild:%{__dbi_htconfig_rebuild}}\
-  %{!?_rpmdb_rebuild:%{__dbi_htconfig_current}}\
-%{nil}
-
-#
-#--- Btree database configuration
-%__dbi_btconfig	\
-  btree		\
-  %{__dbi_other}\
-  %{__dbi_perms}\
-%{nil}
-
-%__dbi_btconfig_current		%{__dbi_btconfig}
-%__dbi_btconfig_rebuild		%{__dbi_btconfig} %{__dbi_rebuild}
-
-%_dbi_btconfig		\
-  %{?_rpmdb_rebuild:%{__dbi_btconfig_rebuild}}\
-  %{!?_rpmdb_rebuild:%{__dbi_btconfig_current}}\
-%{nil}
-
-# The list of tags for which indices will be built.
-%_dbi_tags	Packages:Name:Basenames:Group:Requirename:Providename:Conflictname:Obsoletename:Triggername:Dirnames:Requireversion:Provideversion:Installtid:Sigmd5:Sha1header:Filedigests:Depends:Pubkeys
+%_dbi_config			%{?__dbi_other}
 
 # "Packages" should have shared/exclusive fcntl(2) lock using "lockdbfd".
-%_dbi_config_Packages		%{_dbi_htconfig} lockdbfd
-
-# "Depends" is a per-transaction cache of known dependency resolutions.
-%_dbi_config_Depends		%{_dbi_htconfig} temporary private
-
-%_dbi_config_Dirnames		%{_dbi_btconfig}
-%_dbi_config_Requireversion	%{_dbi_btconfig}
-%_dbi_config_Provideversion	%{_dbi_btconfig}
-%_dbi_config_Installtid		%{_dbi_btconfig}
-%_dbi_config_Removetid		%{_dbi_btconfig}
-
-%_dbi_config	%{_dbi_htconfig}
-
-# XXX legacy configuration.
-# Choose db interface:
-#	3	native db3 interface.
-#
-# There are two macros so that --rebuilddb can convert db1 -> db3.
-#
-%_dbapi			3
-%_dbapi_rebuild		3
+%_dbi_config_Packages		%{?_dbi_config} lockdbfd
 
 #==============================================================================
 # ---- GPG/PGP/PGP5 signature macros.
@@ -672,7 +526,9 @@ print (t)\
 	gpg --batch --no-verbose --passphrase-fd 3 -u "%{_gpg_name}" -so -
 
 %__gpg_sign_cmd			%{__gpg} \
-	gpg --batch --no-verbose --no-armor --passphrase-fd 3 --no-secmem-warning \
+	gpg --batch --no-verbose --no-armor --passphrase-fd 3 \
+	%{?_gpg_digest_algo:--digest-algo %{_gpg_digest_algo}} \
+	--no-secmem-warning \
 	-u "%{_gpg_name}" -sbo %{__signature_filename} %{__plaintext_filename}
 
 # XXX rpm >= 4.1 verifies signatures internally
@@ -706,13 +562,6 @@ print (t)\
 # XXX	Note: escaped %% for use in headerSprintf()
 %_build_name_fmt	%%{ARCH}/%%{NAME}-%%{VERSION}-%%{RELEASE}.%%{ARCH}.rpm
 
-#	The default transaction color. This value is a set of bits to
-#	determine file and dependency affinity for this arch.
-#		0	uncolored (i.e. use only arch as install hint)
-#		1	Elf32 permitted
-#		2	Elf64 permitted
-%_transaction_color	@RPMCANONCOLOR@
-
 #	Verify digest/signature flags for various rpm modes:
 #	0x30300 (_RPMVSF_NODIGESTS)    --nohdrchk      if set, don't check digest(s)
 #	0xc0c00 (_RPMVSF_NOSIGNATURES) --nosignature   if set, don't check signature(s)
@@ -743,21 +592,8 @@ print (t)\
 %_vsflags_erase		%{__vsflags}
 %_vsflags_install	%{__vsflags}
 %_vsflags_query		%{__vsflags}
-%_vsflags_rebuilddb	%{__vsflags}
+%_vsflags_rebuilddb	0xc0c00
 %_vsflags_verify	%{__vsflags}
-
-#	Relations between package names that cause dependency loops
-#	with legacy packages that cannot be fixed. Relations are
-#	specified as
-#		p>q
-#	where package p has a Requires: on something that package q Provides:
-#
-# XXX	Note: that there cannot be any whitespace within the string "p>q",
-#	and that both p and q are package names (i.e. no version/release).
-#
-
-%_dependency_whiteout			\
-	%{nil}
 
 #
 # Default output format string for rpm -qa
@@ -769,22 +605,6 @@ print (t)\
 # Default path to the file used for transaction fcntl lock.
 %_rpmlock_path	%{_dbpath}/.rpm.lock
 
-#==============================================================================
-# ---- per-platform macros.
-#	Macros that are specific to an individual platform. The values here
-#	will be used if the per-platform macro file does not exist..
-#
-%_arch			@RPMCANONARCH@
-%_build_arch		@RPMCANONARCH@
-%_vendor		@RPMCANONVENDOR@
-%_os			@RPMCANONOS@
-%_gnu			@RPMCANONGNU@
-%_target_platform	%{_target_cpu}-%{_vendor}-%{_target_os}%{?_gnu}
-
-#
-# Define a generic value for optflags. Normally overridden by per-target macros.
-%optflags		-O2
-
 #
 # ISA dependency marker, none for noarch and name-bitness for others
 %_isa			%{?__isa:(%{__isa})}%{!?__isa:%{nil}}
@@ -793,6 +613,9 @@ print (t)\
 # Define per-arch and per-os defaults. Normally overridden by per-target macros.
 %__arch_install_post	%{nil}
 %__os_install_post	%{_rpmconfigdir}/brp-strip.os2
+
+# Macro to fix broken permissions in sources
+%_fixperms      %{__chmod} -Rf @FIXPERMS@
 
 #==============================================================================
 # ---- Scriptlet template templates.
@@ -822,6 +645,8 @@ print (t)\
   export RPM_BUILD_ROOT}\
   %{?_javaclasspath:CLASSPATH=\"%{_javaclasspath}\"\
   export CLASSPATH}\
+  PKG_CONFIG_PATH=\"${PKG_CONFIG_PATH}:%{_libdir}/pkgconfig:%{_datadir}/pkgconfig\"\
+  export PKG_CONFIG_PATH\
   \
   %{verbose:set -x}%{!verbose:exec > /dev/null}\
   umask 022\
@@ -1020,6 +845,7 @@ print (t)\
   FFLAGS="${FFLAGS:-%optflags}" ; export FFLAGS ; \
   %{_configure} --host=%{_host} --build=%{_build} \\\
 	--program-prefix=%{?_program_prefix} \\\
+	--disable-dependency-tracking \\\
 	--prefix=%{_prefix} \\\
 	--exec-prefix=%{_exec_prefix} \\\
 	--bindir=%{_bindir} \\\
@@ -1036,13 +862,13 @@ print (t)\
 
 #------------------------------------------------------------------------------
 # The make install analogue of %configure for modern autotools:
-%make_install make install DESTDIR=%{?buildroot}
+%make_install %{__make} install DESTDIR=%{?buildroot}
 
 #------------------------------------------------------------------------------
 # Former make install analogue, kept for compatibility and for old/broken
 #  packages that don't support DESTDIR properly.
 %makeinstall \
-  make \\\
+  %{__make} \\\
 	prefix=%{?buildroot:%{buildroot}}%{_prefix} \\\
 	exec_prefix=%{?buildroot:%{buildroot}}%{_exec_prefix} \\\
 	bindir=%{?buildroot:%{buildroot}}%{_bindir} \\\
@@ -1066,7 +892,7 @@ print (t)\
 #       run configure with correct prefix, platform, and CFLAGS.
 #       optionally restore current directory.
 #
-# Based on autogen.sh from GNOME and orginal GNUconfigure
+# Based on autogen.sh from GNOME and original GNUconfigure
 #
 %GNUconfigure(MCs:)      \
   CFLAGS="${CFLAGS:-%optflags}" ; export CFLAGS; \
@@ -1174,6 +1000,10 @@ done \
 # arch macro for all supported Alpha processors
 %alpha	alpha alphaev56 alphaev6 alphaev67
 
+#------------------------------------------------------------------------------
+# arch macro for all supported PowerPC 64 processors
+%power64	ppc64 ppc64p7
+
 #------------------------------------------------------------------------
 # Use in %install to generate locale specific file lists. For example,
 #
@@ -1201,6 +1031,14 @@ done \
 #   2 - do nothing, report error
 #
 %_os2_unlock_mode       0
+
+#------------------------------------------------------------------------------
+# Collection specific macros
+%__plugindir		%{_libdir}/rpm-plugins
+%__collection_font	%{__plugindir}/exec.so /usr/bin/fc-cache
+%__collection_java	%{__plugindir}/exec.so /usr/bin/rebuild-gcj-db
+%__collection_sepolicy		%{__plugindir}/sepolicy.so
+%__collection_sepolicy_flags	1
 
 #------------------------------------------------------------------------
 # Macros to handle creation/deletion of WPS objects from %post* sections.
@@ -1344,5 +1182,83 @@ done \
 %cube() 			cmd /c '%UNIXROOT%\\usr\\bin\\cube.exe %{*}'\
 %{nil}
 
+=======
+#------------------------------------------------------------------------------
+# Macros for further automated spec %setup and patch application
+
+# default to plain patch
+%__scm patch
+# meh, figure something saner
+%__scm_username rpm-build
+%__scm_usermail <rpm-build>
+%__scm_author %{__scm_username} %{__scm_usermail}
+
+# Plain patch (-m is unused)
+%__scm_setup_patch(q) %{nil}
+%__scm_apply_patch(qp:m:)\
+%{__patch} %{-p:-p%{-p*}} %{-q:-s}
+
+# Mercurial (aka hg)
+%__scm_setup_hg(q)\
+%{__hg} init %{-q} .\
+%{__hg} add %{-q} .\
+%{__hg} commit %{-q} --user "%{__scm_author}" -m "%{name}-%{version} base"
+
+%__scm_apply_hg(qp:m:)\
+%{__hg} import - %{-p:-p%{-p*}} %{-q} -m %{-m*} --user "%{__scm_author}"
+
+# Git
+%__scm_setup_git(q)\
+%{__git} init %{-q}\
+%{__git} config user.name "%{__scm_username}"\
+%{__git} config user.email "%{__scm_usermail}"\
+%{__git} add .\
+%{__git} commit %{-q} -a\\\
+	--author "%{__scm_author}" -m "%{name}-%{version} base"
+
+%__scm_apply_git(qp:m:)\
+%{__git} apply %{-p:-p%{-p*}} -\
+%{__git} commit %{-q} -a -m %{-m*} --author "%{__scm_author}"
+
+# Quilt
+%__scm_setup_quilt(q) %{nil}
+%__scm_apply_quilt(qp:m:)\
+%{__quilt} import %{-p:-p%{-p*}} %{1} && %{__quilt} push
+
+# Bzr
+%__scm_setup_bzr(q)\
+%{__bzr} init %{-q}\
+%{__bzr} whoami --branch "%{__scm_author}"\
+%{__bzr} add .\
+%{__bzr} commit %{-q} -m "%{name}-%{version} base"
+
+# bzr doesn't seem to have its own command to apply patches?
+%__scm_apply_bzr(qp:m:)\
+%{__patch} %{-p:-p%{-p*}} %{-q:-s}\
+%{__bzr} commit %{-q} -m %{-m*}
+
+# Single patch application
+%apply_patch(qp:m:)\
+%{uncompress:%{1}} | %{expand:%__scm_apply_%{__scm} %{-q} %{-p:-p%{-p*}} %{-m:-m%{-m*}}}
+
+# Automatically apply all patches
+%autopatch(vp:)\
+%{lua:\
+for i, p in ipairs(patches) do\
+    print(rpm.expand("%apply_patch -m %{basename:"..p.."}  "..rpm.expand("%{!-v:-q} %{-p:-p%{-p*}} ")..p.."\\n"))\
+end}
+
+# One macro to (optionally) do it all.
+# -S<scm name>	Sets the used patch application style, eg '-S git' enables
+#           	usage of git repository and per-patch commits.
+# -N		Disable automatic patch application
+# -p<num>	Use -p<num> for patch application	
+%autosetup(a:b:cDn:TvNS:p:)\
+%setup %{-a} %{-b} %{-c} %{-D} %{-n} %{-T} %{!-v:-q}\
+%{-S:%global __scm %{-S*}}\
+%{-S:%{expand:%__scm_setup_%{-S*} %{!-v:-q}}}\
+%{!-N:%autopatch %{-v} %{-p:-p%{-p*}}}
+
+>>>>>>> .merge-right.r367
 # \endverbatim
 #*/

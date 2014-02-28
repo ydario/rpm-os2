@@ -16,12 +16,24 @@ SUBDIRS = po misc
 if WITH_INTERNAL_DB
 SUBDIRS += db3
 endif
-if WITH_LUAEXT
+if WITH_LUA
 SUBDIRS += luaext
 endif
-SUBDIRS += rpmio lib build python scripts doc . tests
+SUBDIRS += rpmio lib sign build scripts fileattrs doc .
 
-DIST_SUBDIRS = po misc luaext rpmio lib build python scripts doc tests
+if ENABLE_PYTHON
+SUBDIRS += python
+endif
+
+if ENABLE_PLUGINS
+SUBDIRS += plugins
+endif
+
+if HAVE_FAKECHROOT
+SUBDIRS += tests
+endif
+
+DIST_SUBDIRS = po misc luaext rpmio lib sign build python scripts fileattrs doc tests plugins
 
 pkgconfigdir = $(libdir)/pkgconfig
 
@@ -32,7 +44,6 @@ AM_CPPFLAGS += -I$(top_srcdir)/rpmio
 AM_CPPFLAGS += @WITH_NSS_INCLUDE@
 AM_CPPFLAGS += @WITH_POPT_INCLUDE@
 AM_CPPFLAGS += -I$(top_srcdir)/misc
-AM_CPPFLAGS += @WITH_LIBELF_INCLUDE@
 AM_CPPFLAGS += -DLOCALEDIR="\"$(localedir)\""
 AM_CPPFLAGS += -DLIBRPMALIAS_FILENAME="\"rpmpopt-${VERSION}\""
 
@@ -47,10 +58,12 @@ pkginclude_HEADERS += rpmio/rpmlog.h
 pkginclude_HEADERS += rpmio/rpmpgp.h
 pkginclude_HEADERS += rpmio/rpmsq.h
 pkginclude_HEADERS += rpmio/rpmstring.h
+pkginclude_HEADERS += rpmio/rpmstrpool.h
 pkginclude_HEADERS += rpmio/rpmsw.h
 pkginclude_HEADERS += rpmio/rpmfileutil.h
 pkginclude_HEADERS += rpmio/rpmutil.h
 pkginclude_HEADERS += rpmio/rpmkeyring.h
+pkginclude_HEADERS += rpmio/rpmbase64.h
 
 pkginclude_HEADERS += lib/header.h
 pkginclude_HEADERS += lib/rpmdb.h
@@ -59,15 +72,18 @@ pkginclude_HEADERS += lib/rpmcli.h
 pkginclude_HEADERS += lib/rpmlib.h
 pkginclude_HEADERS += lib/rpmds.h
 pkginclude_HEADERS += lib/rpmfi.h
-pkginclude_HEADERS += lib/rpmgi.h
 pkginclude_HEADERS += lib/rpmlegacy.h
+pkginclude_HEADERS += lib/rpmpol.h
 pkginclude_HEADERS += lib/rpmps.h
+pkginclude_HEADERS += lib/rpmprob.h
 pkginclude_HEADERS += lib/rpmtag.h
 pkginclude_HEADERS += lib/rpmtd.h
 pkginclude_HEADERS += lib/rpmte.h
 pkginclude_HEADERS += lib/rpmts.h
 pkginclude_HEADERS += lib/rpmtypes.h
 pkginclude_HEADERS += lib/rpmvf.h
+
+pkginclude_HEADERS += sign/rpmsign.h
 
 pkginclude_HEADERS += build/rpmbuild.h
 pkginclude_HEADERS += build/rpmfc.h
@@ -77,27 +93,60 @@ pkginclude_HEADERS += build/rpmspec.h
 rpmbindir = `echo $(bindir) | $(SED) -e s,usr/bin,bin,`
 rpmbin_PROGRAMS = rpm
 
-bin_PROGRAMS =		rpm2cpio rpmbuild
+bin_PROGRAMS =		rpm2cpio rpmbuild rpmdb rpmkeys rpmsign rpmspec
 
 rpmlibexec_PROGRAMS =
-rpmconfig_SCRIPTS =	find-provides find-requires mkinstalldirs \
+rpmconfig_SCRIPTS =	autodeps/find-provides autodeps/find-requires \
+			mkinstalldirs \
 			config.guess config.sub
-DISTCLEANFILES = find-provides
-DISTCLEANFILES += find-requires
+DISTCLEANFILES = autodeps/find-provides
+DISTCLEANFILES += autodeps/find-requires
+
+noinst_LTLIBRARIES = 		libcliutils.la
+libcliutils_la_SOURCES = 	cliutils.h cliutils.c
+libcliutils_la_CPPFLAGS =	$(AM_CPPFLAGS)
+libcliutils_la_LIBADD = 	lib/librpm.la rpmio/librpmio.la
+libcliutils_la_LIBADD +=	@WITH_POPT_LIB@
 
 rpm_SOURCES =		rpmqv.c debug.h system.h
-rpm_CPPFLAGS =		$(AM_CPPFLAGS) -DIAM_RPMDB -DIAM_RPMEIU -DIAM_RPMK -DIAM_RPMQV
-rpm_LDADD =		build/librpmbuild.la lib/librpm.la rpmio/librpmio.la
-rpm_LDADD +=		@WITH_LIBELF_LIB@ @WITH_NSS_LIB@ @WITH_POPT_LIB@ @WITH_ZLIB_LIB@
+rpm_CPPFLAGS =		$(AM_CPPFLAGS) -DIAM_RPMEIU -DIAM_RPMQ -DIAM_RPMV
+rpm_LDADD =		libcliutils.la
+rpm_LDADD +=		lib/librpm.la rpmio/librpmio.la
+rpm_LDADD +=		@WITH_NSS_LIB@ @WITH_POPT_LIB@ @WITH_ZLIB_LIB@
 
-rpmbuild_SOURCES =	build.c rpmqv.c build.h debug.h system.h
-rpmbuild_CPPFLAGS =	$(AM_CPPFLAGS) -DIAM_RPMBT
-rpmbuild_LDADD =	build/librpmbuild.la lib/librpm.la rpmio/librpmio.la
-rpmbuild_LDADD += 	@WITH_LIBELF_LIB@ @WITH_NSS_LIB@ @WITH_POPT_LIB@ @WITH_ZLIB_LIB@
+rpmdb_SOURCES =		rpmdb.c debug.h system.h
+rpmdb_CPPFLAGS =	$(AM_CPPFLAGS)
+rpmdb_LDADD =		libcliutils.la
+rpmdb_LDADD +=		lib/librpm.la rpmio/librpmio.la
+rpmdb_LDADD +=		@WITH_NSS_LIB@ @WITH_POPT_LIB@ @WITH_ZLIB_LIB@
+
+rpmkeys_SOURCES =	rpmkeys.c debug.h system.h
+rpmkeys_CPPFLAGS =	$(AM_CPPFLAGS)
+rpmkeys_LDADD =		libcliutils.la
+rpmkeys_LDADD +=	lib/librpm.la rpmio/librpmio.la
+rpmkeys_LDADD +=	@WITH_NSS_LIB@ @WITH_POPT_LIB@ @WITH_ZLIB_LIB@
+
+rpmsign_SOURCES =	rpmsign.c debug.h system.h
+rpmsign_CPPFLAGS =	$(AM_CPPFLAGS)
+rpmsign_LDADD =		libcliutils.la
+rpmsign_LDADD +=	sign/librpmsign.la lib/librpm.la rpmio/librpmio.la
+rpmsign_LDADD +=	@WITH_NSS_LIB@ @WITH_POPT_LIB@ @WITH_ZLIB_LIB@
+
+rpmbuild_SOURCES =	rpmbuild.c debug.h system.h
+rpmbuild_CPPFLAGS =	$(AM_CPPFLAGS)
+rpmbuild_LDADD =	libcliutils.la
+rpmbuild_LDADD +=	build/librpmbuild.la lib/librpm.la rpmio/librpmio.la
+rpmbuild_LDADD += 	@WITH_NSS_LIB@ @WITH_POPT_LIB@ @WITH_ZLIB_LIB@
+
+rpmspec_SOURCES =	rpmspec.c debug.h system.h
+rpmspec_CPPFLAGS =	$(AM_CPPFLAGS)
+rpmspec_LDADD =		libcliutils.la
+rpmspec_LDADD +=	build/librpmbuild.la lib/librpm.la rpmio/librpmio.la
+rpmspec_LDADD +=	@WITH_NSS_LIB@ @WITH_POPT_LIB@ @WITH_ZLIB_LIB@
 
 rpm2cpio_SOURCES =	rpm2cpio.c debug.h system.h
 rpm2cpio_LDADD =	lib/librpm.la rpmio/librpmio.la
-rpm2cpio_LDADD +=	@WITH_LIBELF_LIB@ @WITH_NSS_LIB@ @WITH_POPT_LIB@ @WITH_ZLIB_LIB@
+rpm2cpio_LDADD +=	@WITH_NSS_LIB@ @WITH_POPT_LIB@ @WITH_ZLIB_LIB@
 
 
 if LIBELF
@@ -108,12 +157,13 @@ rpmlibexec_PROGRAMS +=	debugedit
 debugedit_SOURCES =	tools/debugedit.c tools/hashtab.c tools/hashtab.h
 debugedit_LDADD =	rpmio/librpmio.la
 debugedit_LDADD +=	@WITH_LIBELF_LIB@ @WITH_POPT_LIB@
-endif
-endif
 
-rpmlibexec_PROGRAMS +=	javadeps
-javadeps_SOURCES =	tools/javadeps.c
-javadeps_LDADD =
+rpmlibexec_PROGRAMS +=	elfdeps
+elfdeps_SOURCES =	tools/elfdeps.c
+elfdeps_LDADD =		rpmio/librpmio.la
+elfdeps_LDADD +=	@WITH_LIBELF_LIB@ @WITH_POPT_LIB@
+endif
+endif
 
 rpmlibexec_PROGRAMS +=	rpmdeps
 rpmdeps_SOURCES =	tools/rpmdeps.c
@@ -125,14 +175,6 @@ rpmgraph_LDADD =	lib/librpm.la rpmio/librpmio.la @WITH_POPT_LIB@
 
 dist_bin_SCRIPTS =	scripts/gendiff
 
-check_PROGRAMS =	rpminject
-rpminject_SOURCES =	tools/rpminject.c
-rpminject_LDADD =	build/librpmbuild.la
-
-check_PROGRAMS +=	rpmsort
-rpmsort_SOURCES =	tools/rpmsort.c
-rpmsort_LDADD =		lib/librpm.la
-
 rpmconfig_DATA = rpmrc
 rpmrc: $(top_srcdir)/rpmrc.in
 	@$(SED) \
@@ -142,13 +184,13 @@ rpmrc: $(top_srcdir)/rpmrc.in
 CLEANFILES += rpmrc.tmp rpmrc
 EXTRA_DIST += rpmrc.in
 
-rpmconfig_DATA += macros
+noinst_DATA = macros
 macros: $(top_srcdir)/macros.in
 	  ( cd $(top_builddir) && ./config.status --file=${subdir}/macros:${subdir}/macros.in )
 CLEANFILES += macros
 EXTRA_DIST += macros.in
 
-noinst_DATA = platform
+noinst_DATA += platform
 platform: $(top_srcdir)/platform.in
 	@$(SED) \
 	  -e "s,[@]RPMCONFIGDIR[@],$(rpmconfigdir),g" \
@@ -170,6 +212,7 @@ rpmconfig_DATA += rpmpopt-$(VERSION)
 rpmpopt-@VERSION@: $(top_srcdir)/rpmpopt.in
 	@$(SED) \
 	  -e "s,[@]RPMCONFIGDIR[@],$(rpmconfigdir),g" \
+	  -e "s,[@]BINDIR[@],$(bindir),g" \
 	  < $(top_srcdir)/rpmpopt.in > rpmpopt-@VERSION@.tmp \
 	  && ( cd $(top_builddir) && ./config.status --file=${subdir}/rpmpopt-@VERSION@:${subdir}/rpmpopt-@VERSION@.tmp )
 CLEANFILES += rpmpopt-@VERSION@.tmp rpmpopt-@VERSION@
@@ -181,29 +224,24 @@ rpmvardir = $(localstatedir)/lib/rpm
 rpmvar_DATA =
 
 install-exec-hook:
-	rm -f $(DESTDIR)$(bindir)/rpmquery
+	@rm -f $(DESTDIR)$(bindir)/rpmquery
 	@LN_S@ ../../bin/rpm $(DESTDIR)$(bindir)/rpmquery
-	rm -f $(DESTDIR)$(bindir)/rpmverify
+	@rm -f $(DESTDIR)$(bindir)/rpmverify
 	@LN_S@ ../../bin/rpm $(DESTDIR)$(bindir)/rpmverify
-	rm -f $(DESTDIR)$(bindir)/rpmsign
-	@LN_S@ ../../bin/rpm $(DESTDIR)$(bindir)/rpmsign
-	rm -f $(DESTDIR)$(bindir)/rpmdb
-	@LN_S@ ../../bin/rpm $(DESTDIR)$(bindir)/rpmdb
 
 install-data-local:
-	@case "@host_os@" in \
-	solaris*|linux*|darwin*) \
-	   DESTDIR="$(DESTDIR)" pkglibdir="$(rpmconfigdir)" $(SHELL) $(top_srcdir)/installplatform rpmrc macros platform ;; \
-	esac
+	DESTDIR="$(DESTDIR)" pkglibdir="$(rpmconfigdir)" \
+		$(SHELL) $(top_srcdir)/installplatform \
+			rpmrc platform macros \
+			$(RPMCANONVENDOR) $(RPMCANONOS) $(RPMCANONGNU)
 	@$(MKDIR_P) $(DESTDIR)$(localstatedir)/tmp
 
 # XXX to appease distcheck we need to remove "stuff" here...
 uninstall-local:
 	@rm -f $(DESTDIR)$(bindir)/rpmquery
-	@rm -f $(DESTDIR)$(bindir)/rpmsign
 	@rm -f $(DESTDIR)$(bindir)/rpmverify
-	@rm -f $(DESTDIR)$(bindir)/rpmdb
 	@rm -rf $(DESTDIR)$(rpmconfigdir)/platform/
+	@rm -f $(DESTDIR)$(rpmconfigdir)/macros
 
 MAINTAINERCLEANFILES = ChangeLog
 

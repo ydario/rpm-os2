@@ -2,8 +2,6 @@
 
 #include "rpmps-py.h"
 
-#include "debug.h"
-
 struct rpmProblemObject_s {
     PyObject_HEAD
     PyObject *md_dict;
@@ -125,3 +123,29 @@ PyObject *rpmprob_Wrap(PyTypeObject *subtype, rpmProblem prob)
     return (PyObject *) s;
 }
 
+PyObject *rpmps_AsList(rpmps ps)
+{
+    PyObject *problems;
+    rpmpsi psi;
+    rpmProblem prob;
+
+    problems = PyList_New(0);
+    if (!problems) {
+        return NULL;
+    }
+
+    psi = rpmpsInitIterator(ps);
+
+    while ((prob = rpmpsiNext(psi))) {
+        PyObject *pyprob = rpmprob_Wrap(&rpmProblem_Type, prob);
+        if (!pyprob) {
+            Py_DECREF(problems);
+            rpmpsFreeIterator(psi);
+            return NULL;
+        }
+        PyList_Append(problems, pyprob);
+        Py_DECREF(pyprob);
+    }
+    rpmpsFreeIterator(psi);
+    return problems;
+}

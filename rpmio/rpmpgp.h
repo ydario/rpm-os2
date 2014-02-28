@@ -37,13 +37,6 @@ typedef uint8_t pgpKeyID_t[8];
 typedef uint8_t pgpTime_t[4];
 
 /** \ingroup rpmpgp
- */
-typedef const struct pgpValTbl_s {
-    int val;
-    char const * const str;
-} * pgpValTbl;
- 
-/** \ingroup rpmpgp
  * 4.3. Packet Tags
  * 
  * The packet tag denotes what type of packet the body holds. Note that
@@ -270,6 +263,7 @@ typedef enum pgpHashAlgo_e {
     PGPHASHALGO_SHA256		=  8,	/*!< SHA256 */
     PGPHASHALGO_SHA384		=  9,	/*!< SHA384 */
     PGPHASHALGO_SHA512		= 10,	/*!< SHA512 */
+    PGPHASHALGO_SHA224		= 11,	/*!< SHA224 */
 } pgpHashAlgo;
 
 /** \ingroup rpmpgp
@@ -936,9 +930,11 @@ typedef enum pgpValType_e {
 /** \ingroup rpmpgp
  * Bit(s) to control digest operation.
  */
-typedef enum rpmDigestFlags_e {
+enum rpmDigestFlags_e {
     RPMDIGEST_NONE	= 0
-} rpmDigestFlags;
+};
+
+typedef rpmFlags rpmDigestFlags;
 
 /** \ingroup rpmpgp
  * Return string representation of am OpenPGP value.
@@ -965,27 +961,6 @@ unsigned int pgpGrab(const uint8_t *s, size_t nbytes)
 }
 
 /** \ingroup rpmpgp
- * Return length of an OpenPGP packet.
- * @param s		pointer to packet
- * @retval *lenp	no. of bytes in packet
- * @return		no. of bytes in length prefix
- */
-static inline
-size_t pgpLen(const uint8_t *s, size_t * lenp)
-{
-    if (*s < 192) {
-	(*lenp) = *s++;
-	return 1;
-    } else if (*s < 255) {
-	(*lenp) = ((((unsigned)s[0]) - 192) << 8) + s[1] + 192;
-	return 2;
-    } else {
-	(*lenp) = pgpGrab(s+1, (size_t) 4);
-	return 5;
-    }
-}
-
-/** \ingroup rpmpgp
  * Return hex formatted representation of bytes.
  * @param p		bytes
  * @param plen		no. of bytes
@@ -999,7 +974,7 @@ char * pgpHexStr(const uint8_t *p, size_t plen);
  * @param pkt		OpenPGP packet (i.e. PGPTAG_PUBLIC_KEY)
  * @param pktlen	OpenPGP packet length (no. of bytes)
  * @retval keyid	public key fingerprint
- * @return		0 on sucess, else -1
+ * @return		0 on success, else -1
  */
 int pgpPubkeyFingerprint(const uint8_t * pkt, size_t pktlen,
 		pgpKeyID_t keyid);
@@ -1012,6 +987,17 @@ int pgpPubkeyFingerprint(const uint8_t * pkt, size_t pktlen,
 * @return             	8 (no. of bytes) on success, < 0 on error
 */
 int pgpExtractPubkeyFingerprint(const char * b64pkt, pgpKeyID_t keyid);
+
+/** \ingroup rpmpgp
+ * Parse a OpenPGP packet(s).
+ * @param pkts		OpenPGP packet(s)
+ * @param pktlen	OpenPGP packet(s) length (no. of bytes)
+ * @param pkttype	Expected packet type (signature/key) or 0 for any
+ * @retval ret		signature/pubkey packet parameters on success (alloced)
+ * @return		-1 on error, 0 on success
+ */
+int pgpPrtParams(const uint8_t *pkts, size_t pktlen, unsigned int pkttype,
+		 pgpDigParams * ret);
 
 /** \ingroup rpmpgp
  * Print/parse a OpenPGP packet(s).
@@ -1070,7 +1056,49 @@ void pgpCleanDig(pgpDig dig);
 pgpDig pgpFreeDig(pgpDig dig);
 
 /** \ingroup rpmpgp
+ * Retrieve parameters for parsed OpenPGP packet(s).
+ * @param dig		container
+ * @param pkttype	type of params to retrieve (signature / pubkey)
+ * @return		pointer to OpenPGP parameters, NULL on error/not found
+ */
+pgpDigParams pgpDigGetParams(pgpDig dig, unsigned int pkttype);
+
+/** \ingroup rpmpgp
+ * Compare OpenPGP packet parameters
+ * param p1		1st parameter container
+ * param p2		2nd parameter container
+ * return		1 if the parameters differ, 0 otherwise
+ */
+int pgpDigParamsCmp(pgpDigParams p1, pgpDigParams p2);
+
+/** \ingroup rpmpgp
+ * Retrieve OpenPGP algorithm parameters
+ * param digp		parameter container
+ * param algotype	PGPVAL_HASHALGO / PGPVAL_PUBKEYALGO
+ * return		algorithm value, 0 on error
+ */
+unsigned int pgpDigParamsAlgo(pgpDigParams digp, unsigned int algotype);
+
+/** \ingroup rpmpgp
+ * Destroy parsed OpenPGP packet parameter(s).
+ * @param digp		parameter container
+ * @return		NULL always
+ */
+pgpDigParams pgpDigParamsFree(pgpDigParams digp);
+
+/** \ingroup rpmpgp
  * Verify a PGP signature.
+ * @param key		public key
+ * @param sig		signature
+ * @param hashctx	digest context
+ * @return 		RPMRC_OK on success 
+ */
+rpmRC pgpVerifySignature(pgpDigParams key, pgpDigParams sig, DIGEST_CTX hashctx);
+
+/** \ingroup rpmpgp
+ * Verify a PGP signature.
+ * @deprecated		use pgpVerifySignature() instead
+ *
  * @param dig		container
  * @param hashctx	digest context
  * @return 		RPMRC_OK on success 
@@ -1110,7 +1138,7 @@ DIGEST_CTX rpmDigestDup(DIGEST_CTX octx);
  * @param hashalgo	type of digest
  * @return		digest length, zero on invalid algorithm
  */
-size_t rpmDigestLength(pgpHashAlgo hashalgo);
+size_t rpmDigestLength(int hashalgo);
 
 /** \ingroup rpmpgp
  * Initialize digest.
@@ -1119,7 +1147,7 @@ size_t rpmDigestLength(pgpHashAlgo hashalgo);
  * @param flags		bit(s) to control digest operation
  * @return		digest context
  */
-DIGEST_CTX rpmDigestInit(pgpHashAlgo hashalgo, rpmDigestFlags flags);
+DIGEST_CTX rpmDigestInit(int hashalgo, rpmDigestFlags flags);
 
 /** \ingroup rpmpgp
  * Update context with next plain text buffer.
@@ -1165,7 +1193,7 @@ rpmDigestBundle rpmDigestBundleFree(rpmDigestBundle bundle);
  * @param flags		bit(s) to control digest operation
  * @return		0 on success
  */
-int rpmDigestBundleAdd(rpmDigestBundle bundle, pgpHashAlgo algo,
+int rpmDigestBundleAdd(rpmDigestBundle bundle, int algo,
 			rpmDigestFlags flags);
 
 /** \ingroup rpmpgp
@@ -1188,7 +1216,7 @@ int rpmDigestBundleUpdate(rpmDigestBundle bundle, const void *data, size_t len);
  * @return		0 on success
  */
 int rpmDigestBundleFinal(rpmDigestBundle bundle,
-	 pgpHashAlgo algo, void ** datap, size_t * lenp, int asAscii);
+	 int algo, void ** datap, size_t * lenp, int asAscii);
 
 /** \ingroup rpmpgp
  * Duplicate a digest context from a bundle.
@@ -1196,7 +1224,7 @@ int rpmDigestBundleFinal(rpmDigestBundle bundle,
  * @param algo		type of digest to dup
  * @return		duplicated digest context
  */
-DIGEST_CTX rpmDigestBundleDupCtx(rpmDigestBundle bundle, pgpHashAlgo algo);
+DIGEST_CTX rpmDigestBundleDupCtx(rpmDigestBundle bundle, int algo);
 
 #ifdef __cplusplus
 }

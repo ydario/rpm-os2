@@ -8,19 +8,6 @@ extern "C" {
 #endif
 
 /**
- * Pseudo-tags used by the rpmdb and rpmgi iterator API's.
- */
-#define	RPMDBI_PACKAGES		0	/* Installed package headers. */
-#define	RPMDBI_DEPENDS		1	/* Dependency resolution cache. */
-#define	RPMDBI_LABEL		2	/* Fingerprint search marker. */
-#define	RPMDBI_ADDED		3	/* Added package headers. */
-#define	RPMDBI_REMOVED		4	/* Removed package headers. */
-#define	RPMDBI_AVAILABLE	5	/* Available package headers. */
-#define	RPMDBI_HDLIST		6	/* (rpmgi) Header list. */
-#define	RPMDBI_ARGLIST		7	/* (rpmgi) Argument list. */
-#define	RPMDBI_FTSWALK		8	/* (rpmgi) File tree  walk. */
-
-/**
  * Header private tags.
  * @note General use tags should start at 1000 (RPM's tag space starts there).
  */
@@ -35,9 +22,11 @@ extern "C" {
 /** \ingroup rpmtag
  * Tags identify data in package headers.
  * @note tags should not have value 0!
+ * @note all new tags should be added above 5000
  */
 /** @todo: Somehow supply type **/
 typedef enum rpmTag_e {
+    RPMTAG_NOT_FOUND		= -1,			/*!< Unknown tag */
 
     RPMTAG_HEADERIMAGE		= HEADER_IMAGE,		/*!< Current image. */
     RPMTAG_HEADERSIGNATURES	= HEADER_SIGNATURES,	/*!< Signatures. */
@@ -104,8 +93,8 @@ typedef enum rpmTag_e {
     RPMTAG_FILESIZES		= 1028,	/* i[] */
     RPMTAG_FILESTATES		= 1029, /* c[] */
     RPMTAG_FILEMODES		= 1030,	/* h[] */
-    RPMTAG_FILEUIDS		= 1031, /* i[] internal */
-    RPMTAG_FILEGIDS		= 1032, /* i[] internal */
+    RPMTAG_FILEUIDS		= 1031, /* i[] internal - obsolete */
+    RPMTAG_FILEGIDS		= 1032, /* i[] internal - obsolete */
     RPMTAG_FILERDEVS		= 1033,	/* h[] */
     RPMTAG_FILEMTIMES		= 1034, /* i[] */
     RPMTAG_FILEDIGESTS		= 1035,	/* s[] */
@@ -136,7 +125,7 @@ typedef enum rpmTag_e {
 #define	RPMTAG_C	RPMTAG_CONFLICTNAME	/* s[] */
     RPMTAG_CONFLICTVERSION	= 1055,	/* s[] */
     RPMTAG_DEFAULTPREFIX	= 1056, /* s internal - deprecated */
-    RPMTAG_BUILDROOT		= 1057, /* s internal */
+    RPMTAG_BUILDROOT		= 1057, /* s internal - obsolete */
     RPMTAG_INSTALLPREFIX	= 1058, /* s internal - deprecated */
     RPMTAG_EXCLUDEARCH		= 1059, /* s[] */
     RPMTAG_EXCLUDEOS		= 1060, /* s[] */
@@ -155,15 +144,15 @@ typedef enum rpmTag_e {
     RPMTAG_CHANGELOGTEXT	= 1082,	/* s[] */
     RPMTAG_BROKENMD5		= 1083, /* internal - obsolete */
     RPMTAG_PREREQ		= 1084, /* internal */
-    RPMTAG_PREINPROG		= 1085,	/* s */
-    RPMTAG_POSTINPROG		= 1086,	/* s */
-    RPMTAG_PREUNPROG		= 1087,	/* s */
-    RPMTAG_POSTUNPROG		= 1088,	/* s */
+    RPMTAG_PREINPROG		= 1085,	/* s[] */
+    RPMTAG_POSTINPROG		= 1086,	/* s[] */
+    RPMTAG_PREUNPROG		= 1087,	/* s[] */
+    RPMTAG_POSTUNPROG		= 1088,	/* s[] */
     RPMTAG_BUILDARCHS		= 1089, /* s[] */
     RPMTAG_OBSOLETENAME		= 1090,	/* s[] */
 #define	RPMTAG_OBSOLETES RPMTAG_OBSOLETENAME	/* s[] */
 #define	RPMTAG_O	RPMTAG_OBSOLETENAME	/* s[] */
-    RPMTAG_VERIFYSCRIPTPROG	= 1091,	/* s */
+    RPMTAG_VERIFYSCRIPTPROG	= 1091,	/* s[] */
     RPMTAG_TRIGGERSCRIPTPROG	= 1092,	/* s[] */
     RPMTAG_DOCDIR		= 1093, /* internal */
     RPMTAG_COOKIE		= 1094,	/* s */
@@ -177,8 +166,8 @@ typedef enum rpmTag_e {
     RPMTAG_TRIGGERPOSTUN	= 1102, /* internal */
     RPMTAG_AUTOREQ		= 1103, /* internal */
     RPMTAG_AUTOPROV		= 1104, /* internal */
-    RPMTAG_CAPABILITY		= 1105, /* i legacy - obsolete */
-    RPMTAG_SOURCEPACKAGE	= 1106, /* i legacy - obsolete */
+    RPMTAG_CAPABILITY		= 1105, /* i internal - obsolete */
+    RPMTAG_SOURCEPACKAGE	= 1106, /* i */
     RPMTAG_OLDORIGFILENAMES	= 1107, /* internal - obsolete */
     RPMTAG_BUILDPREREQ		= 1108, /* internal */
     RPMTAG_BUILDREQUIRES	= 1109, /* internal */
@@ -203,7 +192,7 @@ typedef enum rpmTag_e {
     RPMTAG_INSTALLTID		= 1128,	/* i */
     RPMTAG_REMOVETID		= 1129,	/* i */
     RPMTAG_SHA1RHN		= 1130, /* internal - obsolete */
-    RPMTAG_RHNPLATFORM		= 1131,	/* s deprecated */
+    RPMTAG_RHNPLATFORM		= 1131,	/* s internal - obsolete */
     RPMTAG_PLATFORM		= 1132,	/* s */
     RPMTAG_PATCHESNAME		= 1133, /* s[] deprecated placeholder (SuSE) */
     RPMTAG_PATCHESFLAGS		= 1134, /* i[] deprecated placeholder (SuSE) */
@@ -225,8 +214,8 @@ typedef enum rpmTag_e {
     RPMTAG_POLICIES		= 1150,	/* s[] selinux *.te policy file. */
     RPMTAG_PRETRANS		= 1151,	/* s */
     RPMTAG_POSTTRANS		= 1152,	/* s */
-    RPMTAG_PRETRANSPROG		= 1153,	/* s */
-    RPMTAG_POSTTRANSPROG	= 1154,	/* s */
+    RPMTAG_PRETRANSPROG		= 1153,	/* s[] */
+    RPMTAG_POSTTRANSPROG	= 1154,	/* s[] */
     RPMTAG_DISTTAG		= 1155,	/* s */
     RPMTAG_SUGGESTSNAME		= 1156,	/* s[] extension (unimplemented) */
 #define	RPMTAG_SUGGESTS RPMTAG_SUGGESTSNAME	/* s[] (unimplemented) */
@@ -268,15 +257,16 @@ typedef enum rpmTag_e {
     RPMTAG_OBSOLETEATTRSX	= 1190, /* i[] (unimplemented) */
     RPMTAG_PROVIDEATTRSX	= 1191, /* i[] (unimplemented) */
     RPMTAG_REQUIREATTRSX	= 1192, /* i[] (unimplemented) */
-    RPMTAG_BUILDPROVIDES	= 1193, /* internal */
-    RPMTAG_BUILDOBSOLETES	= 1194, /* internal */
+    RPMTAG_BUILDPROVIDES	= 1193, /* internal (unimplemented) */
+    RPMTAG_BUILDOBSOLETES	= 1194, /* internal (unimplemented) */
     RPMTAG_DBINSTANCE		= 1195, /* i extension */
     RPMTAG_NVRA			= 1196, /* s extension */
+    /* tags 1997-4999 reserved */
     RPMTAG_FILENAMES		= 5000, /* s[] extension */
     RPMTAG_FILEPROVIDE		= 5001, /* s[] extension */
     RPMTAG_FILEREQUIRE		= 5002, /* s[] extension */
-    RPMTAG_FSNAMES		= 5003, /* s[] extension */
-    RPMTAG_FSSIZES		= 5004, /* l[] extension */
+    RPMTAG_FSNAMES		= 5003, /* s[] (unimplemented) */
+    RPMTAG_FSSIZES		= 5004, /* l[] (unimplemented) */
     RPMTAG_TRIGGERCONDS		= 5005, /* s[] extension */
     RPMTAG_TRIGGERTYPE		= 5006, /* s[] extension */
     RPMTAG_ORIGFILENAMES	= 5007, /* s[] extension */
@@ -292,12 +282,57 @@ typedef enum rpmTag_e {
     RPMTAG_HEADERCOLOR		= 5017, /* i extension */
     RPMTAG_VERBOSE		= 5018, /* i extension */
     RPMTAG_EPOCHNUM		= 5019, /* i extension */
+    RPMTAG_PREINFLAGS		= 5020, /* i */
+    RPMTAG_POSTINFLAGS		= 5021, /* i */
+    RPMTAG_PREUNFLAGS		= 5022, /* i */
+    RPMTAG_POSTUNFLAGS		= 5023, /* i */
+    RPMTAG_PRETRANSFLAGS	= 5024, /* i */
+    RPMTAG_POSTTRANSFLAGS	= 5025, /* i */
+    RPMTAG_VERIFYSCRIPTFLAGS	= 5026, /* i */
+    RPMTAG_TRIGGERSCRIPTFLAGS	= 5027, /* i[] */
+    RPMTAG_COLLECTIONS		= 5029, /* s[] list of collections */
+    RPMTAG_POLICYNAMES		= 5030,	/* s[] */
+    RPMTAG_POLICYTYPES		= 5031,	/* s[] */
+    RPMTAG_POLICYTYPESINDEXES	= 5032,	/* i[] */
+    RPMTAG_POLICYFLAGS		= 5033,	/* i[] */
+    RPMTAG_VCS			= 5034, /* s */
+    RPMTAG_ORDERNAME		= 5035,	/* s[] */
+    RPMTAG_ORDERVERSION		= 5036,	/* s[] */
+    RPMTAG_ORDERFLAGS		= 5037,	/* i[] */
+    RPMTAG_MSSFMANIFEST		= 5038, /* s[] reservation (unimplemented) */
+    RPMTAG_MSSFDOMAIN		= 5039, /* s[] reservation (unimplemented) */
+    RPMTAG_INSTFILENAMES	= 5040, /* s[] extension */
+    RPMTAG_REQUIRENEVRS		= 5041, /* s[] extension */
+    RPMTAG_PROVIDENEVRS		= 5042, /* s[] extension */
+    RPMTAG_OBSOLETENEVRS	= 5043, /* s[] extension */
+    RPMTAG_CONFLICTNEVRS	= 5044, /* s[] extension */
+    RPMTAG_FILENLINKS		= 5045,	/* i[] extension */
 
     RPMTAG_FIRSTFREE_TAG	/*!< internal */
 } rpmTag;
 
 #define	RPMTAG_EXTERNAL_TAG		1000000
-#define RPMTAG_NOT_FOUND		-1
+
+/** \ingroup rpmtag
+ * Rpm database index tags.
+ */
+typedef enum rpmDbiTag_e {
+    RPMDBI_PACKAGES		= 0,	/* Installed package headers. */
+    RPMDBI_LABEL		= 2,	/* NEVRA label pseudo index */
+    RPMDBI_NAME			= RPMTAG_NAME,
+    RPMDBI_BASENAMES		= RPMTAG_BASENAMES,
+    RPMDBI_GROUP		= RPMTAG_GROUP,
+    RPMDBI_REQUIRENAME		= RPMTAG_REQUIRENAME,
+    RPMDBI_PROVIDENAME		= RPMTAG_PROVIDENAME,
+    RPMDBI_CONFLICTNAME		= RPMTAG_CONFLICTNAME,
+    RPMDBI_OBSOLETENAME		= RPMTAG_OBSOLETENAME,
+    RPMDBI_TRIGGERNAME		= RPMTAG_TRIGGERNAME,
+    RPMDBI_DIRNAMES		= RPMTAG_DIRNAMES,
+    RPMDBI_INSTALLTID		= RPMTAG_INSTALLTID,
+    RPMDBI_SIGMD5		= RPMTAG_SIGMD5,
+    RPMDBI_SHA1HEADER		= RPMTAG_SHA1HEADER,
+    RPMDBI_INSTFILENAMES	= RPMTAG_INSTFILENAMES,
+} rpmDbiTag;
 
 /** \ingroup signature
  * Tags found in signature header from package.
@@ -372,41 +407,57 @@ typedef enum rpmSubTagType_e {
 /** \ingroup header
  *  * Identify how to return the header data type.
  *   */
-typedef enum rpmTagReturnType_e {
+enum rpmTagReturnType_e {
     RPM_ANY_RETURN_TYPE         = 0,
     RPM_SCALAR_RETURN_TYPE      = 0x00010000,
     RPM_ARRAY_RETURN_TYPE       = 0x00020000,
     RPM_MAPPING_RETURN_TYPE     = 0x00040000,
     RPM_MASK_RETURN_TYPE        = 0xffff0000
-} rpmTagReturnType;
+};
+
+typedef rpmFlags rpmTagReturnType;
 
 /** \ingroup rpmtag
  * Return tag name from value.
  * @param tag		tag value
  * @return		tag name, "(unknown)" on not found
  */
-const char * rpmTagGetName(rpmTag tag);
+const char * rpmTagGetName(rpmTagVal tag);
+
+/** \ingroup rpmtag
+ * Return tag data type from value.
+ * @param tag		tag value
+ * @return		tag data type + return type, RPM_NULL_TYPE on not found.
+ */
+rpmTagType rpmTagGetType(rpmTagVal tag);
 
 /** \ingroup rpmtag
  * Return tag data type from value.
  * @param tag		tag value
  * @return		tag data type, RPM_NULL_TYPE on not found.
  */
-rpmTagType rpmTagGetType(rpmTag tag);
+rpmTagType rpmTagGetTagType(rpmTagVal tag);
+
+/** \ingroup rpmtag
+ * Return tag data type from value.
+ * @param tag		tag value
+ * @return		tag data return type, RPM_NULL_TYPE on not found.
+ */
+rpmTagReturnType rpmTagGetReturnType(rpmTagVal tag);
 
 /** \ingroup rpmtag
  * Return tag data class from value.
  * @param tag		tag value
  * @return		tag data class, RPM_NULL_CLASS on not found.
  */
-rpmTagClass rpmTagGetClass(rpmTag tag);
+rpmTagClass rpmTagGetClass(rpmTagVal tag);
 
 /** \ingroup rpmtag
  * Return tag value from name.
  * @param tagstr	name of tag
  * @return		tag value, -1 on not found
  */
-rpmTag rpmTagGetValue(const char * tagstr);
+rpmTagVal rpmTagGetValue(const char * tagstr);
 
 /** \ingroup rpmtag
  * Return data class of type

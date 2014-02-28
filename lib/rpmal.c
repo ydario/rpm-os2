@@ -5,20 +5,20 @@
 #include "system.h"
 
 
-#include <rpm/rpmds.h>
 #include <rpm/rpmte.h>
 #include <rpm/rpmfi.h>
+#include <rpm/rpmstrpool.h>
 
 #include "lib/rpmal.h"
-#include "lib/rpmhash.h"
+#include "lib/misc.h"
+#include "lib/rpmte_internal.h"
+#include "lib/rpmds_internal.h"
+#include "lib/rpmfi_internal.h"
 
 #include "debug.h"
 
 typedef struct availablePackage_s * availablePackage;
 typedef int rpmalNum;
-
-int _rpmal_debug = 0;
-
 
 /** \ingroup rpmdep
  * Info about a single package to be installed.
@@ -26,66 +26,54 @@ int _rpmal_debug = 0;
 struct availablePackage_s {
     rpmte p;                    /*!< transaction member */
     rpmds provides;		/*!< Provides: dependencies. */
+    rpmds obsoletes;		/*!< Obsoletes: dependencies. */
     rpmfi fi;			/*!< File info set. */
-    fnpyKey key;		/*!< Associated file name/python object */
 };
-
-typedef struct availableIndexEntry_s *	availableIndexEntry;
 
 /** \ingroup rpmdep
  * A single available item (e.g. a Provides: dependency).
  */
-struct availableIndexEntry_s {
+typedef struct availableIndexEntry_s {
     rpmalNum pkgNum;	        /*!< Containing package index. */
     unsigned int entryIx;	/*!< Dependency index. */
-};
+} * availableIndexEntry;
 
 struct fileNameEntry_s {
-    const char * dirName;
-    const char * baseName;
-};
-
-
-/** \ingroup rpmdep
- * A file to be installed/removed.
- */
-typedef struct fileIndexEntry_s * fileIndex;
-
-struct fileIndexEntry_s {
-    rpmalNum pkgNum;		/*!< Containing package index. */
-    unsigned int entryIx;
+    rpmsid dirName;
+    rpmsid baseName;
 };
 
 #undef HASHTYPE
 #undef HTKEYTYPE
 #undef HTDATATYPE
-#define HASHTYPE rpmalProvidesHash
-#define HTKEYTYPE const char *
+#define HASHTYPE rpmalDepHash
+#define HTKEYTYPE rpmsid
 #define HTDATATYPE struct availableIndexEntry_s
-#include "lib/rpmhashC.H"
-#include "lib/rpmhashC.C"
+#include "lib/rpmhash.H"
+#include "lib/rpmhash.C"
 
 #undef HASHTYPE
 #undef HTKEYTYPE
 #undef HTDATATYPE
 #define HASHTYPE rpmalFileHash
 #define HTKEYTYPE struct fileNameEntry_s
-#define HTDATATYPE struct fileIndexEntry_s
-#include "lib/rpmhashC.H"
-#include "lib/rpmhashC.C"
-
-
+#define HTDATATYPE struct availableIndexEntry_s
+#include "lib/rpmhash.H"
+#include "lib/rpmhash.C"
 
 /** \ingroup rpmdep
  * Set of available packages, items, and directories.
  */
 struct rpmal_s {
+    rpmstrPool pool;		/*!< String pool */
     availablePackage list;	/*!< Set of packages. */
-    rpmalProvidesHash providesHash;
+    rpmalDepHash providesHash;
+    rpmalDepHash obsoletesHash;
     rpmalFileHash fileHash;
     int delta;			/*!< Delta for pkg list reallocation. */
     int size;			/*!< No. of pkgs in list. */
     int alloced;		/*!< No. of pkgs allocated for list. */
+    rpmtransFlags tsflags;	/*!< Transaction control flags. */
     rpm_color_t tscolor;	/*!< Transaction color. */
     rpm_color_t prefcolor;	/*!< Transaction preferred color. */
 };
@@ -96,21 +84,29 @@ struct rpmal_s {
  */
 static void rpmalFreeIndex(rpmal al)
 {
-    al->providesHash = rpmalProvidesHashFree(al->providesHash);
+    al->providesHash = rpmalDepHashFree(al->providesHash);
+    al->obsoletesHash = rpmalDepHashFree(al->obsoletesHash);
     al->fileHash = rpmalFileHashFree(al->fileHash);
 }
 
-rpmal rpmalCreate(int delta, rpm_color_t tscolor, rpm_color_t prefcolor)
+rpmal rpmalCreate(rpmstrPool pool, int delta, rpmtransFlags tsflags,
+		  rpm_color_t tscolor, rpm_color_t prefcolor)
 {
     rpmal al = xcalloc(1, sizeof(*al));
 
+    /* transition time safe-guard */
+    assert(pool != NULL);
+
+    al->pool = rpmstrPoolLink(pool);
     al->delta = delta;
     al->size = 0;
     al->alloced = al->delta;
     al->list = xmalloc(sizeof(*al->list) * al->alloced);;
 
     al->providesHash = NULL;
+    al->obsoletesHash = NULL;
     al->fileHash = NULL;
+    al->tsflags = tsflags;
     al->tscolor = tscolor;
     al->prefcolor = prefcolor;
 
@@ -127,9 +123,11 @@ rpmal rpmalFree(rpmal al)
 
     if ((alp = al->list) != NULL)
     for (i = 0; i < al->size; i++, alp++) {
+	alp->obsoletes = rpmdsFree(alp->obsoletes);
 	alp->provides = rpmdsFree(alp->provides);
 	alp->fi = rpmfiFree(alp->fi);
     }
+    al->pool = rpmstrPoolFree(al->pool);
     al->list = _free(al->list);
     al->alloced = 0;
 
@@ -138,15 +136,26 @@ rpmal rpmalFree(rpmal al)
     return NULL;
 }
 
-static unsigned int fileHash(struct fileNameEntry_s file){
-    return hashFunctionString(file.dirName) ^ hashFunctionString(file.baseName);
+static unsigned int sidHash(rpmsid sid)
+{
+    return sid;
 }
 
-static int fileCompare(struct fileNameEntry_s one, struct fileNameEntry_s two) {
-    int rc = 0;
-    rc = strcmp(one.dirName, two.dirName);
+static int sidCmp(rpmsid a, rpmsid b)
+{
+    return (a != b);
+}
+
+static unsigned int fileHash(struct fileNameEntry_s file)
+{
+    return file.dirName ^ file.baseName;
+}
+
+static int fileCompare(struct fileNameEntry_s one, struct fileNameEntry_s two)
+{
+    int rc = (one.dirName != two.dirName);;
     if (!rc)
-	rc = strcmp(one.baseName, two.baseName);
+	rc = (one.baseName != two.baseName);
     return rc;
 }
 
@@ -172,23 +181,31 @@ void rpmalDel(rpmal al, rpmte p)
     alp->p = NULL;
 }
 
-static void rpmalAddFiles(rpmal al, rpmalNum pkgNum, rpmfi fi){
+static void rpmalAddFiles(rpmal al, rpmalNum pkgNum, rpmfi fi)
+{
     struct fileNameEntry_s fileName;
-    struct fileIndexEntry_s fileEntry;
-    int i;
+    struct availableIndexEntry_s fileEntry;
+    int fc = rpmfiFC(fi);
     rpm_color_t ficolor;
+    int skipdoc = (al->tsflags & RPMTRANS_FLAG_NODOCS);
+    int skipconf = (al->tsflags & RPMTRANS_FLAG_NOCONFIGS);
 
     fileEntry.pkgNum = pkgNum;
 
-    fi = rpmfiInit(fi, 0);
-    while ((i = rpmfiNext(fi)) >= 0) {
+    for (int i = 0; i < fc; i++) {
 	/* Ignore colored provides not in our rainbow. */
-        ficolor = rpmfiFColor(fi);
+        ficolor = rpmfiFColorIndex(fi, i);
         if (al->tscolor && ficolor && !(al->tscolor & ficolor))
             continue;
 
-	fileName.dirName = rpmfiDN(fi);
-	fileName.baseName = rpmfiBN(fi);
+	/* Ignore files that wont be installed */
+	if (skipdoc && (rpmfiFFlagsIndex(fi, i) & RPMFILE_DOC))
+	    continue;
+	if (skipconf && (rpmfiFFlagsIndex(fi, i) & RPMFILE_CONFIG))
+	    continue;
+
+	fileName.dirName = rpmfiDNIdIndex(fi, rpmfiDIIndex(fi, i));
+	fileName.baseName = rpmfiBNIdIndex(fi, i);
 
 	fileEntry.entryIx = i;
 
@@ -196,21 +213,48 @@ static void rpmalAddFiles(rpmal al, rpmalNum pkgNum, rpmfi fi){
     }
 }
 
-static void rpmalAddProvides(rpmal al, rpmalNum pkgNum, rpmds provides){
+static void rpmalAddProvides(rpmal al, rpmalNum pkgNum, rpmds provides)
+{
     struct availableIndexEntry_s indexEntry;
     rpm_color_t dscolor;
+    int skipconf = (al->tsflags & RPMTRANS_FLAG_NOCONFIGS);
+    int dc = rpmdsCount(provides);
 
     indexEntry.pkgNum = pkgNum;
 
-    if (rpmdsInit(provides) != NULL)
-    while (rpmdsNext(provides) >= 0) {
+    for (int i = 0; i < dc; i++) {
         /* Ignore colored provides not in our rainbow. */
-        dscolor = rpmdsColor(provides);
+        dscolor = rpmdsColorIndex(provides, i);
         if (al->tscolor && dscolor && !(al->tscolor & dscolor))
             continue;
 
-	indexEntry.entryIx = rpmdsIx(provides);
-	rpmalProvidesHashAddEntry(al->providesHash, rpmdsN(provides), indexEntry);
+	/* Ignore config() provides if the files wont be installed */
+	if (skipconf & (rpmdsFlagsIndex(provides, i) & RPMSENSE_CONFIG))
+	    continue;
+
+	indexEntry.entryIx = i;;
+	rpmalDepHashAddEntry(al->providesHash,
+				  rpmdsNIdIndex(provides, i), indexEntry);
+    }
+}
+
+static void rpmalAddObsoletes(rpmal al, rpmalNum pkgNum, rpmds obsoletes)
+{
+    struct availableIndexEntry_s indexEntry;
+    rpm_color_t dscolor;
+    int dc = rpmdsCount(obsoletes);
+
+    indexEntry.pkgNum = pkgNum;
+
+    for (int i = 0; i < dc; i++) {
+	/* Obsoletes shouldn't be colored but just in case... */
+        dscolor = rpmdsColorIndex(obsoletes, i);
+        if (al->tscolor && dscolor && !(al->tscolor & dscolor))
+            continue;
+
+	indexEntry.entryIx = i;;
+	rpmalDepHashAddEntry(al->obsoletesHash,
+				  rpmdsNIdIndex(obsoletes, i), indexEntry);
     }
 }
 
@@ -229,55 +273,138 @@ void rpmalAdd(rpmal al, rpmte p)
 
     alp->p = p;
 
-    if (_rpmal_debug)
-	fprintf(stderr, "*** add %p[%d]\n", al->list, (int) pkgNum);
+    alp->provides = rpmdsLink(rpmteDS(p, RPMTAG_PROVIDENAME));
+    alp->obsoletes = rpmdsLink(rpmteDS(p, RPMTAG_OBSOLETENAME));
+    alp->fi = rpmfiLink(rpmteFI(p));
 
-    alp->provides = rpmdsLink(rpmteDS(p, RPMTAG_PROVIDENAME),
-			      RPMDBG_M("Provides (rpmalAdd)"));
-    alp->fi = rpmfiLink(rpmteFI(p), RPMDBG_M("Files (rpmalAdd)"));
-
-    if (al->providesHash != NULL) { // index is already created
-	rpmalAddProvides(al, pkgNum, alp->provides);
-	rpmalAddFiles(al, pkgNum, alp->fi);
+    /*
+     * Transition-time safe-guard to catch private-pool uses.
+     * File sets with no files have NULL pool, that's fine. But WTF is up
+     * with the provides: every single package should have at least its
+     * own name as a provide, and thus never NULL, and normal use matches
+     * this expectation. However the test-suite is tripping up on NULL
+     * NULL pool from NULL alp->provides in numerous cases?
+     */
+    {
+	rpmstrPool fipool = rpmfiPool(alp->fi);
+	rpmstrPool dspool = rpmdsPool(alp->provides);
+	
+	assert(fipool == NULL || fipool == al->pool);
+	assert(dspool == NULL || dspool == al->pool);
     }
+
+    /* Try to be lazy as delayed hash creation is cheaper */
+    if (al->providesHash != NULL)
+	rpmalAddProvides(al, pkgNum, alp->provides);
+    if (al->obsoletesHash != NULL)
+	rpmalAddObsoletes(al, pkgNum, alp->obsoletes);
+    if (al->fileHash != NULL)
+	rpmalAddFiles(al, pkgNum, alp->fi);
 
     assert(((rpmalNum)(alp - al->list)) == pkgNum);
 }
 
-void rpmalMakeIndex(rpmal al)
+static void rpmalMakeFileIndex(rpmal al)
 {
     availablePackage alp;
-    int i;
-    int providesCnt = 0;
-    int fileCnt = 0;
+    int i, fileCnt = 0;
 
-    if (al == NULL || al->list == NULL) return;
-    if (al->providesHash != NULL || al->fileHash != NULL)
-	return;
     for (i = 0; i < al->size; i++) {
 	alp = al->list + i;
-	if (alp->provides != NULL)
-	    providesCnt += rpmdsCount(alp->provides);
 	if (alp->fi != NULL)
 	    fileCnt += rpmfiFC(alp->fi);
     }
-
-    al->providesHash = rpmalProvidesHashCreate(providesCnt/4+128, hashFunctionString,
-					       strcmp, NULL, NULL);
-    al->fileHash = rpmalFileHashCreate(fileCnt/4+128, fileHash, fileCompare,
-				       NULL, NULL);
-
+    al->fileHash = rpmalFileHashCreate(fileCnt/4+128,
+				       fileHash, fileCompare, NULL, NULL);
     for (i = 0; i < al->size; i++) {
 	alp = al->list + i;
-	rpmalAddProvides(al, i, alp->provides);
 	rpmalAddFiles(al, i, alp->fi);
     }
 }
 
-rpmte *
-rpmalAllFileSatisfiesDepend(const rpmal al, const rpmds ds)
+static void rpmalMakeProvidesIndex(rpmal al)
 {
-    const char *fileName = rpmdsN(ds);
+    availablePackage alp;
+    int i, providesCnt = 0;
+
+    for (i = 0; i < al->size; i++) {
+	alp = al->list + i;
+	providesCnt += rpmdsCount(alp->provides);
+    }
+
+    al->providesHash = rpmalDepHashCreate(providesCnt/4+128,
+					       sidHash, sidCmp, NULL, NULL);
+    for (i = 0; i < al->size; i++) {
+	alp = al->list + i;
+	rpmalAddProvides(al, i, alp->provides);
+    }
+}
+
+static void rpmalMakeObsoletesIndex(rpmal al)
+{
+    availablePackage alp;
+    int i, obsoletesCnt = 0;
+
+    for (i = 0; i < al->size; i++) {
+	alp = al->list + i;
+	obsoletesCnt += rpmdsCount(alp->obsoletes);
+    }
+
+    al->obsoletesHash = rpmalDepHashCreate(obsoletesCnt/4+128,
+					       sidHash, sidCmp, NULL, NULL);
+    for (i = 0; i < al->size; i++) {
+	alp = al->list + i;
+	rpmalAddObsoletes(al, i, alp->obsoletes);
+    }
+}
+
+rpmte * rpmalAllObsoletes(rpmal al, rpmds ds)
+{
+    rpmte * ret = NULL;
+    rpmsid nameId;
+    availableIndexEntry result;
+    int resultCnt;
+
+    if (al == NULL || ds == NULL || (nameId = rpmdsNId(ds)) == 0)
+	return ret;
+
+    if (al->obsoletesHash == NULL)
+	rpmalMakeObsoletesIndex(al);
+
+    rpmalDepHashGetEntry(al->obsoletesHash, nameId, &result, &resultCnt, NULL);
+
+    if (resultCnt > 0) {
+	availablePackage alp;
+	int rc, found = 0;
+
+	ret = xmalloc((resultCnt+1) * sizeof(*ret));
+
+	for (int i = 0; i < resultCnt; i++) {
+	    alp = al->list + result[i].pkgNum;
+	    if (alp->p == NULL) // deleted
+		continue;
+
+	    rc = rpmdsCompareIndex(alp->obsoletes, result[i].entryIx,
+				   ds, rpmdsIx(ds));
+
+	    if (rc) {
+		rpmdsNotify(ds, "(added obsolete)", 0);
+		ret[found] = alp->p;
+		found++;
+	    }
+	}
+
+	if (found)
+	    ret[found] = NULL;
+	else
+	    ret = _free(ret);
+    }
+
+    return ret;
+}
+
+static rpmte * rpmalAllFileSatisfiesDepend(const rpmal al, const char *fileName)
+{
     const char *slash; 
     rpmte * ret = NULL;
 
@@ -286,16 +413,16 @@ rpmalAllFileSatisfiesDepend(const rpmal al, const rpmds ds)
 
     /* Split path into dirname and basename components for lookup */
     if ((slash = strrchr(fileName, '/')) != NULL) {
-	fileIndex result;
+	availableIndexEntry result;
 	int resultCnt = 0;
 	size_t bnStart = (slash - fileName) + 1;
-	char dirName[bnStart + 1];
-	struct fileNameEntry_s fne = {
-	    .baseName = fileName + bnStart,
-	    .dirName = dirName,
-	};
-	strncpy(dirName, fileName, bnStart);
-	dirName[bnStart] = '\0';
+	struct fileNameEntry_s fne;
+
+	fne.baseName = rpmstrPoolId(al->pool, fileName + bnStart, 0);
+	fne.dirName = rpmstrPoolIdn(al->pool, fileName, bnStart, 0);
+
+	if (al->fileHash == NULL)
+	    rpmalMakeFileIndex(al);
 
 	rpmalFileHashGetEntry(al->fileHash, fne, &result, &resultCnt, NULL);
 
@@ -308,8 +435,6 @@ rpmalAllFileSatisfiesDepend(const rpmal al, const rpmds ds)
 		if (alp->p == NULL) // deleted
 		    continue;
 
-		rpmdsNotify(ds, _("(added files)"), 0);
-
 		ret[found] = alp->p;
 		found++;
 	    }
@@ -320,31 +445,39 @@ rpmalAllFileSatisfiesDepend(const rpmal al, const rpmds ds)
     return ret;
 }
 
-rpmte *
-rpmalAllSatisfiesDepend(const rpmal al, const rpmds ds)
+rpmte * rpmalAllSatisfiesDepend(const rpmal al, const rpmds ds)
 {
     rpmte * ret = NULL;
-    int i, found;
-    const char * name;
+    int i, ix, found;
+    rpmsid nameId;
+    const char *name;
     availableIndexEntry result;
     int resultCnt;
+    int obsolete;
 
     availablePackage alp;
     int rc;
 
-    if (al == NULL || ds == NULL || (name = rpmdsN(ds)) == NULL)
+    if (al == NULL || ds == NULL || (nameId = rpmdsNId(ds)) == 0)
 	return ret;
 
-    if (*name == '/') {
+    obsolete = (rpmdsTagN(ds) == RPMTAG_OBSOLETENAME);
+    name = rpmstrPoolStr(al->pool, nameId);
+    if (!obsolete && *name == '/') {
 	/* First, look for files "contained" in package ... */
-	ret = rpmalAllFileSatisfiesDepend(al, ds);
-	if (ret != NULL && *ret != NULL)
+	ret = rpmalAllFileSatisfiesDepend(al, name);
+	if (ret != NULL && *ret != NULL) {
+	    rpmdsNotify(ds, "(added files)", 0);
 	    return ret;
+	}
 	/* ... then, look for files "provided" by package. */
 	ret = _free(ret);
     }
 
-    rpmalProvidesHashGetEntry(al->providesHash, name, &result,
+    if (al->providesHash == NULL)
+	rpmalMakeProvidesIndex(al);
+
+    rpmalDepHashGetEntry(al->providesHash, nameId, &result,
 			      &resultCnt, NULL);
 
     if (resultCnt==0) return NULL;
@@ -355,18 +488,25 @@ rpmalAllSatisfiesDepend(const rpmal al, const rpmds ds)
 	alp = al->list + result[i].pkgNum;
 	if (alp->p == NULL) // deleted
 	    continue;
-	(void) rpmdsSetIx(alp->provides, result[i].entryIx);
-	rc = 0;
-	if (rpmdsIx(alp->provides) >= 0)
-	    rc = rpmdsCompare(alp->provides, ds);
+	ix = result[i].entryIx;
+
+	/* Obsoletes are on package name, filter out other provide matches */
+	if (obsolete && !rstreq(rpmdsNIndex(alp->provides, ix), rpmteN(alp->p)))
+	    continue;
+
+	rc = rpmdsCompareIndex(alp->provides, ix, ds, rpmdsIx(ds));
 
 	if (rc) {
-	    rpmdsNotify(ds, _("(added provide)"), 0);
+	    rpmdsNotify(ds, "(added provide)", 0);
 	    ret[found] = alp->p;
 	    found++;
 	}
     }
-    ret[found] = NULL;
+
+    if (found)
+	ret[found] = NULL;
+    else
+	ret = _free(ret);
 
     return ret;
 }
@@ -399,4 +539,29 @@ rpmalSatisfiesDepend(const rpmal al, const rpmds ds)
 	free(providers);
     }
     return best;
+}
+
+rpmte *
+rpmalAllInCollection(const rpmal al, const char *collname)
+{
+    rpmte *ret = NULL;
+    int found = 0;
+    rpmalNum pkgNum;
+
+    if (!al || !al->list || !collname)
+	return NULL;
+
+    for (pkgNum = 0; pkgNum < al->size; pkgNum++) {
+	rpmte p = al->list[pkgNum].p;
+	if (rpmteHasCollection(p, collname)) {
+	    ret = xrealloc(ret, sizeof(*ret) * (found + 1 + 1));
+	    ret[found] = p;
+	    found++;
+	}
+    }
+    if (ret) {
+	ret[found] = NULL;
+    }
+
+    return ret;
 }

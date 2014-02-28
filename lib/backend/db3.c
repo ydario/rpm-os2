@@ -1,4 +1,4 @@
-/** \ingroup db3
+/** \ingroup rpmdb
  * \file lib/db3.c
  */
 
@@ -6,9 +6,8 @@ static int _debug = 1;	/* XXX if < 0 debugging, > 0 unusual error returns */
 
 #include "system.h"
 
-#if defined(HAVE_FTOK) && defined(HAVE_SYS_IPC_H)
-#include <sys/ipc.h>
-#endif
+#include <errno.h>
+#include <sys/wait.h>
 
 #include <rpm/rpmtypes.h>
 #include <rpm/rpmmacro.h>
@@ -19,10 +18,17 @@ static int _debug = 1;	/* XXX if < 0 debugging, > 0 unusual error returns */
 
 #include "debug.h"
 
-static int cvtdberr(dbiIndex dbi, const char * msg, int error, int printit)
+static const char * _errpfx = "rpmdb";
+
+struct dbiCursor_s {
+    dbiIndex dbi;
+    DBC *cursor;
+};
+
+static int dbapi_err(rpmdb rdb, const char * msg, int error, int printit)
 {
     if (printit && error) {
-	int db_api = dbi->dbi_rpmdb->db_api;
+	int db_api = rdb->db_ver;
 	if (msg)
 	    rpmlog(RPMLOG_ERR, _("db%d error(%d) from %s: %s\n"),
 		db_api, error, msg, db_strerror(error));
@@ -33,46 +39,108 @@ static int cvtdberr(dbiIndex dbi, const char * msg, int error, int printit)
     return error;
 }
 
-static int db_fini(dbiIndex dbi, const char * dbhome)
+static int cvtdberr(dbiIndex dbi, const char * msg, int error, int printit)
 {
-    rpmdb rpmdb = dbi->dbi_rpmdb;
-    DB_ENV * dbenv = rpmdb->db_dbenv;
+    return dbapi_err(dbi->dbi_rpmdb, msg, error, printit);
+}
+
+static void errlog(const DB_ENV * env, const char *errpfx, const char *msg)
+{
+    rpmlog(RPMLOG_ERR, "%s: %s\n", errpfx, msg);
+}
+
+static uint32_t db_envflags(DB * db)
+{
+    DB_ENV * env = db->get_env(db);
+    uint32_t eflags = 0;
+    (void) env->get_open_flags(env, &eflags);
+    return eflags;
+}
+
+/*
+ * Try to acquire db environment open/close serialization lock.
+ * Return the open, locked fd on success, -1 on failure.
+ */
+static int serialize_env(const char *dbhome)
+{
+    char *lock_path = rstrscat(NULL, dbhome, "/.dbenv.lock", NULL);
+    mode_t oldmask = umask(022);
+    int fd = open(lock_path, (O_RDWR|O_CREAT), 0644);
+    umask(oldmask);
+
+    if (fd >= 0) {
+	int rc;
+	struct flock info;
+	memset(&info, 0, sizeof(info));
+	info.l_type = F_WRLCK;
+	info.l_whence = SEEK_SET;
+	do {
+	    rc = fcntl(fd, F_SETLKW, &info);
+	} while (rc == -1 && errno == EINTR);
+	    
+	if (rc == -1) {
+	    close(fd);
+	    fd = -1;
+	}
+    }
+
+    free(lock_path);
+    return fd;
+}
+
+static int db_fini(rpmdb rdb, const char * dbhome)
+{
+    DB_ENV * dbenv = rdb->db_dbenv;
     int rc;
+    int lockfd = -1;
+    uint32_t eflags = 0;
 
     if (dbenv == NULL)
 	return 0;
 
+    if (rdb->db_opens > 1) {
+	rdb->db_opens--;
+	return 0;
+    }
+
+    (void) dbenv->get_open_flags(dbenv, &eflags);
+    if (!(eflags & DB_PRIVATE))
+	lockfd = serialize_env(dbhome);
+
     rc = dbenv->close(dbenv, 0);
-    rc = cvtdberr(dbi, "dbenv->close", rc, _debug);
+    rc = dbapi_err(rdb, "dbenv->close", rc, _debug);
 
     rpmlog(RPMLOG_DEBUG, "closed   db environment %s\n", dbhome);
 
-    if (rpmdb->db_remove_env) {
+    if (!(eflags & DB_PRIVATE) && rdb->db_remove_env) {
 	int xx;
 
 	xx = db_env_create(&dbenv, 0);
-	xx = cvtdberr(dbi, "db_env_create", xx, _debug);
+	xx = dbapi_err(rdb, "db_env_create", xx, _debug);
 	xx = dbenv->remove(dbenv, dbhome, 0);
 	/* filter out EBUSY as it just means somebody else gets to clean it */
-	xx = cvtdberr(dbi, "dbenv->remove", xx, (xx == EBUSY ? 0 : _debug));
+	xx = dbapi_err(rdb, "dbenv->remove", xx, (xx == EBUSY ? 0 : _debug));
 
 	rpmlog(RPMLOG_DEBUG, "removed  db environment %s\n", dbhome);
 
     }
+
+    if (lockfd >= 0)
+	close(lockfd);
+
     return rc;
 }
 
-static int db3_fsync_disable(int fd)
+static int fsync_disable(int fd)
 {
     return 0;
 }
 
-#if (DB_VERSION_MAJOR >= 4 && DB_VERSION_MINOR >= 5)
 /*
  * dbenv->failchk() callback method for determining is the given pid/tid 
  * is alive. We only care about pid's though. 
  */ 
-static int db3isalive(DB_ENV *dbenv, pid_t pid, db_threadid_t tid, uint32_t flags)
+static int isalive(DB_ENV *dbenv, pid_t pid, db_threadid_t tid, uint32_t flags)
 {
     int alive = 0;
 
@@ -87,315 +155,364 @@ static int db3isalive(DB_ENV *dbenv, pid_t pid, db_threadid_t tid, uint32_t flag
     
     return alive;
 }
-#endif
 
-static int db_init(dbiIndex dbi, const char * dbhome, DB_ENV ** dbenvp)
+static int db_init(rpmdb rdb, const char * dbhome)
 {
-    rpmdb rpmdb = dbi->dbi_rpmdb;
     DB_ENV *dbenv = NULL;
-    int eflags;
     int rc, xx;
+    int retry_open = 2;
+    int lockfd = -1;
+    struct dbConfig_s * cfg = &rdb->cfg;
+    /* This is our setup, thou shall not have other setups before us */
+    uint32_t eflags = (DB_CREATE|DB_INIT_MPOOL|DB_INIT_CDB);
 
-    if (dbenvp == NULL)
-	return 1;
-
-    /* XXX HACK */
-    if (rpmdb->db_errfile == NULL)
-	rpmdb->db_errfile = stderr;
-
-    eflags = (dbi->dbi_oeflags | dbi->dbi_eflags);
-    if (eflags & DB_JOINENV) eflags &= DB_JOINENV;
-
-    {	char *fstr = prDbiOpenFlags(eflags, 1);
-	rpmlog(RPMLOG_DEBUG, "opening  db environment %s %s\n", dbhome, fstr);
-	free(fstr);
+    if (rdb->db_dbenv != NULL) {
+	rdb->db_opens++;
+	return 0;
     }
 
-    /* XXX Set a default shm_key. */
-    if ((dbi->dbi_eflags & DB_SYSTEM_MEM) && dbi->dbi_shmkey == 0) {
-#if defined(HAVE_FTOK)
-	dbi->dbi_shmkey = ftok(dbhome, 0);
-#else
-	dbi->dbi_shmkey = 0x44631380;
-#endif
+    /*
+     * Both verify and rebuild are rather special, if for different reasons:
+     * On rebuild we dont want to be affected by eg paniced environment, and
+     * CDB only slows things down there. Verify is a quirky beast unlike
+     * anything else in BDB, and does not like shared env or CDB.
+     */
+    if (rdb->db_flags & (RPMDB_FLAG_VERIFYONLY|RPMDB_FLAG_REBUILD)) {
+	eflags |= DB_PRIVATE;
+	eflags &= ~DB_INIT_CDB;
     }
 
-    rc = db_env_create(&dbenv, dbi->dbi_ecflags);
-    rc = cvtdberr(dbi, "db_env_create", rc, _debug);
+    rc = db_env_create(&dbenv, 0);
+    rc = dbapi_err(rdb, "db_env_create", rc, _debug);
     if (dbenv == NULL || rc)
 	goto errxit;
 
-    dbenv->set_alloc(dbenv,rpmdb->db_malloc, rpmdb->db_realloc, rpmdb->db_free);
-    dbenv->set_errcall(dbenv, (void *) rpmdb->db_errcall);
-    dbenv->set_errfile(dbenv, rpmdb->db_errfile);
-    dbenv->set_errpfx(dbenv, rpmdb->db_errpfx);
+    dbenv->set_alloc(dbenv, rmalloc, rrealloc, NULL);
+    dbenv->set_errcall(dbenv, NULL);
+    dbenv->set_errpfx(dbenv, _errpfx);
 
-#if (DB_VERSION_MAJOR >= 4 && DB_VERSION_MINOR >= 5)
     /* 
      * These enable automatic stale lock removal. 
      * thread_count 8 is some kind of "magic minimum" value...
      */
     dbenv->set_thread_count(dbenv, 8);
-    dbenv->set_isalive(dbenv, db3isalive);
-#endif
+    dbenv->set_isalive(dbenv, isalive);
 
-#if !(DB_VERSION_MAJOR == 4 && DB_VERSION_MINOR >= 3)
-    dbenv->set_verbose(dbenv, DB_VERB_CHKPOINT,
-	    (dbi->dbi_verbose & DB_VERB_CHKPOINT));
-#endif
     dbenv->set_verbose(dbenv, DB_VERB_DEADLOCK,
-	    (dbi->dbi_verbose & DB_VERB_DEADLOCK));
+	    (cfg->db_verbose & DB_VERB_DEADLOCK));
     dbenv->set_verbose(dbenv, DB_VERB_RECOVERY,
-	    (dbi->dbi_verbose & DB_VERB_RECOVERY));
+	    (cfg->db_verbose & DB_VERB_RECOVERY));
     dbenv->set_verbose(dbenv, DB_VERB_WAITSFOR,
-	    (dbi->dbi_verbose & DB_VERB_WAITSFOR));
+	    (cfg->db_verbose & DB_VERB_WAITSFOR));
 
-    if (dbi->dbi_mmapsize) {
-	xx = dbenv->set_mp_mmapsize(dbenv, dbi->dbi_mmapsize);
-	xx = cvtdberr(dbi, "dbenv->set_mp_mmapsize", xx, _debug);
-    }
-    if (dbi->dbi_tmpdir) {
-	/* XXX this isn't correct wrt chroot in+out */
-	const char * root = rpmdb->db_chrootDone ? NULL : rpmdb->db_root;
-	char * tmpdir = rpmGenPath(root, dbi->dbi_tmpdir, NULL);
-	xx = dbenv->set_tmp_dir(dbenv, tmpdir);
-	xx = cvtdberr(dbi, "dbenv->set_tmp_dir", xx, _debug);
-	tmpdir = _free(tmpdir);
+    if (cfg->db_mmapsize) {
+	xx = dbenv->set_mp_mmapsize(dbenv, cfg->db_mmapsize);
+	xx = dbapi_err(rdb, "dbenv->set_mp_mmapsize", xx, _debug);
     }
 
-    if (dbi->dbi_cachesize) {
-	xx = dbenv->set_cachesize(dbenv, 0, dbi->dbi_cachesize, 0);
-	xx = cvtdberr(dbi, "dbenv->set_cachesize", xx, _debug);
+    if (cfg->db_cachesize) {
+	xx = dbenv->set_cachesize(dbenv, 0, cfg->db_cachesize, 0);
+	xx = dbapi_err(rdb, "dbenv->set_cachesize", xx, _debug);
     }
 
-    if (dbi->dbi_no_fsync) {
-	xx = db_env_set_func_fsync(db3_fsync_disable);
-	xx = cvtdberr(dbi, "db_env_set_func_fsync", xx, _debug);
+    /*
+     * Serialize shared environment open (and clock) via fcntl() lock.
+     * Otherwise we can end up calling dbenv->failchk() while another
+     * process is joining the environment, leading to transient
+     * DB_RUNRECOVER errors. Also prevents races wrt removing the
+     * environment (eg chrooted operation). Silently fall back to
+     * private environment on failure to allow non-privileged queries
+     * to "work", broken as it might be.
+     */
+    if (!(eflags & DB_PRIVATE)) {
+	lockfd = serialize_env(dbhome);
+	if (lockfd < 0) {
+	    eflags |= DB_PRIVATE;
+	    retry_open--;
+	    rpmlog(RPMLOG_DEBUG, "serialize failed, using private dbenv\n");
+	}
     }
 
-    if (dbi->dbi_shmkey) {
-	xx = dbenv->set_shm_key(dbenv, dbi->dbi_shmkey);
-	xx = cvtdberr(dbi, "dbenv->set_shm_key", xx, _debug);
-    }
+    /*
+     * Actually open the environment. Fall back to private environment
+     * if we dont have permission to join/create shared environment or
+     * system doesn't support it..
+     */
+    while (retry_open) {
+	char *fstr = prDbiOpenFlags(eflags, 1);
+	rpmlog(RPMLOG_DEBUG, "opening  db environment %s %s\n", dbhome, fstr);
+	free(fstr);
 
-    rc = (dbenv->open)(dbenv, dbhome, eflags, dbi->dbi_perms);
-    rc = cvtdberr(dbi, "dbenv->open", rc, _debug);
+	rc = (dbenv->open)(dbenv, dbhome, eflags, rdb->db_perms);
+	if ((rc == EACCES || rc == EROFS || rc == EINVAL) && errno == rc) {
+	    eflags |= DB_PRIVATE;
+	    retry_open--;
+	} else {
+	    retry_open = 0;
+	}
+    }
+    rc = dbapi_err(rdb, "dbenv->open", rc, _debug);
     if (rc)
 	goto errxit;
 
-#if (DB_VERSION_MAJOR >= 4 && DB_VERSION_MINOR >= 5)
+    dbenv->set_errcall(dbenv, errlog);
+
     /* stale lock removal */
     rc = dbenv->failchk(dbenv, 0);
-    rc = cvtdberr(dbi, "dbenv->failchk", rc, _debug);
+    rc = dbapi_err(rdb, "dbenv->failchk", rc, _debug);
     if (rc)
 	goto errxit;
-#endif
 
-    *dbenvp = dbenv;
+    rdb->db_dbenv = dbenv;
+    rdb->db_opens = 1;
 
+    if (lockfd >= 0)
+	close(lockfd);
     return 0;
 
 errxit:
     if (dbenv) {
 	int xx;
 	xx = dbenv->close(dbenv, 0);
-	xx = cvtdberr(dbi, "dbenv->close", xx, _debug);
+	xx = dbapi_err(rdb, "dbenv->close", xx, _debug);
     }
+    if (lockfd >= 0)
+	close(lockfd);
     return rc;
 }
 
-static int db3sync(dbiIndex dbi, unsigned int flags)
+void dbSetFSync(void *dbenv, int enable)
+{
+#ifdef HAVE_FDATASYNC
+    db_env_set_func_fsync(enable ? fdatasync : fsync_disable);
+#else
+    db_env_set_func_fsync(enable ? fsync : fsync_disable);
+#endif
+}
+
+int dbiSync(dbiIndex dbi, unsigned int flags)
 {
     DB * db = dbi->dbi_db;
     int rc = 0;
 
-    if (db != NULL) {
+    if (db != NULL && !dbi->dbi_no_dbsync) {
 	rc = db->sync(db, flags);
 	rc = cvtdberr(dbi, "db->sync", rc, _debug);
     }
     return rc;
 }
 
-static int db3cclose(dbiIndex dbi, DBC * dbcursor,
-		unsigned int flags)
+dbiCursor dbiCursorInit(dbiIndex dbi, unsigned int flags)
 {
-    int rc = -2;
+    dbiCursor dbc = NULL;
+    
+    if (dbi && dbi->dbi_db) {
+	DB * db = dbi->dbi_db;
+	DBC * cursor;
+	int cflags;
+	int rc = 0;
+	uint32_t eflags = db_envflags(db);
+	
+       /* DB_WRITECURSOR requires CDB and writable db */
+	if ((flags & DB_WRITECURSOR) &&
+	    (eflags & DB_INIT_CDB) && !(dbi->dbi_oflags & DB_RDONLY))
+	{
+	    cflags = DB_WRITECURSOR;
+	} else
+	    cflags = 0;
 
-    /* XXX db3copen error pathways come through here. */
-    if (dbcursor != NULL) {
-	rc = dbcursor->c_close(dbcursor);
-	rc = cvtdberr(dbi, "dbcursor->c_close", rc, _debug);
-    }
-    return rc;
-}
-
-static int db3copen(dbiIndex dbi, DB_TXN * txnid,
-		DBC ** dbcp, unsigned int dbiflags)
-{
-    DB * db = dbi->dbi_db;
-    DBC * dbcursor = NULL;
-    int flags;
-    int rc;
-
-   /* XXX DB_WRITECURSOR cannot be used with sunrpc dbenv. */
-    assert(db != NULL);
-    if ((dbiflags & DB_WRITECURSOR) &&
-	(dbi->dbi_eflags & DB_INIT_CDB) && !(dbi->dbi_oflags & DB_RDONLY))
-    {
-	flags = DB_WRITECURSOR;
-    } else
-	flags = 0;
-
-    rc = db->cursor(db, txnid, &dbcursor, flags);
-    rc = cvtdberr(dbi, "db->cursor", rc, _debug);
-
-    if (dbcp)
-	*dbcp = dbcursor;
-    else
-	(void) db3cclose(dbi, dbcursor, 0);
-
-    return rc;
-}
-
-static int db3cput(dbiIndex dbi, DBC * dbcursor, DBT * key, DBT * data,
-		unsigned int flags)
-{
-    DB * db = dbi->dbi_db;
-    int rc;
-
-    assert(db != NULL);
-    if (dbcursor == NULL) {
-	rc = db->put(db, dbi->dbi_txnid, key, data, 0);
-	rc = cvtdberr(dbi, "db->put", rc, _debug);
-    } else {
-	rc = dbcursor->c_put(dbcursor, key, data, DB_KEYLAST);
-	rc = cvtdberr(dbi, "dbcursor->c_put", rc, _debug);
-    }
-
-    return rc;
-}
-
-static int db3cdel(dbiIndex dbi, DBC * dbcursor, DBT * key, DBT * data,
-		unsigned int flags)
-{
-    DB * db = dbi->dbi_db;
-    int rc;
-
-    assert(db != NULL);
-    if (dbcursor == NULL) {
-	rc = db->del(db, dbi->dbi_txnid, key, flags);
-	rc = cvtdberr(dbi, "db->del", rc, _debug);
-    } else {
-	int _printit;
-
-	/* XXX TODO: insure that cursor is positioned with duplicates */
-	rc = dbcursor->c_get(dbcursor, key, data, DB_SET);
-	/* XXX DB_NOTFOUND can be returned */
-	_printit = (rc == DB_NOTFOUND ? 0 : _debug);
-	rc = cvtdberr(dbi, "dbcursor->c_get", rc, _printit);
+	/*
+	 * Check for stale locks which could block writes "forever".
+	 * XXX: Should we also do this on reads? Reads are less likely
+	 *      to get blocked so it seems excessive...
+	 * XXX: On DB_RUNRECOVER, we should abort everything. Now
+	 *      we'll just fail to open a cursor again and again and again.
+	 */
+	if (cflags & DB_WRITECURSOR) {
+	    DB_ENV *dbenv = db->get_env(db);
+	    rc = dbenv->failchk(dbenv, 0);
+	    rc = cvtdberr(dbi, "dbenv->failchk", rc, _debug);
+	}
 
 	if (rc == 0) {
-	    rc = dbcursor->c_del(dbcursor, flags);
-	    rc = cvtdberr(dbi, "dbcursor->c_del", rc, _debug);
+	    rc = db->cursor(db, NULL, &cursor, cflags);
+	    rc = cvtdberr(dbi, "db->cursor", rc, _debug);
+	}
+
+	if (rc == 0) {
+	    dbc = xcalloc(1, sizeof(*dbc));
+	    dbc->cursor = cursor;
+	    dbc->dbi = dbi;
 	}
     }
 
-    return rc;
+    return dbc;
 }
 
-static int db3cget(dbiIndex dbi, DBC * dbcursor, DBT * key, DBT * data,
-		unsigned int flags)
+dbiCursor dbiCursorFree(dbiCursor dbc)
 {
-    DB * db = dbi->dbi_db;
-    int _printit;
-    int rc;
-
-    assert(db != NULL);
-    if (dbcursor == NULL) {
-	/* XXX duplicates require cursors. */
-	rc = db->get(db, dbi->dbi_txnid, key, data, 0);
-	/* XXX DB_NOTFOUND can be returned */
-	_printit = (rc == DB_NOTFOUND ? 0 : _debug);
-	rc = cvtdberr(dbi, "db->get", rc, _printit);
-    } else {
-	/* XXX db3 does DB_FIRST on uninitialized cursor */
-	rc = dbcursor->c_get(dbcursor, key, data, flags);
-	/* XXX DB_NOTFOUND can be returned */
-	_printit = (rc == DB_NOTFOUND ? 0 : _debug);
-	rc = cvtdberr(dbi, "dbcursor->c_get", rc, _printit);
+    if (dbc) {
+	DBC * cursor = dbc->cursor;
+	int rc = cursor->c_close(cursor);
+	cvtdberr(dbc->dbi, "dbcursor->c_close", rc, _debug);
+	free(dbc);
     }
+    return NULL;
+}
 
+int dbiCursorPut(dbiCursor dbc, DBT * key, DBT * data, unsigned int flags)
+{
+    int rc = EINVAL;
+    int sane = (key->data != NULL && key->size > 0 &&
+		data->data != NULL && data->size > 0);
+
+    if (dbc && sane) {
+	DBC * cursor = dbc->cursor;
+	rpmdb rdb = dbc->dbi->dbi_rpmdb;
+	rpmswEnter(&rdb->db_putops, (ssize_t) 0);
+
+	rc = cursor->c_put(cursor, key, data, DB_KEYLAST);
+	rc = cvtdberr(dbc->dbi, "dbcursor->c_put", rc, _debug);
+
+	rpmswExit(&rdb->db_putops, (ssize_t) data->size);
+    }
     return rc;
 }
 
-static int db3ccount(dbiIndex dbi, DBC * dbcursor,
-		unsigned int * countp,
-		unsigned int flags)
+int dbiCursorGet(dbiCursor dbc, DBT * key, DBT * data, unsigned int flags)
+{
+    int rc = EINVAL;
+    int sane = ((flags == DB_NEXT) || (key->data != NULL && key->size > 0));
+
+    if (dbc && sane) {
+	DBC * cursor = dbc->cursor;
+	rpmdb rdb = dbc->dbi->dbi_rpmdb;
+	int _printit;
+	rpmswEnter(&rdb->db_getops, 0);
+
+	/* XXX db4 does DB_FIRST on uninitialized cursor */
+	rc = cursor->c_get(cursor, key, data, flags);
+	/* XXX DB_NOTFOUND can be returned */
+	_printit = (rc == DB_NOTFOUND ? 0 : _debug);
+	rc = cvtdberr(dbc->dbi, "dbcursor->c_get", rc, _printit);
+
+	rpmswExit(&rdb->db_getops, data->size);
+    }
+    return rc;
+}
+
+int dbiCursorDel(dbiCursor dbc, DBT * key, DBT * data, unsigned int flags)
+{
+    int rc = EINVAL;
+    int sane = (key->data != NULL && key->size > 0);
+
+    if (dbc && sane) {
+	DBC * cursor = dbc->cursor;
+	int _printit;
+	rpmdb rdb = dbc->dbi->dbi_rpmdb;
+	rpmswEnter(&rdb->db_delops, 0);
+
+	/* XXX TODO: insure that cursor is positioned with duplicates */
+	rc = cursor->c_get(cursor, key, data, DB_SET);
+	/* XXX DB_NOTFOUND can be returned */
+	_printit = (rc == DB_NOTFOUND ? 0 : _debug);
+	rc = cvtdberr(dbc->dbi, "dbcursor->c_get", rc, _printit);
+
+	if (rc == 0) {
+	    rc = cursor->c_del(cursor, flags);
+	    rc = cvtdberr(dbc->dbi, "dbcursor->c_del", rc, _debug);
+	}
+	rpmswExit(&rdb->db_delops, data->size);
+    }
+    return rc;
+}
+
+unsigned int dbiCursorCount(dbiCursor dbc)
 {
     db_recno_t count = 0;
-    int rc = 0;
-
-    flags = 0;
-    rc = dbcursor->c_count(dbcursor, &count, flags);
-    rc = cvtdberr(dbi, "dbcursor->c_count", rc, _debug);
-    if (rc) return rc;
-    if (countp) *countp = count;
-
-    return rc;
+    if (dbc) {
+	DBC * cursor = dbc->cursor;
+	int rc = cursor->c_count(cursor, &count, 0);
+	cvtdberr(dbc->dbi, "dbcursor->c_count", rc, _debug);
+    }
+    return count;
 }
 
-static int db3byteswapped(dbiIndex dbi)	
+dbiIndex dbiCursorIndex(dbiCursor dbc)
+{
+    return (dbc != NULL) ? dbc->dbi : NULL;
+}
+
+int dbiByteSwapped(dbiIndex dbi)
 {
     DB * db = dbi->dbi_db;
     int rc = 0;
+
+    if (dbi->dbi_byteswapped != -1)
+	return dbi->dbi_byteswapped;
 
     if (db != NULL) {
 	int isswapped = 0;
 	rc = db->get_byteswapped(db, &isswapped);
 	if (rc == 0)
-	    rc = isswapped;
+	    dbi->dbi_byteswapped = rc = isswapped;
     }
-
     return rc;
 }
 
-static int db3stat(dbiIndex dbi, unsigned int flags)
+dbiIndexType dbiType(dbiIndex dbi)
 {
-    DB * db = dbi->dbi_db;
-#if (DB_VERSION_MAJOR == 4 && DB_VERSION_MINOR >= 3)
-    DB_TXN * txnid = NULL;
-#endif
+    return dbi->dbi_type;
+}
+
+int dbiFlags(dbiIndex dbi)
+{
+    DB *db = dbi->dbi_db;
+    int flags = DBI_NONE;
+    uint32_t oflags = 0;
+
+    if (db && db->get_open_flags(db, &oflags) == 0) {
+	if (oflags & DB_CREATE)
+	    flags |= DBI_CREATED;
+	if (oflags & DB_RDONLY)
+	    flags |= DBI_RDONLY;
+    }
+    return flags;
+}
+
+const char * dbiName(dbiIndex dbi)
+{
+    return dbi->dbi_file;
+}
+
+int dbiVerify(dbiIndex dbi, unsigned int flags)
+{
     int rc = 0;
 
-    assert(db != NULL);
-#if defined(DB_FAST_STAT)
-    if (flags)
-	flags = DB_FAST_STAT;
-    else
-#endif
-	flags = 0;
-    dbi->dbi_stats = _free(dbi->dbi_stats);
-#if (DB_VERSION_MAJOR == 4 && DB_VERSION_MINOR >= 3)
-    rc = db->stat(db, txnid, &dbi->dbi_stats, flags);
-#else
-    rc = db->stat(db, &dbi->dbi_stats, flags);
-#endif
-    rc = cvtdberr(dbi, "db->stat", rc, _debug);
+    if (dbi && dbi->dbi_db) {
+	DB * db = dbi->dbi_db;
+	
+	rc = db->verify(db, dbi->dbi_file, NULL, NULL, flags);
+	rc = cvtdberr(dbi, "db->verify", rc, _debug);
+
+	rpmlog(RPMLOG_DEBUG, "verified db index       %s\n", dbi->dbi_file);
+
+	/* db->verify() destroys the handle, make sure nobody accesses it */
+	dbi->dbi_db = NULL;
+    }
     return rc;
 }
 
-static int db3close(dbiIndex dbi, unsigned int flags)
+int dbiClose(dbiIndex dbi, unsigned int flags)
 {
-    rpmdb rpmdb = dbi->dbi_rpmdb;
-    const char * dbhome = rpmdbHome(rpmdb);
+    rpmdb rdb = dbi->dbi_rpmdb;
+    const char * dbhome = rpmdbHome(rdb);
     DB * db = dbi->dbi_db;
     int _printit;
-    int rc = 0, xx;
-
-    flags = 0;	/* XXX unused */
+    int rc = 0;
 
     if (db) {
-	rc = db->close(db, 0);
+	rc = db->close(db, flags);
 	/* XXX ignore not found error messages. */
 	_printit = (rc == ENOENT ? 0 : _debug);
 	rc = cvtdberr(dbi, "db->close", rc, _printit);
@@ -403,98 +520,85 @@ static int db3close(dbiIndex dbi, unsigned int flags)
 
 	rpmlog(RPMLOG_DEBUG, "closed   db index       %s/%s\n",
 		dbhome, dbi->dbi_file);
-
     }
 
-    if (rpmdb->db_dbenv != NULL && dbi->dbi_use_dbenv) {
-	if (rpmdb->db_opens == 1) {
-	    xx = db_fini(dbi, (dbhome ? dbhome : ""));
-	    rpmdb->db_dbenv = NULL;
-	}
-	rpmdb->db_opens--;
-    }
+    db_fini(rdb, dbhome ? dbhome : "");
 
-    if (dbi->dbi_verify_on_close && !dbi->dbi_temporary) {
-	DB_ENV * dbenv = NULL;
-
-	rc = db_env_create(&dbenv, 0);
-	rc = cvtdberr(dbi, "db_env_create", rc, _debug);
-	if (rc || dbenv == NULL) goto exit;
-
-	dbenv->set_errcall(dbenv, (void *) rpmdb->db_errcall);
-	dbenv->set_errfile(dbenv, rpmdb->db_errfile);
-	dbenv->set_errpfx(dbenv, rpmdb->db_errpfx);
-#if !(DB_VERSION_MAJOR == 4 && DB_VERSION_MINOR >= 3)
-	xx = dbenv->set_verbose(dbenv, DB_VERB_CHKPOINT,
-		(dbi->dbi_verbose & DB_VERB_CHKPOINT));
-#endif
-	xx = dbenv->set_verbose(dbenv, DB_VERB_DEADLOCK,
-		(dbi->dbi_verbose & DB_VERB_DEADLOCK));
-	xx = dbenv->set_verbose(dbenv, DB_VERB_RECOVERY,
-		(dbi->dbi_verbose & DB_VERB_RECOVERY));
-	xx = dbenv->set_verbose(dbenv, DB_VERB_WAITSFOR,
-		(dbi->dbi_verbose & DB_VERB_WAITSFOR));
-
-	if (dbi->dbi_tmpdir) {
-	    /* XXX this isn't correct wrt chroot in+out */
-	    const char * root = rpmdb->db_chrootDone ? NULL : rpmdb->db_root;
-	    char * tmpdir = rpmGenPath(root, dbi->dbi_tmpdir, NULL);
-	    rc = dbenv->set_tmp_dir(dbenv, tmpdir);
-	    rc = cvtdberr(dbi, "dbenv->set_tmp_dir", rc, _debug);
-	    tmpdir = _free(tmpdir);
-	    if (rc) goto exit;
-	}
-	    
-	rc = (dbenv->open)(dbenv, dbhome,
-            DB_CREATE | DB_INIT_MPOOL | DB_PRIVATE | DB_USE_ENVIRON, 0);
-	rc = cvtdberr(dbi, "dbenv->open", rc, _debug);
-	if (rc) goto exit;
-
-	rc = db_create(&db, dbenv, 0);
-	rc = cvtdberr(dbi, "db_create", rc, _debug);
-
-	if (db != NULL) {
-		char * dbf = rpmGetPath(dbhome, "/", dbi->dbi_file, NULL);
-
-		rc = db->verify(db, dbf, NULL, NULL, flags);
-		rc = cvtdberr(dbi, "db->verify", rc, _debug);
-
-		rpmlog(RPMLOG_DEBUG, "verified db index       %s/%s\n",
-			(dbhome ? dbhome : ""), dbi->dbi_file);
-
-	        /*
-		 * The DB handle may not be accessed again after
-		 * DB->verify is called, regardless of its return.
-		 */
-		db = NULL;
-		dbf = _free(dbf);
-	}
-	xx = dbenv->close(dbenv, 0);
-	xx = cvtdberr(dbi, "dbenv->close", xx, _debug);
-	if (rc == 0 && xx) rc = xx;
-    }
-
-exit:
     dbi->dbi_db = NULL;
 
-    dbi = db3Free(dbi);
+    dbi = dbiFree(dbi);
 
     return rc;
 }
 
-static int db3open(rpmdb rpmdb, rpmTag rpmtag, dbiIndex * dbip)
+/*
+ * Lock a file using fcntl(2). Traditionally this is Packages,
+ * the file used to store metadata of installed header(s),
+ * as Packages is always opened, and should be opened first,
+ * for any rpmdb access.
+ *
+ * If no DBENV is used, then access is protected with a
+ * shared/exclusive locking scheme, as always.
+ *
+ * With a DBENV, the fcntl(2) lock is necessary only to keep
+ * the riff-raff from playing where they don't belong, as
+ * the DBENV should provide it's own locking scheme. So try to
+ * acquire a lock, but permit failures, as some other
+ * DBENV player may already have acquired the lock.
+ *
+ * With NPTL posix mutexes, revert to fcntl lock on non-functioning
+ * glibc/kernel combinations.
+ */
+static int dbiFlock(dbiIndex dbi, int mode)
 {
-    extern const struct _dbiVec db3vec;
-    const char *dbhome = rpmdbHome(rpmdb);
+    int fdno = -1;
+    int rc = 0;
+    DB * db = dbi->dbi_db;
+
+    if (!(db->fd(db, &fdno) == 0 && fdno >= 0)) {
+	rc = 1;
+    } else {
+	const char *dbhome = rpmdbHome(dbi->dbi_rpmdb);
+	struct flock l;
+	memset(&l, 0, sizeof(l));
+	l.l_whence = 0;
+	l.l_start = 0;
+	l.l_len = 0;
+	l.l_type = (mode & O_ACCMODE) == O_RDONLY
+		    ? F_RDLCK : F_WRLCK;
+	l.l_pid = 0;
+
+	rc = fcntl(fdno, F_SETLK, (void *) &l);
+	if (rc) {
+	    uint32_t eflags = db_envflags(db);
+	    /* Warning iff using non-private CDB locking. */
+	    rc = (((eflags & DB_INIT_CDB) && !(eflags & DB_PRIVATE)) ? 0 : 1);
+	    rpmlog( (rc ? RPMLOG_ERR : RPMLOG_WARNING),
+		    _("cannot get %s lock on %s/%s\n"),
+		    ((mode & O_ACCMODE) == O_RDONLY)
+			    ? _("shared") : _("exclusive"),
+		    dbhome, dbi->dbi_file);
+	} else {
+	    rpmlog(RPMLOG_DEBUG,
+		    "locked   db index       %s/%s\n",
+		    dbhome, dbi->dbi_file);
+	}
+    }
+    return rc;
+}
+
+int dbiOpen(rpmdb rdb, rpmDbiTagVal rpmtag, dbiIndex * dbip, int flags)
+{
+    const char *dbhome = rpmdbHome(rdb);
     dbiIndex dbi = NULL;
     int rc = 0;
-    int xx;
+    int retry_open;
+    int verifyonly = (flags & RPMDB_FLAG_VERIFYONLY);
 
     DB * db = NULL;
-    DB_ENV * dbenv = NULL;
-    DB_TXN * txnid = NULL;
+    DBTYPE dbtype = DB_UNKNOWN;
     uint32_t oflags;
-    int _printit;
+    static int _lockdbfd = 0;
 
     if (dbip)
 	*dbip = NULL;
@@ -502,359 +606,87 @@ static int db3open(rpmdb rpmdb, rpmTag rpmtag, dbiIndex * dbip)
     /*
      * Parse db configuration parameters.
      */
-    if ((dbi = db3New(rpmdb, rpmtag)) == NULL)
+    if ((dbi = dbiNew(rdb, rpmtag)) == NULL)
 	return 1;
 
-    oflags = (dbi->dbi_oeflags | dbi->dbi_oflags);
-    oflags &= ~DB_TRUNCATE;	/* XXX this is dangerous */
-
-#if 0	/* XXX rpmdb: illegal flag combination specified to DB->open */
-    if ( dbi->dbi_mode & O_EXCL) oflags |= DB_EXCL;
-#endif
+    oflags = dbi->dbi_oflags;
 
 #ifdef __KLIBC__
     oflags |= DB_PRIVATE;
-    dbi->dbi_eflags |= DB_PRIVATE;
-    dbi->dbi_oeflags |= DB_PRIVATE;
+    dbi->dbi_oflags |= DB_PRIVATE;
+//    dbi->dbi_oeflags |= DB_PRIVATE;
 #endif
 
     /*
      * Map open mode flags onto configured database/environment flags.
      */
-    if (dbi->dbi_temporary) {
-	oflags |= DB_CREATE;
-	dbi->dbi_oeflags |= DB_CREATE;
-	oflags &= ~DB_RDONLY;
-	dbi->dbi_oflags &= ~DB_RDONLY;
-    } else {
-	if ((dbi->dbi_mode & O_ACCMODE) == O_RDONLY) oflags |= DB_RDONLY;
-	if (dbi->dbi_mode & O_CREAT) {
-	    oflags |= DB_CREATE;
-	    dbi->dbi_oeflags |= DB_CREATE;
-	}
-#ifdef	DANGEROUS
-	if ( dbi->dbi_mode & O_TRUNC) oflags |= DB_TRUNCATE;
-#endif
-    }
+    if ((rdb->db_mode & O_ACCMODE) == O_RDONLY) oflags |= DB_RDONLY;
 
-    /*
-     * Avoid incompatible DB_CREATE/DB_RDONLY flags on DBENV->open.
-     */
-    if (dbi->dbi_use_dbenv) {
+    rc = db_init(rdb, dbhome);
 
-	if (access(dbhome, W_OK) == -1) {
+    retry_open = (rc == 0) ? 2 : 0;
 
-	    /* dbhome is unwritable, don't attempt DB_CREATE on DB->open ... */
-	    oflags &= ~DB_CREATE;
-
-	    /* ... but DBENV->open might still need DB_CREATE ... */
-	    if (dbi->dbi_eflags & DB_PRIVATE) {
-		dbi->dbi_eflags &= ~DB_JOINENV;
-	    } else {
-		dbi->dbi_eflags |= DB_JOINENV;
-		dbi->dbi_oeflags &= ~DB_CREATE;
-		dbi->dbi_oeflags &= ~DB_THREAD;
-		/* ... but, unless DB_PRIVATE is used, skip DBENV. */
-		dbi->dbi_use_dbenv = 0;
-	    }
-
-	    /* ... DB_RDONLY maps dbhome perms across files ...  */
-	    if (dbi->dbi_temporary) {
-		oflags |= DB_CREATE;
-		dbi->dbi_oeflags |= DB_CREATE;
-		oflags &= ~DB_RDONLY;
-		dbi->dbi_oflags &= ~DB_RDONLY;
-	    } else {
-		oflags |= DB_RDONLY;
-		/* ... and DB_WRITECURSOR won't be needed ...  */
-		dbi->dbi_oflags |= DB_RDONLY;
-	    }
-
-	} else {	/* dbhome is writable, check for persistent dbenv. */
-	    char * dbf = rpmGetPath(dbhome, "/__db.001", NULL);
-
-	    if (access(dbf, F_OK) == -1) {
-		/* ... non-existent (or unwritable) DBENV, will create ... */
-		dbi->dbi_oeflags |= DB_CREATE;
-		dbi->dbi_eflags &= ~DB_JOINENV;
-	    } else {
-		/* ... pre-existent (or bogus) DBENV, will join ... */
-		if (dbi->dbi_eflags & DB_PRIVATE) {
-		    dbi->dbi_eflags &= ~DB_JOINENV;
-		} else {
-		    dbi->dbi_eflags |= DB_JOINENV;
-		    dbi->dbi_oeflags &= ~DB_CREATE;
-		    dbi->dbi_oeflags &= ~DB_THREAD;
-		}
-	    }
-	    dbf = _free(dbf);
-	}
-    }
-
-    /*
-     * Avoid incompatible DB_CREATE/DB_RDONLY flags on DB->open.
-     */
-    if ((oflags & DB_CREATE) && (oflags & DB_RDONLY)) {
-	/* dbhome is writable, and DB->open flags may conflict. */
-	char * dbf = rpmGetPath(dbhome, "/", dbi->dbi_file, NULL);
-
-	if (access(dbf, F_OK) == -1) {
-	    /* File does not exist, DB->open might create ... */
-	    oflags &= ~DB_RDONLY;
-	} else {
-	    /* File exists, DB->open need not create ... */
-	    oflags &= ~DB_CREATE;
-	}
-
-	/* Only writers need DB_WRITECURSOR ... */
-	if (!(oflags & DB_RDONLY) && access(dbf, W_OK) == 0) {
-	    dbi->dbi_oflags &= ~DB_RDONLY;
-	} else {
-	    dbi->dbi_oflags |= DB_RDONLY;
-	}
-	dbf = _free(dbf);
-    }
-
-    /*
-     * Turn off verify-on-close if opening read-only.
-     */
-    if (oflags & DB_RDONLY)
-	dbi->dbi_verify_on_close = 0;
-
-    if (dbi->dbi_use_dbenv) {
-	if (rpmdb->db_dbenv == NULL) {
-	    rc = db_init(dbi, dbhome, &dbenv);
-	    if (rc == 0) {
-		rpmdb->db_dbenv = dbenv;
-		rpmdb->db_opens = 1;
-	    }
-	} else {
-	    dbenv = rpmdb->db_dbenv;
-	    rpmdb->db_opens++;
-	}
-    }
-
-    {	char *dbiflags = prDbiOpenFlags(oflags, 0);
-    	rpmlog(RPMLOG_DEBUG, "opening  db index       %s/%s %s mode=0x%x\n",
-		dbhome, dbi->dbi_file, dbiflags, dbi->dbi_mode);
-	free(dbiflags);
-    }
-
-    if (rc == 0) {
-	static int _lockdbfd = 0;
-
-	rc = db_create(&db, dbenv, dbi->dbi_cflags);
+    while (retry_open) {
+	rc = db_create(&db, rdb->db_dbenv, 0);
 	rc = cvtdberr(dbi, "db_create", rc, _debug);
+
+	/* For verify we only want the handle, not an open db */
+	if (verifyonly)
+	    break;
+
 	if (rc == 0 && db != NULL) {
-	    if (rc == 0 && !dbi->dbi_use_dbenv) {
-		rc = db->set_alloc(db,
-			rpmdb->db_malloc, rpmdb->db_realloc, rpmdb->db_free);
-		rc = cvtdberr(dbi, "db->set_alloc", rc, _debug);
-	    }
+	    int _printit;
+	    char *dbfs = prDbiOpenFlags(oflags, 0);
+	    rpmlog(RPMLOG_DEBUG, "opening  db index       %s/%s %s mode=0x%x\n",
+		    dbhome, dbi->dbi_file, dbfs, rdb->db_mode);
+	    free(dbfs);
 
-	    if (rc == 0 && !dbi->dbi_use_dbenv && dbi->dbi_cachesize) {
-		rc = db->set_cachesize(db, 0, dbi->dbi_cachesize, 0);
-		rc = cvtdberr(dbi, "db->set_cachesize", rc, _debug);
-	    }
+	    rc = (db->open)(db, NULL, dbi->dbi_file, NULL,
+			    dbtype, oflags, rdb->db_perms);
 
-	    if (rc == 0 && dbi->dbi_lorder) {
-		rc = db->set_lorder(db, dbi->dbi_lorder);
-		rc = cvtdberr(dbi, "db->set_lorder", rc, _debug);
-	    }
-	    if (rc == 0 && dbi->dbi_pagesize) {
-		rc = db->set_pagesize(db, dbi->dbi_pagesize);
-		rc = cvtdberr(dbi, "db->set_pagesize", rc, _debug);
-	    }
-	    if (rc == 0 && oflags & DB_CREATE) {
-		switch(dbi->dbi_type) {
-		default:
-		case DB_HASH:
-		    if (dbi->dbi_h_ffactor) {
-			rc = db->set_h_ffactor(db, dbi->dbi_h_ffactor);
-			rc = cvtdberr(dbi, "db->set_h_ffactor", rc, _debug);
-			if (rc) break;
-		    }
-		    if (dbi->dbi_h_nelem) {
-			rc = db->set_h_nelem(db, dbi->dbi_h_nelem);
-			rc = cvtdberr(dbi, "db->set_h_nelem", rc, _debug);
-			if (rc) break;
-		    }
-		    if (dbi->dbi_h_flags) {
-			rc = db->set_flags(db, dbi->dbi_h_flags);
-			rc = cvtdberr(dbi, "db->set_h_flags", rc, _debug);
-			if (rc) break;
-		    }
-		    if (dbi->dbi_h_hash_fcn) {
-			rc = db->set_h_hash(db, dbi->dbi_h_hash_fcn);
-			rc = cvtdberr(dbi, "db->set_h_hash", rc, _debug);
-			if (rc) break;
-		    }
-		    if (dbi->dbi_h_dup_compare_fcn) {
-			rc = db->set_dup_compare(db, dbi->dbi_h_dup_compare_fcn);
-			rc = cvtdberr(dbi, "db->set_dup_compare", rc, _debug);
-			if (rc) break;
-		    }
-		    break;
-		case DB_BTREE:
-		    if (dbi->dbi_bt_flags) {
-			rc = db->set_flags(db, dbi->dbi_bt_flags);
-			rc = cvtdberr(dbi, "db->set_bt_flags", rc, _debug);
-			if (rc) break;
-		    }
-		    if (dbi->dbi_bt_minkey) {
-			rc = db->set_bt_minkey(db, dbi->dbi_bt_minkey);
-			rc = cvtdberr(dbi, "db->set_bt_minkey", rc, _debug);
-			if (rc) break;
-		    }
-		    if (dbi->dbi_bt_compare_fcn) {
-			rc = db->set_bt_compare(db, dbi->dbi_bt_compare_fcn);
-			rc = cvtdberr(dbi, "db->set_bt_compare", rc, _debug);
-			if (rc) break;
-		    }
-		    if (dbi->dbi_bt_dup_compare_fcn) {
-			rc = db->set_dup_compare(db, dbi->dbi_bt_dup_compare_fcn);
-			rc = cvtdberr(dbi, "db->set_dup_compare", rc, _debug);
-			if (rc) break;
-		    }
-		    if (dbi->dbi_bt_prefix_fcn) {
-			rc = db->set_bt_prefix(db, dbi->dbi_bt_prefix_fcn);
-			rc = cvtdberr(dbi, "db->set_bt_prefix", rc, _debug);
-			if (rc) break;
-		    }
-		    break;
-		case DB_RECNO:
-		    if (dbi->dbi_re_delim) {
-			rc = db->set_re_delim(db, dbi->dbi_re_delim);
-			rc = cvtdberr(dbi, "db->set_re_selim", rc, _debug);
-			if (rc) break;
-		    }
-		    if (dbi->dbi_re_len) {
-			rc = db->set_re_len(db, dbi->dbi_re_len);
-			rc = cvtdberr(dbi, "db->set_re_len", rc, _debug);
-			if (rc) break;
-		    }
-		    if (dbi->dbi_re_pad) {
-			rc = db->set_re_pad(db, dbi->dbi_re_pad);
-			rc = cvtdberr(dbi, "db->set_re_pad", rc, _debug);
-			if (rc) break;
-		    }
-		    if (dbi->dbi_re_source) {
-			rc = db->set_re_source(db, dbi->dbi_re_source);
-			rc = cvtdberr(dbi, "db->set_re_source", rc, _debug);
-			if (rc) break;
-		    }
-		    break;
-		case DB_QUEUE:
-		    if (dbi->dbi_q_extentsize) {
-			rc = db->set_q_extentsize(db, dbi->dbi_q_extentsize);
-			rc = cvtdberr(dbi, "db->set_q_extentsize", rc, _debug);
-			if (rc) break;
-		    }
-		    break;
-		}
-	    }
-
-	    if (rc == 0) {
-		const char *dbpath = dbi->dbi_temporary ? NULL : dbi->dbi_file;
-		char *fullpath = NULL;
-		/* When not in environment, absolute path is needed */
-		if (!dbi->dbi_use_dbenv && !dbi->dbi_temporary) {
-		    fullpath = rpmGetPath(dbhome, "/", dbi->dbi_file, NULL);
-		    dbpath = fullpath;
-		}
-		rc = (db->open)(db, txnid, dbpath, NULL,
-		    dbi->dbi_type, oflags, dbi->dbi_perms);
-
-		if (rc == 0 && dbi->dbi_type == DB_UNKNOWN) {
-		    DBTYPE dbi_type = DB_UNKNOWN;
-		    xx = db->get_type(db, &dbi_type);
-		    if (xx == 0)
-			dbi->dbi_type = dbi_type;
-		}
-		free(fullpath);
+	    /* Attempt to create if missing, discarding DB_RDONLY (!) */
+	    if (rc == ENOENT) {
+		oflags |= DB_CREATE;
+		oflags &= ~DB_RDONLY;
+		dbtype = (dbiType(dbi) == DBI_PRIMARY) ?  DB_HASH : DB_BTREE;
+		retry_open--;
+	    } else {
+		retry_open = 0;
 	    }
 
 	    /* XXX return rc == errno without printing */
 	    _printit = (rc > 0 ? 0 : _debug);
-	    xx = cvtdberr(dbi, "db->open", rc, _printit);
+	    rc = cvtdberr(dbi, "db->open", rc, _printit);
 
-	    dbi->dbi_txnid = NULL;
-
-	    /*
-	     * Lock a file using fcntl(2). Traditionally this is Packages,
-	     * the file used to store metadata of installed header(s),
-	     * as Packages is always opened, and should be opened first,
-	     * for any rpmdb access.
-	     *
-	     * If no DBENV is used, then access is protected with a
-	     * shared/exclusive locking scheme, as always.
-	     *
-	     * With a DBENV, the fcntl(2) lock is necessary only to keep
-	     * the riff-raff from playing where they don't belong, as
-	     * the DBENV should provide it's own locking scheme. So try to
-	     * acquire a lock, but permit failures, as some other
-	     * DBENV player may already have acquired the lock.
-	     *
-	     * With NPTL posix mutexes, revert to fcntl lock on non-functioning
-	     * glibc/kernel combinations.
-	     */
-	    if (rc == 0 && dbi->dbi_lockdbfd &&
-		(!dbi->dbi_use_dbenv || _lockdbfd++ == 0))
-	    {
-		int fdno = -1;
-
-		if (!(db->fd(db, &fdno) == 0 && fdno >= 0)) {
+	    /* Validate the index type is something we can support */
+	    if ((rc == 0) && (dbtype == DB_UNKNOWN)) {
+		db->get_type(db, &dbtype);
+		if (dbtype != DB_HASH && dbtype != DB_BTREE) {
+		    rpmlog(RPMLOG_ERR, _("invalid index type %x on %s/%s\n"),
+				dbtype, dbhome, dbi->dbi_file);
 		    rc = 1;
-		} else {
-		    struct flock l;
-		    memset(&l, 0, sizeof(l));
-		    l.l_whence = 0;
-		    l.l_start = 0;
-		    l.l_len = 0;
-		    l.l_type = (dbi->dbi_mode & O_ACCMODE) == O_RDONLY
-				? F_RDLCK : F_WRLCK;
-		    l.l_pid = 0;
-
-		    rc = fcntl(fdno, F_SETLK, (void *) &l);
-		    if (rc) {
-			/* Warning iff using non-private CDB locking. */
-			rc = ((dbi->dbi_use_dbenv &&
-				(dbi->dbi_eflags & DB_INIT_CDB) &&
-				!(dbi->dbi_eflags & DB_PRIVATE))
-			    ? 0 : 1);
-			rpmlog( (rc ? RPMLOG_ERR : RPMLOG_WARNING),
-				_("cannot get %s lock on %s/%s\n"),
-				((dbi->dbi_mode & O_ACCMODE) == O_RDONLY)
-					? _("shared") : _("exclusive"),
-				dbhome, dbi->dbi_file);
-		    } else {
-			rpmlog(RPMLOG_DEBUG,
-				"locked   db index       %s/%s\n",
-				dbhome, dbi->dbi_file);
-		    }
 		}
+	    }
+
+	    if (rc != 0) {
+		db->close(db, 0);
+		db = NULL;
 	    }
 	}
     }
 
     dbi->dbi_db = db;
+    dbi->dbi_oflags = oflags;
+
+    if (!verifyonly && rc == 0 && dbi->dbi_lockdbfd && _lockdbfd++ == 0) {
+	rc = dbiFlock(dbi, rdb->db_mode);
+    }
 
     if (rc == 0 && dbi->dbi_db != NULL && dbip != NULL) {
-	dbi->dbi_vec = &db3vec;
 	*dbip = dbi;
     } else {
-	dbi->dbi_verify_on_close = 0;
-	(void) db3close(dbi, 0);
+	(void) dbiClose(dbi, 0);
     }
 
     return rc;
 }
-
-/** \ingroup db3
- */
-RPM_GNUC_INTERNAL
-const struct _dbiVec db3vec = {
-    DB_VERSION_MAJOR, DB_VERSION_MINOR, DB_VERSION_PATCH,
-    db3open, db3close, db3sync, db3copen, db3cclose, db3cdel,
-    db3cget, db3cput, db3ccount, db3byteswapped, db3stat
-};

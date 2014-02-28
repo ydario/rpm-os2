@@ -1,6 +1,7 @@
 
 #include "rpmsystem-py.h"
 #include <rpm/rpmstring.h>
+#include "header-py.h"	/* XXX for utf8FromPyObject() only */
 #include "rpmfd-py.h"
 
 struct rpmfdObject_s {
@@ -22,14 +23,14 @@ int rpmfdFromPyObject(PyObject *obj, rpmfdObject **fdop)
 	Py_INCREF(obj);
 	fdo = (rpmfdObject *) obj;
     } else {
-	fdo = (rpmfdObject *) PyObject_Call((PyObject *)&rpmfd_Type,
-			    		    Py_BuildValue("(O)", obj), NULL);
+	fdo = (rpmfdObject *) PyObject_CallFunctionObjArgs((PyObject *)&rpmfd_Type,
+                                                           obj, NULL);
     }
     if (fdo == NULL) return 0;
 
     if (Ferror(fdo->fd)) {
-	Py_DECREF(fdo);
 	PyErr_SetString(PyExc_IOError, Fstrerror(fdo->fd));
+	Py_DECREF(fdo);
 	return 0;
     }
     *fdop = fdo;
@@ -42,46 +43,59 @@ static PyObject *err_closed(void)
     return NULL;
 }
 
-static PyObject *rpmfd_new(PyTypeObject *subtype, 
-			   PyObject *args, PyObject *kwds)
+static FD_t openPath(const char *path, const char *mode, const char *flags)
+{
+    FD_t fd;
+    char *m = rstrscat(NULL, mode, ".", flags, NULL);
+    Py_BEGIN_ALLOW_THREADS
+    fd = Fopen(path, m);
+    Py_END_ALLOW_THREADS;
+    free(m);
+    return fd;
+}
+
+static int rpmfd_init(rpmfdObject *s, PyObject *args, PyObject *kwds)
 {
     char *kwlist[] = { "obj", "mode", "flags", NULL };
-    char *mode = "r";
-    char *flags = "ufdio";
+    const char *mode = "r";
+    const char *flags = "ufdio";
     PyObject *fo = NULL;
-    rpmfdObject *s = NULL;
     FD_t fd = NULL;
     int fdno;
 
     if (!PyArg_ParseTupleAndKeywords(args, kwds, "O|ss", kwlist, 
 				     &fo, &mode, &flags))
-	return NULL;
+	return -1;
 
     if (PyBytes_Check(fo)) {
-	char *m = rstrscat(NULL, mode, ".", flags, NULL);
-	Py_BEGIN_ALLOW_THREADS 
-	fd = Fopen(PyBytes_AsString(fo), m);
-	Py_END_ALLOW_THREADS 
-	free(m);
+	fd = openPath(PyBytes_AsString(fo), mode, flags);
+    } else if (PyUnicode_Check(fo)) {
+	PyObject *enc = NULL;
+	int rc;
+#if PY_MAJOR_VERSION >= 3
+	rc = PyUnicode_FSConverter(fo, &enc);
+#else
+	rc = utf8FromPyObject(fo, &enc);
+#endif
+	if (rc) {
+	    fd = openPath(PyBytes_AsString(enc), mode, flags);
+	    Py_DECREF(enc);
+	}
     } else if ((fdno = PyObject_AsFileDescriptor(fo)) >= 0) {
 	fd = fdDup(fdno);
     } else {
 	PyErr_SetString(PyExc_TypeError, "path or file object expected");
-	return NULL;
     }
 
-    if (Ferror(fd)) {
+    if (fd != NULL) {
+	/* TODO: remember our filename, mode & flags */
+	Fclose(s->fd); /* in case __init__ was called again */
+	s->fd = fd;
+    } else {
 	PyErr_SetString(PyExc_IOError, Fstrerror(fd));
-	return NULL;
     }
 
-    if ((s = (rpmfdObject *)subtype->tp_alloc(subtype, 0)) == NULL) {
-	Fclose(fd);
-	return NULL;
-    }
-    /* TODO: remember our filename, mode & flags */
-    s->fd = fd;
-    return (PyObject*) s;
+    return (fd == NULL) ? -1 : 0;
 }
 
 static PyObject *do_close(rpmfdObject *s)
@@ -173,7 +187,7 @@ static PyObject *rpmfd_seek(rpmfdObject *s, PyObject *args, PyObject *kwds)
     Py_BEGIN_ALLOW_THREADS
     rc = Fseek(s->fd, offset, whence);
     Py_END_ALLOW_THREADS
-    if (Ferror(s->fd)) {
+    if (rc < 0 || Ferror(s->fd)) {
 	PyErr_SetString(PyExc_IOError, Fstrerror(s->fd));
 	return NULL;
     }
@@ -193,36 +207,41 @@ static PyObject *rpmfd_tell(rpmfdObject *s)
 static PyObject *rpmfd_read(rpmfdObject *s, PyObject *args, PyObject *kwds)
 {
     char *kwlist[] = { "size", NULL };
-    char *buf = NULL;
-    ssize_t reqsize = -1;
-    ssize_t bufsize = 0;
-    ssize_t read = 0;
+    char buf[BUFSIZ];
+    ssize_t chunksize = sizeof(buf);
+    ssize_t left = -1;
+    ssize_t nb = 0;
     PyObject *res = NULL;
     
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "|l", kwlist, &reqsize))
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "|l", kwlist, &left))
 	return NULL;
 
     if (s->fd == NULL) return err_closed();
 
-    /* XXX simple, stupid for now ... and broken for anything large */
-    bufsize = (reqsize < 0) ? fdSize(s->fd) : reqsize;
-    if ((buf = malloc(bufsize+1)) == NULL) {
-	return PyErr_NoMemory();
-    }
-    
-    Py_BEGIN_ALLOW_THREADS 
-    read = Fread(buf, 1, bufsize, s->fd);
-    Py_END_ALLOW_THREADS 
+    /* ConcatAndDel() doesn't work on NULL string, meh */
+    res = PyBytes_FromStringAndSize(NULL, 0);
+    do {
+	if (left >= 0 && left < chunksize)
+	    chunksize = left;
+
+	Py_BEGIN_ALLOW_THREADS 
+	nb = Fread(buf, 1, chunksize, s->fd);
+	Py_END_ALLOW_THREADS 
+
+	if (nb > 0) {
+	    PyObject *tmp = PyBytes_FromStringAndSize(buf, nb);
+	    PyBytes_ConcatAndDel(&res, tmp);
+	    left -= nb;
+	}
+    } while (nb > 0);
 
     if (Ferror(s->fd)) {
 	PyErr_SetString(PyExc_IOError, Fstrerror(s->fd));
-	goto exit;
+	Py_XDECREF(res);
+	return NULL;
+    } else {
+	return res;
     }
-    res = PyBytes_FromStringAndSize(buf, read);
-
-exit:
-    free(buf);
-    return res;
 }
 
 static PyObject *rpmfd_write(rpmfdObject *s, PyObject *args, PyObject *kwds)
@@ -277,8 +296,15 @@ static PyObject *rpmfd_get_closed(rpmfdObject *s)
     return PyBool_FromLong((s->fd == NULL));
 }
 
+static PyObject *rpmfd_get_name(rpmfdObject *s)
+{
+    /* XXX: rpm returns non-paths with [mumble], python files use <mumble> */
+    return Py_BuildValue("s", Fdescr(s->fd));
+}
+
 static PyGetSetDef rpmfd_getseters[] = {
     { "closed", (getter)rpmfd_get_closed, NULL, NULL },
+    { "name", (getter)rpmfd_get_name, NULL, NULL },
     { NULL },
 };
 
@@ -319,9 +345,9 @@ PyTypeObject rpmfd_Type = {
 	0,				/* tp_descr_get */
 	0,				/* tp_descr_set */
 	0,				/* tp_dictoffset */
-	(initproc)0,			/* tp_init */
+	(initproc)rpmfd_init,		/* tp_init */
 	(allocfunc)0,			/* tp_alloc */
-	(newfunc) rpmfd_new,		/* tp_new */
+	PyType_GenericNew,		/* tp_new */
 	(freefunc)0,			/* tp_free */
 	0,				/* tp_is_gc */
 };

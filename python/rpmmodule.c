@@ -5,6 +5,7 @@
 #include <rpm/rpmdb.h>
 #include <rpm/rpmsq.h>
 #include <rpm/rpmlog.h>
+#include <rpm/rpmmacro.h>
 
 #include "header-py.h"
 #include "rpmds-py.h"
@@ -12,13 +13,12 @@
 #include "rpmfi-py.h"
 #include "rpmkeyring-py.h"
 #include "rpmmi-py.h"
+#include "rpmii-py.h"
 #include "rpmps-py.h"
 #include "rpmmacro-py.h"
 #include "rpmtd-py.h"
 #include "rpmte-py.h"
 #include "rpmts-py.h"
-
-#include "debug.h"
 
 /** \ingroup python
  * \name Module: rpm
@@ -28,7 +28,7 @@ PyObject * pyrpmError;
 
 static PyObject * archScore(PyObject * self, PyObject * arg)
 {
-    char * arch;
+    const char * arch;
 
     if (!PyArg_Parse(arg, "s", &arch))
 	return NULL;
@@ -115,6 +115,22 @@ static PyObject * doLog(PyObject * self, PyObject * args, PyObject *kwds)
     Py_RETURN_NONE;
 }
 
+static PyObject * reloadConfig(PyObject * self, PyObject * args, PyObject *kwds)
+{
+    const char * target = NULL;
+    char * kwlist[] = { "target", NULL };
+    int rc;
+    
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "|s", kwlist, &target))
+        return NULL;
+
+    rpmFreeMacros(NULL);
+    rpmFreeRpmrc();
+    rc = rpmReadConfigFiles(NULL, target) ;
+
+    return PyBool_FromLong(rc == 0);
+}
+
 static PyMethodDef rpmModuleMethods[] = {
     { "addMacro", (PyCFunction) rpmmacro_AddMacro, METH_VARARGS|METH_KEYWORDS,
 	NULL },
@@ -149,6 +165,8 @@ static PyMethodDef rpmModuleMethods[] = {
 	NULL },
     { "setStats", (PyCFunction) setStats, METH_O,
 	NULL },
+    { "reloadConfig", (PyCFunction) reloadConfig, METH_VARARGS|METH_KEYWORDS,
+	NULL },
 
     { NULL }
 } ;
@@ -173,7 +191,7 @@ static void addRpmTags(PyObject *module)
     rpmtd names = rpmtdNew();
     rpmTagGetNames(names, 1);
     const char *tagname, *shortname;
-    rpmTag tagval;
+    rpmTagVal tagval;
 
     while ((tagname = rpmtdNextString(names))) {
 	shortname = tagname + strlen("RPMTAG_");
@@ -202,6 +220,7 @@ static int prepareInitModule(void)
     if (PyType_Ready(&rpmfi_Type) < 0) return 0;
     if (PyType_Ready(&rpmKeyring_Type) < 0) return 0;
     if (PyType_Ready(&rpmmi_Type) < 0) return 0;
+    if (PyType_Ready(&rpmii_Type) < 0) return 0;
     if (PyType_Ready(&rpmProblem_Type) < 0) return 0;
     if (PyType_Ready(&rpmPubkey_Type) < 0) return 0;
 #if 0
@@ -301,6 +320,9 @@ static int initModule(PyObject *m)
     Py_INCREF(&rpmmi_Type);
     PyModule_AddObject(m, "mi", (PyObject *) &rpmmi_Type);
 
+    Py_INCREF(&rpmii_Type);
+    PyModule_AddObject(m, "ii", (PyObject *) &rpmii_Type);
+
     Py_INCREF(&rpmProblem_Type);
     PyModule_AddObject(m, "prob", (PyObject *) &rpmProblem_Type);
 
@@ -345,8 +367,6 @@ static int initModule(PyObject *m)
     REGISTER_ENUM(RPMFILE_GHOST);
     REGISTER_ENUM(RPMFILE_LICENSE);
     REGISTER_ENUM(RPMFILE_README);
-    REGISTER_ENUM(RPMFILE_EXCLUDE);
-    REGISTER_ENUM(RPMFILE_UNPATCHED);
     REGISTER_ENUM(RPMFILE_PUBKEY);
 
     REGISTER_ENUM(RPMDEP_SENSE_REQUIRES);
@@ -356,7 +376,9 @@ static int initModule(PyObject *m)
     REGISTER_ENUM(RPMSENSE_LESS);
     REGISTER_ENUM(RPMSENSE_GREATER);
     REGISTER_ENUM(RPMSENSE_EQUAL);
+    REGISTER_ENUM(RPMSENSE_POSTTRANS);
     REGISTER_ENUM(RPMSENSE_PREREQ);
+    REGISTER_ENUM(RPMSENSE_PRETRANS);
     REGISTER_ENUM(RPMSENSE_INTERP);
     REGISTER_ENUM(RPMSENSE_SCRIPT_PRE);
     REGISTER_ENUM(RPMSENSE_SCRIPT_POST);
@@ -368,14 +390,9 @@ static int initModule(PyObject *m)
     REGISTER_ENUM(RPMSENSE_TRIGGERIN);
     REGISTER_ENUM(RPMSENSE_TRIGGERUN);
     REGISTER_ENUM(RPMSENSE_TRIGGERPOSTUN);
-    REGISTER_ENUM(RPMSENSE_SCRIPT_PREP);
-    REGISTER_ENUM(RPMSENSE_SCRIPT_BUILD);
-    REGISTER_ENUM(RPMSENSE_SCRIPT_INSTALL);
-    REGISTER_ENUM(RPMSENSE_SCRIPT_CLEAN);
     REGISTER_ENUM(RPMSENSE_RPMLIB);
     REGISTER_ENUM(RPMSENSE_TRIGGERPREIN);
     REGISTER_ENUM(RPMSENSE_KEYRING);
-    REGISTER_ENUM(RPMSENSE_PATCHES);
     REGISTER_ENUM(RPMSENSE_CONFIG);
 
     REGISTER_ENUM(RPMTRANS_FLAG_TEST);
@@ -430,6 +447,9 @@ static int initModule(PyObject *m)
     REGISTER_ENUM(RPMCALLBACK_UNPACK_ERROR);
     REGISTER_ENUM(RPMCALLBACK_CPIO_ERROR);
     REGISTER_ENUM(RPMCALLBACK_SCRIPT_ERROR);
+    REGISTER_ENUM(RPMCALLBACK_SCRIPT_START);
+    REGISTER_ENUM(RPMCALLBACK_SCRIPT_STOP);
+    REGISTER_ENUM(RPMCALLBACK_INST_STOP);
 
     REGISTER_ENUM(RPMPROB_BADARCH);
     REGISTER_ENUM(RPMPROB_BADOS);
@@ -442,6 +462,7 @@ static int initModule(PyObject *m)
     REGISTER_ENUM(RPMPROB_OLDPACKAGE);
     REGISTER_ENUM(RPMPROB_DISKSPACE);
     REGISTER_ENUM(RPMPROB_DISKNODES);
+    REGISTER_ENUM(RPMPROB_OBSOLETES);
 
     REGISTER_ENUM(VERIFY_DIGEST);
     REGISTER_ENUM(VERIFY_SIGNATURE);
@@ -481,6 +502,19 @@ static int initModule(PyObject *m)
 
     REGISTER_ENUM(RPMDBI_PACKAGES);
     REGISTER_ENUM(RPMDBI_LABEL);
+    REGISTER_ENUM(RPMDBI_INSTFILENAMES);
+    REGISTER_ENUM(RPMDBI_NAME);
+    REGISTER_ENUM(RPMDBI_BASENAMES);
+    REGISTER_ENUM(RPMDBI_GROUP);
+    REGISTER_ENUM(RPMDBI_REQUIRENAME);
+    REGISTER_ENUM(RPMDBI_PROVIDENAME);
+    REGISTER_ENUM(RPMDBI_CONFLICTNAME);
+    REGISTER_ENUM(RPMDBI_OBSOLETENAME);
+    REGISTER_ENUM(RPMDBI_TRIGGERNAME);
+    REGISTER_ENUM(RPMDBI_DIRNAMES);
+    REGISTER_ENUM(RPMDBI_INSTALLTID);
+    REGISTER_ENUM(RPMDBI_SIGMD5);
+    REGISTER_ENUM(RPMDBI_SHA1HEADER);
 
     REGISTER_ENUM(HEADERCONV_EXPANDFILELIST);
     REGISTER_ENUM(HEADERCONV_COMPRESSFILELIST);

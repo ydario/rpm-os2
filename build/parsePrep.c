@@ -5,10 +5,14 @@
 
 #include "system.h"
 
+#include <errno.h>
+
 #include <rpm/header.h>
-#include <rpm/rpmbuild.h>
 #include <rpm/rpmlog.h>
 #include <rpm/rpmfileutil.h>
+#include "build/rpmbuild_internal.h"
+#include "build/rpmbuild_misc.h"
+#include "lib/rpmug.h"
 #include "debug.h"
 
 /**
@@ -26,7 +30,7 @@ static rpmRC checkOwners(const char * urlfn)
 	return RPMRC_FAIL;
     }
 #ifndef __EMX__
-    if (!getUname(sb.st_uid) || !getGname(sb.st_gid)) {
+    if (!rpmugUname(sb.st_uid) || !rpmugGname(sb.st_gid)) {
 	rpmlog(RPMLOG_ERR, _("Bad owner/group: %s\n"), urlfn);
 	return RPMRC_FAIL;
     }
@@ -78,7 +82,7 @@ static char *doPatch(rpmSpec spec, uint32_t c, int strip, const char *db,
     fn = rpmGetPath("%{_sourcedir}/", sp->source, NULL);
 
     /* On non-build parse's, file cannot be stat'd or read. */
-    if (spec->force || checkOwners(fn)) goto exit;
+    if ((spec->flags & RPMSPEC_FORCE) || checkOwners(fn)) goto exit;
 
     if (db) {
 	rasprintf(&arg_backup,
@@ -102,7 +106,6 @@ static char *doPatch(rpmSpec spec, uint32_t c, int strip, const char *db,
 
     patchcmd = rpmExpand("%{uncompress: ", fn, "} | %{__patch} ", args, NULL);
 
-    free(arg_patch_flags);
     free(arg_fuzz);
     free(arg_dir);
     free(arg_backup);
@@ -120,6 +123,7 @@ static char *doPatch(rpmSpec spec, uint32_t c, int strip, const char *db,
     free(patchcmd);
 
 exit:
+    free(arg_patch_flags);
     free(fn);
     return buf;
 }
@@ -133,9 +137,10 @@ exit:
  */
 static char *doUntar(rpmSpec spec, uint32_t c, int quietly)
 {
-    char *fn;
+    char *fn = NULL;
     char *buf = NULL;
-    char *tar, *taropts;
+    char *tar = NULL;
+    const char *taropts = ((rpmIsVerbose() && !quietly) ? "-xvvf" : "-xf");
     struct Source *sp;
     rpmCompressedMagic compressed = COMPRESSED_NOT;
 
@@ -150,38 +155,14 @@ static char *doUntar(rpmSpec spec, uint32_t c, int quietly)
 	} else {
 	    rpmlog(RPMLOG_ERR, _("No \"Source:\" tag in the spec file\n"));
 	}
-	return NULL;
+	goto exit;
     }
 
     fn = rpmGetPath("%{_sourcedir}/", sp->source, NULL);
 
-    /* FIX: shrug */
-    taropts = ((rpmIsVerbose() && !quietly) ? "-xvvf" : "-xf");
-
-#ifdef AUTOFETCH_NOT	/* XXX don't expect this code to be enabled */
-    /* XXX
-     * XXX If nosource file doesn't exist, try to fetch from url.
-     * XXX TODO: add a "--fetch" enabler.
-     */
-    if (sp->flags & RPMTAG_NOSOURCE && autofetchnosource) {
-	struct stat st;
-	int rc;
-	if (lstat(fn, &st) != 0 && errno == ENOENT &&
-	    urlIsUrl(sp->fullSource) != URL_IS_UNKNOWN) {
-	    if ((rc = urlGetFile(sp->fullSource, fn)) != 0) {
-		rpmlog(RPMLOG_ERR,
-			_("Couldn't download nosource %s: %s\n"),
-			sp->fullSource);
-		return NULL;
-	    }
-	}
-    }
-#endif
-
     /* XXX On non-build parse's, file cannot be stat'd or read */
-    if (!spec->force && (rpmFileIsCompressed(fn, &compressed) || checkOwners(fn))) {
-	fn = _free(fn);
-	return NULL;
+    if (!(spec->flags & RPMSPEC_FORCE) && (rpmFileIsCompressed(fn, &compressed) || checkOwners(fn))) {
+	goto exit;
     }
 
     tar = rpmGetPath("%{__tar}", NULL);
@@ -208,6 +189,16 @@ static char *doUntar(rpmSpec spec, uint32_t c, int quietly)
 	case COMPRESSED_XZ:
 	    t = "%{__xz} -dc";
 	    break;
+	case COMPRESSED_LZIP:
+	    t = "%{__lzip} -dc";
+	    break;
+	case COMPRESSED_LRZIP:
+	    t = "%{__lrzip} -dqo-";
+	    break;
+	case COMPRESSED_7ZIP:
+	    t = "%{__7zip} x";
+	    needtar = 0;
+	    break;
 	}
 	zipper = rpmGetPath(t, NULL);
 	if (needtar) {
@@ -223,13 +214,14 @@ static char *doUntar(rpmSpec spec, uint32_t c, int quietly)
 		"  exit $STATUS\n"
 		"fi", zipper, fn);
 	}
-	zipper = _free(zipper);
+	free(zipper);
     } else {
 	rasprintf(&buf, "%s %s %s", tar, taropts, fn);
     }
 
-    fn = _free(fn);
-    tar = _free(tar);
+exit:
+    free(fn);
+    free(tar);
     return buf;
 }
 
@@ -328,8 +320,8 @@ static int doSetupMacro(rpmSpec spec, const char *line)
 
     /* if necessary, create and cd into the proper dir */
     if (createDir) {
-	rasprintf(&buf, RPM_MKDIR_P " %s\ncd '%s'",
-		spec->buildSubdir, spec->buildSubdir);
+	buf = rpmExpand("%{__mkdir_p} ", spec->buildSubdir, "\n",
+			"cd '", spec->buildSubdir, "'", NULL);
 	appendLineStringBuf(spec->prep, buf);
 	free(buf);
     }
@@ -489,9 +481,7 @@ exit:
 
 int parsePrep(rpmSpec spec)
 {
-    int nextPart, res, rc;
-    StringBuf sb;
-    char **lines;
+    int nextPart, rc, res = PART_ERROR;
     ARGV_t saveLines = NULL;
 
     if (spec->prep != NULL) {
@@ -508,12 +498,10 @@ int parsePrep(rpmSpec spec)
 	return PART_ERROR;
     }
     
-    sb = newStringBuf();
-    
     while (! (nextPart = isPart(spec->line))) {
 	/* Need to expand the macros inline.  That way we  */
 	/* can give good line number information on error. */
-	appendStringBuf(sb, spec->line);
+	argvAdd(&saveLines, spec->line);
 	if ((rc = readLine(spec, STRIP_NOTHING)) > 0) {
 	    nextPart = PART_NONE;
 	    break;
@@ -522,19 +510,16 @@ int parsePrep(rpmSpec spec)
 	}
     }
 
-    saveLines = argvSplitString(getStringBuf(sb), "\n", ARGV_NONE);
-    for (lines = saveLines; *lines; lines++) {
-	res = 0;
+    for (ARGV_const_t lines = saveLines; lines && *lines; lines++) {
+	rc = RPMRC_OK;
 	if (rstreqn(*lines, "%setup", sizeof("%setup")-1)) {
-	    res = doSetupMacro(spec, *lines);
+	    rc = doSetupMacro(spec, *lines);
 	} else if (rstreqn(*lines, "%patch", sizeof("%patch")-1)) {
-	    res = doPatchMacro(spec, *lines);
+	    rc = doPatchMacro(spec, *lines);
 	} else {
-	    appendLineStringBuf(spec->prep, *lines);
+	    appendStringBuf(spec->prep, *lines);
 	}
-	if (res && !spec->force) {
-	    /* fixup from RPMRC_FAIL do*Macro() codes for now */
-	    nextPart = PART_ERROR; 
+	if (rc != RPMRC_OK && !(spec->flags & RPMSPEC_FORCE)) {
 	    goto exit;
 	}
     }
@@ -542,7 +527,6 @@ int parsePrep(rpmSpec spec)
 
 exit:
     argvFree(saveLines);
-    sb = freeStringBuf(sb);
 
-    return nextPart;
+    return res;
 }

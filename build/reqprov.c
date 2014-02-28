@@ -6,86 +6,94 @@
 #include "system.h"
 
 #include <rpm/header.h>
-#include <rpm/rpmbuild.h>
+#include <rpm/rpmstring.h>
+#include <rpm/rpmlog.h>
+#include "build/rpmbuild_internal.h"
 #include "debug.h"
 
-static int isNewDep(Header h, rpmTag nametag,
-		  const char *N, const char *EVR, rpmsenseFlags Flags,
-		  rpmTag indextag, uint32_t index)
+static int isNewDep(rpmds *dsp, rpmds bds,
+		  Header h, rpmTagVal indextag, uint32_t index)
 {
-    int new = 1;
-    struct rpmtd_s idx;
-    rpmds ads = rpmdsNew(h, nametag, 0);
-    rpmds bds = rpmdsSingle(nametag, N, EVR, Flags);
+    int isnew = 1;
 
-    if (indextag) {
+    if (!indextag) {
+	/* With normal deps, we can just merge and see if anything got added */
+	isnew = (rpmdsMerge(dsp, bds) > 0);
+    } else {
+	struct rpmtd_s idx;
+	rpmds ads = *dsp;
 	headerGet(h, indextag, &idx, HEADERGET_MINMEM);
+
+	/* rpmdsFind/Merge() probably isn't realiable with triggers... */
+	rpmdsInit(ads);
+	while (isnew && rpmdsNext(ads) >= 0) {
+	    if (!rstreq(rpmdsN(ads), rpmdsN(bds))) continue;
+	    if (!rstreq(rpmdsEVR(ads), rpmdsEVR(bds))) continue;
+	    if (rpmdsFlags(ads) != rpmdsFlags(bds)) continue;
+	    if (indextag && rpmtdSetIndex(&idx, rpmdsIx(ads)) >= 0 &&
+			    rpmtdGetNumber(&idx) != index) continue;
+	    isnew = 0;
+	}
+	rpmtdFreeData(&idx);
+	rpmdsMerge(dsp, bds);
     }
 
-    /* XXX there's no guarantee the ds is sorted here so rpmdsFind() wont do */
-    rpmdsInit(ads);
-    while (new && rpmdsNext(ads) >= 0) {
-	if (!rstreq(rpmdsN(ads), rpmdsN(bds))) continue;
-	if (!rstreq(rpmdsEVR(ads), rpmdsEVR(bds))) continue;
-	if (rpmdsFlags(ads) != rpmdsFlags(bds)) continue;
-	if (indextag && rpmtdSetIndex(&idx, rpmdsIx(ads)) >= 0 &&
-			rpmtdGetNumber(&idx) != index) continue;
-	new = 0;
-    }
-    
-    if (indextag) {
-	rpmtdFreeData(&idx);
-    }
-    rpmdsFree(ads);
-    rpmdsFree(bds);
-    return new;
+    return isnew;
 }
 
-int addReqProv(rpmSpec spec, Header h, rpmTag tagN,
+int addReqProv(Package pkg, rpmTagVal tagN,
 		const char * N, const char * EVR, rpmsenseFlags Flags,
 		uint32_t index)
 {
-    rpmTag nametag = 0;
-    rpmTag versiontag = 0;
-    rpmTag flagtag = 0;
-    rpmTag indextag = 0;
+    rpmTagVal versiontag = 0;
+    rpmTagVal flagtag = 0;
+    rpmTagVal indextag = 0;
     rpmsenseFlags extra = RPMSENSE_ANY;
     char N2[_MAX_PATH];
-    
-    if (Flags & RPMSENSE_PROVIDES) {
-	nametag = RPMTAG_PROVIDENAME;
+    Header h = pkg->header; /* just a shortcut */
+    rpmds newds, *dsp = NULL;
+
+    switch (tagN) {
+    case RPMTAG_PROVIDENAME:
 	versiontag = RPMTAG_PROVIDEVERSION;
 	flagtag = RPMTAG_PROVIDEFLAGS;
 	extra = Flags & RPMSENSE_FIND_PROVIDES;
-    } else if (Flags & RPMSENSE_OBSOLETES) {
-	nametag = RPMTAG_OBSOLETENAME;
+	dsp = &pkg->provides;
+	break;
+    case RPMTAG_OBSOLETENAME:
 	versiontag = RPMTAG_OBSOLETEVERSION;
 	flagtag = RPMTAG_OBSOLETEFLAGS;
-    } else if (Flags & RPMSENSE_CONFLICTS) {
-	nametag = RPMTAG_CONFLICTNAME;
+	dsp = &pkg->obsoletes;
+	break;
+    case RPMTAG_CONFLICTNAME:
 	versiontag = RPMTAG_CONFLICTVERSION;
 	flagtag = RPMTAG_CONFLICTFLAGS;
-    } else if (Flags & RPMSENSE_PREREQ) {
-	nametag = RPMTAG_REQUIRENAME;
-	versiontag = RPMTAG_REQUIREVERSION;
-	flagtag = RPMTAG_REQUIREFLAGS;
-	extra = Flags & _ALL_REQUIRES_MASK;
-    } else if (Flags & RPMSENSE_TRIGGER) {
-	nametag = RPMTAG_TRIGGERNAME;
+	dsp = &pkg->conflicts;
+	break;
+    case RPMTAG_ORDERNAME:
+	versiontag = RPMTAG_ORDERVERSION;
+	flagtag = RPMTAG_ORDERFLAGS;
+	dsp = &pkg->order;
+	break;
+    case RPMTAG_TRIGGERNAME:
 	versiontag = RPMTAG_TRIGGERVERSION;
 	flagtag = RPMTAG_TRIGGERFLAGS;
 	indextag = RPMTAG_TRIGGERINDEX;
 	extra = Flags & RPMSENSE_TRIGGER;
-    } else {
-	nametag = RPMTAG_REQUIRENAME;
+	dsp = &pkg->triggers;
+	break;
+    case RPMTAG_REQUIRENAME:
+    default:
+	tagN = RPMTAG_REQUIRENAME;
 	versiontag = RPMTAG_REQUIREVERSION;
 	flagtag = RPMTAG_REQUIREFLAGS;
 	extra = Flags & _ALL_REQUIRES_MASK;
+	dsp = &pkg->requires;
     }
 
     /* rpmlib() dependency sanity: only requires permitted, ensure sense bit */
     if (rstreqn(N, "rpmlib(", sizeof("rpmlib(")-1)) {
-	if (nametag != RPMTAG_REQUIRENAME) return 1;
+	if (tagN != RPMTAG_REQUIRENAME) return 1;
 	extra |= RPMSENSE_RPMLIB;
     }
 
@@ -94,36 +102,32 @@ int addReqProv(rpmSpec spec, Header h, rpmTag tagN,
     if (EVR == NULL)
 	EVR = "";
     
+    newds = rpmdsSinglePool(pkg->pool, tagN, N, EVR, Flags);
     /* Avoid adding duplicate dependencies. */
+//CHECKME
     strcpy( N2, "");
-#ifdef __EMX__00
-	// YD need to add @unixroot remapping
-	if (!strncmp( N, "/bin", 4) || !strncmp( N, "/usr/bin", 8)) {
-	    strcpy( N2, "/@unixroot");
-	}
-#endif
     strcat( N2, N);
-    if (isNewDep(h, nametag, N2, EVR, Flags, indextag, index)) {
-	headerPutString(h, nametag, N2);
+    if (isNewDep(dsp, newds, h, indextag, index)) {
+	headerPutString(h, tagN, N);
 	headerPutString(h, versiontag, EVR);
 	headerPutUint32(h, flagtag, &Flags, 1);
 	if (indextag) {
 	    headerPutUint32(h, indextag, &index, 1);
 	}
     }
+    rpmdsFree(newds);
 
     return 0;
 }
 
-int rpmlibNeedsFeature(Header h, const char * feature, const char * featureEVR)
+int rpmlibNeedsFeature(Package pkg, const char * feature, const char * featureEVR)
 {
     char *reqname = NULL;
     int res;
 
     rasprintf(&reqname, "rpmlib(%s)", feature);
 
-    /* XXX 1st arg is unused */
-    res = addReqProv(NULL, h, RPMTAG_REQUIRENAME, reqname, featureEVR,
+    res = addReqProv(pkg, RPMTAG_REQUIRENAME, reqname, featureEVR,
 		     RPMSENSE_RPMLIB|(RPMSENSE_LESS|RPMSENSE_EQUAL), 0);
 
     free(reqname);

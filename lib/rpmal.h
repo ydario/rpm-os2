@@ -7,25 +7,26 @@
  */
 
 #include <rpm/rpmtypes.h>
+#include <rpm/rpmts.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-extern int _rpmal_debug;
-
 typedef struct rpmal_s * rpmal;
-typedef void * rpmalKey;
 
 /**
  * Initialize available packckages, items, and directory list.
+ * @param pool		shared string pool with base, dir and dependency names
  * @param delta		no. of entries to add on each realloc
+ * @param tsflags	transaction control flags
  * @param tscolor	transaction color bits
  * @param prefcolor	preferred color
  * @return al		new available list
  */
 RPM_GNUC_INTERNAL
-rpmal rpmalCreate(int delta, rpm_color_t tscolor, rpm_color_t prefcolor);
+rpmal rpmalCreate(rpmstrPool pool, int delta, rpmtransFlags tsflags,
+		  rpm_color_t tscolor, rpm_color_t prefcolor);
 
 /**
  * Free available packages, items, and directory members.
@@ -47,47 +48,47 @@ void rpmalDel(rpmal al, rpmte p);
  * Add package to available list.
  * @param al	        available list
  * @param p             package
- * @return		available package index
  */
 RPM_GNUC_INTERNAL
-void rpmalAdd(rpmal al,
-	      rpmte p);
+void rpmalAdd(rpmal al, rpmte p);
 
 /**
- * Generate index for available list.
- * @param al		available list
- */
-RPM_GNUC_INTERNAL
-void rpmalMakeIndex(rpmal al);
-
-/**
- * Check added package file lists for package(s) that provide a file.
+ * Lookup all obsoleters for a dependency in the available list
  * @param al		available list
  * @param ds		dependency set
- * @return		associated package(s), NULL if none
+ * @return		obsoleting packages for ds, NULL if none
  */
 RPM_GNUC_INTERNAL
-rpmte * rpmalAllFileSatisfiesDepend(const rpmal al, const rpmds ds);
+rpmte * rpmalAllObsoletes(const rpmal al, const rpmds ds);
 
 /**
- * Check added package file lists for package(s) that have a provide.
+ * Lookup all providers for a dependency in the available list
  * @param al		available list
  * @param ds		dependency set
- * @retval keyp		added package key pointer (or NULL)
- * @return		associated package(s), NULL if none
+ * @return		best provider for the dependency, NULL if none
  */
 RPM_GNUC_INTERNAL
 rpmte * rpmalAllSatisfiesDepend(const rpmal al, const rpmds ds);
 
 /**
- * Check added package file lists for first package that has a provide.
- * @todo Eliminate.
+ * Lookup best provider for a dependency in the available list
  * @param al		available list
  * @param ds		dependency set
- * @return		associated package key, NULL if none
+ * @return		best provider for the dependency, NULL if none
  */
 RPM_GNUC_INTERNAL
 rpmte rpmalSatisfiesDepend(const rpmal al, const rpmds ds);
+
+/**
+ * Get a list of transaction elements that are memebers of a collection in the
+ * available list
+ * @param al		available list
+ * @param collname	collection name to search for
+ * @return		NULL-terminated list of transaction elements that are
+ *			members of the specified collection
+ */
+RPM_GNUC_INTERNAL
+rpmte * rpmalAllInCollection(const rpmal al, const char * collname);
 
 #ifdef __cplusplus
 }
