@@ -888,6 +888,12 @@ rpm2cpio$(EXEEXT): $(rpm2cpio_OBJECTS) $(rpm2cpio_DEPENDENCIES) $(EXTRA_rpm2cpio
 rpmbuild$(EXEEXT): $(rpmbuild_OBJECTS) $(rpmbuild_DEPENDENCIES) $(EXTRA_rpmbuild_DEPENDENCIES) 
 	@rm -f rpmbuild$(EXEEXT)
 	$(AM_V_CCLD)$(LINK) $(rpmbuild_OBJECTS) $(rpmbuild_LDADD) $(LIBS)
+	# YD link exe also statically, so we can use it for bootstrap/debug
+	$(CC) $(LDFLAGS) -o rpmbuild_s.exe $(rpmbuild_OBJECTS) \
+		build/.libs/rpmbuild_s.a lib/.libs/rpm_s.a rpmio/.libs/rpmio_s.a .libs/cliutils.a \
+		-lnss3 -llzma \
+		-lsqlite3_s -lz -lbz2 -ldb -lpopt -lmagic -lintl_s -lurpo -lmmap -lpthread -lssp
+
 rpmdb$(EXEEXT): $(rpmdb_OBJECTS) $(rpmdb_DEPENDENCIES) $(EXTRA_rpmdb_DEPENDENCIES) 
 	@rm -f rpmdb$(EXEEXT)
 	$(AM_V_CCLD)$(LINK) $(rpmdb_OBJECTS) $(rpmdb_LDADD) $(LIBS)

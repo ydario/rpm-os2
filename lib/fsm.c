@@ -156,6 +156,9 @@ static rpmfs fsmGetFs(const FSM_t fsm)
 static const char * fileActionString(rpmFileAction a);
 
 #ifdef __KLIBC__
+int unlockEx( const char *old_name);
+int renameEx( const char *old_name, const char *new_name);
+
 /**
 */
 int unlockEx( const char *old_name)
@@ -183,7 +186,7 @@ int unlockEx( const char *old_name)
     return -1;
   }
 
-  // unlock file
+  // unlock file, rc==2 if the file is not in use
   rc = DosReplaceModule( (PCSZ)OldName, NULL, NULL);
   return rc;
 }
@@ -1187,7 +1190,13 @@ static int fsmCommitLinks(FSM_t fsm)
 
 static int fsmRmdir(const char *path)
 {
-    int rc = rmdir(path);
+    int rc = 0;
+#ifdef __KLIBC__
+    if (strcmp(path, "/@unixroot") == 0)
+	rc = 0;
+    else
+#endif
+    rc = rmdir(path);
     if (_fsm_debug)
 	rpmlog(RPMLOG_DEBUG, " %8s (%s) %s\n", __func__,
 	       path, (rc < 0 ? strerror(errno) : ""));
@@ -1202,7 +1211,13 @@ static int fsmRmdir(const char *path)
 
 static int fsmMkdir(const char *path, mode_t mode)
 {
-    int rc = mkdir(path, (mode & 07777));
+    int rc = 0;
+#ifdef __KLIBC__
+    if (strcmp(path, "/@unixroot") == 0)
+	rc = 0;
+    else
+#endif
+    rc = mkdir(path, (mode & 07777));
     if (_fsm_debug)
 	rpmlog(RPMLOG_DEBUG, " %8s (%s, 0%04o) %s\n", __func__,
 	       path, (unsigned)(mode & 07777),
@@ -1444,6 +1459,10 @@ static int fsmUnlink(const char *path, cpioMapFlags mapFlags)
     int rc = 0;
     if (mapFlags & CPIO_SBIT_CHECK)
         removeSBITS(path);
+#ifdef __KLIBC__
+    // try unlocking
+    rc = unlockEx(path);
+#endif
     rc = unlink(path);
     if (_fsm_debug)
 	rpmlog(RPMLOG_DEBUG, " %8s (%s) %s\n", __func__,
@@ -1456,9 +1475,17 @@ static int fsmUnlink(const char *path, cpioMapFlags mapFlags)
 static int fsmRename(const char *opath, const char *path,
 		     cpioMapFlags mapFlags)
 {
+    int rc = 0;
     if (mapFlags & CPIO_SBIT_CHECK)
         removeSBITS(path);
-    int rc = rename(opath, path);
+#ifdef __KLIBC__ // rename fails if destination is read-only
+    rc = chmod(path, S_IREAD|S_IWRITE);
+#endif
+    rc = rename(opath, path);
+#ifdef __KLIBC__
+    if (rc)
+	rc = renameEx(opath, path);
+#endif
 #if defined(ETXTBSY) && defined(__HPUX__)
     /* XXX HP-UX (and other os'es) don't permit rename to busy files. */
     if (rc && errno == ETXTBSY) {

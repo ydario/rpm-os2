@@ -1024,14 +1024,6 @@ done \
 %__urlhelper_proxyopts   %{?_httpproxy:--proxy %{_httpproxy}%{?_httpport::%{_httpport}}}%{!?_httpproxy:%{nil}}
 %_urlhelper             %{__urlhelpercmd} %{?__urlhelper_localopts} %{?__urlhelper_proxyopts} %{__urlhelperopts}
 
-#------------------------------------------------------------------------
-# handle file unlocking, options:
-#   0 - automatic handling (default)
-#   1 - use config.sys driver only
-#   2 - do nothing, report error
-#
-%_os2_unlock_mode       0
-
 #------------------------------------------------------------------------------
 # Collection specific macros
 %__plugindir		%{_libdir}/rpm-plugins
@@ -1039,6 +1031,14 @@ done \
 %__collection_java	%{__plugindir}/exec.so /usr/bin/rebuild-gcj-db
 %__collection_sepolicy		%{__plugindir}/sepolicy.so
 %__collection_sepolicy_flags	1
+
+#------------------------------------------------------------------------
+# handle file unlocking, options:
+#   0 - automatic handling (default)
+#   1 - use config.sys driver only
+#   2 - do nothing, report error
+#
+%_os2_unlock_mode       0
 
 #------------------------------------------------------------------------
 # Macros to handle creation/deletion of WPS objects from %post* sections.

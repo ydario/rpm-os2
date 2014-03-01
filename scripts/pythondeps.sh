@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/@unixroot/usr/bin/sh
 
 [ $# -ge 1 ] || {
     cat > /dev/null

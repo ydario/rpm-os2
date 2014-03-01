@@ -411,7 +411,7 @@ top_srcdir = @top_srcdir@
 EXTRA_DIST = rpm/__init__.py rpm/transaction.py
 AM_CPPFLAGS = -I$(top_builddir)/include/ -I$(top_srcdir)/python \
 	-I@WITH_PYTHON_INCLUDE@
-pkgpyexec_LTLIBRARIES = _rpmmodule.la _rpmbmodule.la _rpmsmodule.la
+pkgpyexec_LTLIBRARIES = _rpm.dll _rpmb.dll _rpms.dll
 pkgpyexec_DATA = rpm/__init__.py rpm/transaction.py
 _rpmmodule_la_LDFLAGS = -module -avoid-version -shared
 _rpmmodule_la_LIBADD = \
@@ -835,6 +835,13 @@ _rpmb.dll: _rpmbmodule.la
 	echo "EXPORTS" >> _rpmb.def
 	cd .libs ; emxexp $(subst .lo,.o,$(_rpmbmodule_la_OBJECTS)) >> ../_rpmb.def
 	$(_rpmbmodule_la_LINK) -Zdll _rpmb.def $(am__rpmbmodule_la_rpath) $(_rpmbmodule_la_OBJECTS) $(_rpmbmodule_la_LIBADD) $(LIBS) -lssp
+
+_rpms.dll: _rpmsmodule.la
+	echo "LIBRARY _rpms INITINSTANCE TERMINSTANCE" > _rpms.def
+	echo "DATA MULTIPLE" >> _rpms.def
+	echo "EXPORTS" >> _rpms.def
+	cd .libs ; emxexp $(subst .lo,.o,$(_rpmsmodule_la_OBJECTS)) >> ../_rpms.def
+	$(_rpmsmodule_la_LINK) -Zdll _rpms.def $(am__rpmsmodule_la_rpath) $(_rpmsmodule_la_OBJECTS) $(_rpmsmodule_la_LIBADD) $(LIBS) -lssp
 
 _rpm.dll: _rpmmodule.la
 	echo "LIBRARY _rpm INITINSTANCE TERMINSTANCE" > _rpm.def
