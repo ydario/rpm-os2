@@ -72,7 +72,7 @@ rpmbin_PROGRAMS = rpm$(EXEEXT)
 bin_PROGRAMS = rpm2cpio$(EXEEXT) rpmbuild$(EXEEXT) rpmdb$(EXEEXT) \
 	rpmkeys$(EXEEXT) rpmsign$(EXEEXT) rpmspec$(EXEEXT) \
 	rpmgraph$(EXEEXT)
-rpmlibexec_PROGRAMS = $(am__EXEEXT_1) rpmdeps$(EXEEXT)
+rpmlibexec_PROGRAMS = $(am__EXEEXT_1) rpmdeps$(EXEEXT) os2deps$(EXEEXT)
 @LIBDWARF_TRUE@@LIBELF_TRUE@am__append_6 = scripts/find-debuginfo.sh
 @LIBDWARF_TRUE@@LIBELF_TRUE@am__append_7 = debugedit elfdeps
 @DOXYGEN_TRUE@@HACKINGDOCS_TRUE@am__append_8 = doc/hacking/html/index.html
@@ -126,6 +126,9 @@ am__elfdeps_SOURCES_DIST = tools/elfdeps.c
 @LIBDWARF_TRUE@@LIBELF_TRUE@	tools/elfdeps.$(OBJEXT)
 elfdeps_OBJECTS = $(am_elfdeps_OBJECTS)
 @LIBDWARF_TRUE@@LIBELF_TRUE@elfdeps_DEPENDENCIES = rpmio/librpmio.la
+am_os2deps_OBJECTS = tools/os2deps.$(OBJEXT)
+os2deps_OBJECTS = $(am_os2deps_OBJECTS)
+os2deps_DEPENDENCIES =
 am_rpm_OBJECTS = rpm-rpmqv.$(OBJEXT)
 rpm_OBJECTS = $(am_rpm_OBJECTS)
 rpm_DEPENDENCIES = libcliutils.la lib/librpm.la rpmio/librpmio.la
@@ -223,11 +226,13 @@ SOURCES = $(libcliutils_la_SOURCES) $(debugedit_SOURCES) \
 	$(elfdeps_SOURCES) $(rpm_SOURCES) $(rpm2cpio_SOURCES) \
 	$(rpmbuild_SOURCES) $(rpmdb_SOURCES) $(rpmdeps_SOURCES) \
 	$(rpmgraph_SOURCES) $(rpmkeys_SOURCES) $(rpmsign_SOURCES) \
+	$(os2deps_SOURCES) \
 	$(rpmspec_SOURCES)
 DIST_SOURCES = $(libcliutils_la_SOURCES) $(am__debugedit_SOURCES_DIST) \
 	$(am__elfdeps_SOURCES_DIST) $(rpm_SOURCES) $(rpm2cpio_SOURCES) \
 	$(rpmbuild_SOURCES) $(rpmdb_SOURCES) $(rpmdeps_SOURCES) \
 	$(rpmgraph_SOURCES) $(rpmkeys_SOURCES) $(rpmsign_SOURCES) \
+	$(os2deps_SOURCES) \
 	$(rpmspec_SOURCES)
 RECURSIVE_TARGETS = all-recursive check-recursive dvi-recursive \
 	html-recursive info-recursive install-data-recursive \
@@ -640,6 +645,8 @@ rpmdeps_SOURCES = tools/rpmdeps.c
 rpmdeps_LDADD = lib/librpm.la rpmio/librpmio.la build/librpmbuild.la @WITH_POPT_LIB@
 rpmgraph_SOURCES = tools/rpmgraph.c
 rpmgraph_LDADD = lib/librpm.la rpmio/librpmio.la @WITH_POPT_LIB@
+os2deps_SOURCES = tools/os2deps.c
+os2deps_LDADD = @WITH_POPT_LIB@
 dist_bin_SCRIPTS = scripts/gendiff
 rpmconfig_DATA = rpmrc rpmpopt-$(VERSION)
 noinst_DATA = macros platform $(am__append_8) $(am__append_9)
@@ -872,6 +879,11 @@ tools/elfdeps.$(OBJEXT): tools/$(am__dirstamp) \
 elfdeps$(EXEEXT): $(elfdeps_OBJECTS) $(elfdeps_DEPENDENCIES) $(EXTRA_elfdeps_DEPENDENCIES) 
 	@rm -f elfdeps$(EXEEXT)
 	$(AM_V_CCLD)$(LINK) $(elfdeps_OBJECTS) $(elfdeps_LDADD) $(LIBS)
+tools/os2deps.$(OBJEXT): tools/$(am__dirstamp) \
+	tools/$(DEPDIR)/$(am__dirstamp)
+os2deps$(EXEEXT): $(os2deps_OBJECTS) $(os2deps_DEPENDENCIES) $(EXTRA_os2deps_DEPENDENCIES) 
+	@rm -f os2deps$(EXEEXT)
+	$(AM_V_CCLD)$(LINK) $(os2deps_OBJECTS) $(os2deps_LDADD) $(LIBS)
 rpm$(EXEEXT): $(rpm_OBJECTS) $(rpm_DEPENDENCIES) $(EXTRA_rpm_DEPENDENCIES) 
 	@rm -f rpm$(EXEEXT)
 	$(AM_V_CCLD)$(LINK) $(rpm_OBJECTS) $(rpm_LDADD) $(LIBS)
@@ -880,7 +892,7 @@ rpm$(EXEEXT): $(rpm_OBJECTS) $(rpm_DEPENDENCIES) $(EXTRA_rpm_DEPENDENCIES)
 		build/.libs/rpmbuild_s.a lib/.libs/rpm_s.a rpmio/.libs/rpmio_s.a \
 		.libs/cliutils.a \
 		-lnss3 -llzma \
-		-lsqlite3_s -lz -lbz2 -ldb -lpopt -lmagic -lintl_s -lurpo -lmmap_s -lpthread_s -lssp
+		-lz -lbz2 -ldb -lpopt -lmagic -lintl_s -lurpo -lmmap_s -lpthread_s -lssp
 
 rpm2cpio$(EXEEXT): $(rpm2cpio_OBJECTS) $(rpm2cpio_DEPENDENCIES) $(EXTRA_rpm2cpio_DEPENDENCIES) 
 	@rm -f rpm2cpio$(EXEEXT)
@@ -892,7 +904,7 @@ rpmbuild$(EXEEXT): $(rpmbuild_OBJECTS) $(rpmbuild_DEPENDENCIES) $(EXTRA_rpmbuild
 	$(CC) $(LDFLAGS) -o rpmbuild_s.exe $(rpmbuild_OBJECTS) \
 		build/.libs/rpmbuild_s.a lib/.libs/rpm_s.a rpmio/.libs/rpmio_s.a .libs/cliutils.a \
 		-lnss3 -llzma \
-		-lsqlite3_s -lz -lbz2 -ldb -lpopt -lmagic -lintl_s -lurpo -lmmap -lpthread -lssp
+		-lz -lbz2 -ldb -lpopt -lmagic -lintl_s -lurpo -lmmap -lpthread -lssp
 
 rpmdb$(EXEEXT): $(rpmdb_OBJECTS) $(rpmdb_DEPENDENCIES) $(EXTRA_rpmdb_DEPENDENCIES) 
 	@rm -f rpmdb$(EXEEXT)
@@ -902,13 +914,20 @@ rpmdb$(EXEEXT): $(rpmdb_OBJECTS) $(rpmdb_DEPENDENCIES) $(EXTRA_rpmdb_DEPENDENCIE
 		build/.libs/rpmbuild_s.a lib/.libs/rpm_s.a rpmio/.libs/rpmio_s.a \
 		.libs/cliutils.a \
 		-lnss3 -llzma \
-		-lsqlite3_s -lz -lbz2 -ldb -lpopt -lmagic -lintl_s -lurpo -lmmap -lpthread -lssp
+		-lz -lbz2 -ldb -lpopt -lmagic -lintl_s -lurpo -lmmap -lpthread -lssp
 
 tools/rpmdeps.$(OBJEXT): tools/$(am__dirstamp) \
 	tools/$(DEPDIR)/$(am__dirstamp)
 rpmdeps$(EXEEXT): $(rpmdeps_OBJECTS) $(rpmdeps_DEPENDENCIES) $(EXTRA_rpmdeps_DEPENDENCIES) 
 	@rm -f rpmdeps$(EXEEXT)
 	$(AM_V_CCLD)$(LINK) $(rpmdeps_OBJECTS) $(rpmdeps_LDADD) $(LIBS)
+	# YD link exe also statically, so we can use it for bootstrap/debug
+	$(CC) $(LDFLAGS) -o rpmdeps_s.exe $(rpmdeps_OBJECTS) \
+		build/.libs/rpmbuild_s.a lib/.libs/rpm_s.a rpmio/.libs/rpmio_s.a \
+		.libs/cliutils.a \
+		-lnss3 -llzma \
+		-lz -lbz2 -ldb -lpopt -lmagic -lintl_s -lurpo -lmmap -lpthread -lssp
+
 tools/rpmgraph.$(OBJEXT): tools/$(am__dirstamp) \
 	tools/$(DEPDIR)/$(am__dirstamp)
 rpmgraph$(EXEEXT): $(rpmgraph_OBJECTS) $(rpmgraph_DEPENDENCIES) $(EXTRA_rpmgraph_DEPENDENCIES) 
@@ -1011,6 +1030,7 @@ distclean-compile:
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/rpmspec-rpmspec.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@tools/$(DEPDIR)/debugedit.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@tools/$(DEPDIR)/elfdeps.Po@am__quote@
+@AMDEP_TRUE@@am__include@ @am__quote@tools/$(DEPDIR)/os2deps.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@tools/$(DEPDIR)/hashtab.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@tools/$(DEPDIR)/rpmdeps.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@tools/$(DEPDIR)/rpmgraph.Po@am__quote@

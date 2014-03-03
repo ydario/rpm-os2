@@ -12,10 +12,6 @@
 #include <magic.h>
 #include <regex.h>
 
-#ifdef __KLIBC__
-#include "lxlist.h"
-#endif
-
 #include <rpm/header.h>
 #include <rpm/argv.h>
 #include <rpm/rpmfc.h>
@@ -900,101 +896,6 @@ rpmds rpmfcProvides(rpmfc fc)
 rpmds rpmfcRequires(rpmfc fc)
 {
     return (fc != NULL ? fc->requires : NULL);
-}
-
-
-/**
- * Extract OS/2 LX dependencies.
- * @param fc		file classifier
- * @return		0 on success
- */
-static int rpmfcOS2(rpmfc fc)
-{
-#ifdef __KLIBC__00
-    const char * fn = fc->fn[fc->ix];
-    char fname[_MAX_FNAME], ext[_MAX_EXT];
-    FILE *in;
-    long beg = 0;
-    LXheader hdr;
-    int i;
-    word sign;
-    rpmds *ds;
-    int xx;
-
-    in = fopen(fn, "rb");
-    if (!in)
-	return;
-
-    // Verify signature
-    fread(&sign, sizeof(sign), 1, in);
-    if (sign != 0x4D5A && sign != 0x5A4D	/* MZ or ZM !!! Yes this is also valid */
-	&& sign != 0x584C)    { /* LX !!! Yes this is also valid */
-	// printf("This is not an executable file");
-	fclose(in);
-	return;
-    }
-
-    // get LX header
-    fseek(in, OffsetToLX, SEEK_SET);
-    fread(&beg, sizeof(beg), 1, in);
-    fseek(in, beg, SEEK_SET);
-    fread(&hdr, sizeof(hdr), 1, in);
-    if (hdr._L != 'L' || hdr._X != 'X') {
-	// printf("Unknow format '%c%c'", hdr._L, hdr._X);
-	fclose(in);
-	return;
-    }
-
-    // scan header
-    fseek(in, beg + hdr.ImportModuleTblOff, SEEK_SET);
-    for (i = 0; i < (hdr.ImportProcTblOff - hdr.ImportModuleTblOff); i++) {
-	int j;
-	char *name;
-	j = getc(in);
-	if (j > 0) {
-	    char *ptr;
-	    name = (char *) malloc(j + 1 + 4);
-	    if (name) {
-		ptr = name;
-		for (; j > 0; j--, i++)
-		    *ptr++ = getc(in);
-		*ptr = 0;
-		strlwr( name);
-		strcat( name, ".dll");
-		// printf("%s\n", name);
-		/* Add to package dependencies. */
-		ds = rpmdsSingle(RPMTAG_REQUIRENAME,
-		  	name, "", RPMSENSE_FIND_REQUIRES);
-		xx = rpmdsMerge(&fc->requires, ds);
-		/* Add to file dependencies. */
-		rpmfcAddFileDep(&fc->ddict, fc->ix, ds);
-		ds = rpmdsFree(ds);
-	    }
-	    free(name);
-	}
-    }
-    fclose(in);
-
-    // add provides for DLL
-    _splitpath( fn, NULL, NULL, fname, ext);
-    strlwr( fname);
-    strlwr( ext);
-    if (strcmp( ext, ".dll") == 0) {
-	char fullname[_MAX_PATH];
-	strcpy( fullname, fname);
-	strcat( fullname, ext);
-	/* Add to package dependencies. */
-	ds = rpmdsSingle(RPMTAG_PROVIDENAME, fullname, "", RPMSENSE_FIND_PROVIDES);
-	xx = rpmdsMerge(&fc->provides, ds);
-	/* Add to file dependencies. */
-	rpmfcAddFileDep(&fc->ddict, fc->ix, ds);
-	ds = rpmdsFree(ds);
-    }
-
-    return 0;
-#else
-    return -1;
-#endif
 }
 
 rpmRC rpmfcApply(rpmfc fc)
