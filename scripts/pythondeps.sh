@@ -1,7 +1,7 @@
 #!/@unixroot/usr/bin/sh
 
 [ $# -ge 1 ] || {
-    cat > /dev/null
+    #cat > /dev/null
     exit 0
 }
 
@@ -13,7 +13,8 @@ case $1 in
     # generating a line of the form
     #    python(abi) = MAJOR.MINOR
     # (Don't match against -config tools e.g. /usr/bin/python2.6-config)
-    cat $2 | grep "/usr/bin/python.\..$" \
+    cat $1 | 
+    grep "/usr/bin/python.\..$" \
         | sed -e "s|.*/usr/bin/python\(.\..\)|python(abi) = \1|"
     ;;
 -R|--requires)
@@ -23,7 +24,8 @@ case $1 in
     #    /PATH/OF/BUILDROOT/usr/lib64/pythonMAJOR.MINOR/
     # generating (uniqely) lines of the form:
     #    python(abi) = MAJOR.MINOR
-    cat $2 | grep "/usr/lib[^/]*/python.\../.*" \
+    cat $1 | 
+    grep "/usr/lib[^/]*/python.\../.*" \
         | sed -e "s|.*/usr/lib[^/]*/python\(.\..\)/.*|python(abi) = \1|g" \
         | sort | uniq
     ;;

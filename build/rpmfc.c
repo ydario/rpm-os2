@@ -553,6 +553,7 @@ static int rpmfcHelper(rpmfc fc, const char *nsdep, const char *depname,
     int pac;
     regex_t *exclude = NULL;
     regex_t *exclude_from = NULL;
+    char N2[PATH_MAX];
 
     /* If the entire path is filtered out, there's nothing more to do */
     exclude_from = rpmfcAttrReg(depname, "exclude", "from");
@@ -593,7 +594,16 @@ static int rpmfcHelper(rpmfc fc, const char *nsdep, const char *depname,
 	    EVR = pav[i];
 	}
 
-	ds = rpmdsSingleNS(tagN, namespace, N, EVR, Flags);
+	strcpy( N2, "");
+#ifdef __EMX__
+	// YD need to add @unixroot remapping
+	if (!strncmp( N, "/bin", 4) || !strncmp( N, "/usr/bin", 8)) {
+	    strcpy( N2, "/@unixroot");
+	}
+#endif
+	strcat( N2, N);
+
+	ds = rpmdsSingleNS(tagN, namespace, N2, EVR, Flags);
 
 	/* Add to package and file dependencies unless filtered */
 	if (regMatch(exclude, rpmdsDNEVR(ds)+2) == 0) {

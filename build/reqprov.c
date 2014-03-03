@@ -49,7 +49,6 @@ int addReqProv(Package pkg, rpmTagVal tagN,
     rpmTagVal flagtag = 0;
     rpmTagVal indextag = 0;
     rpmsenseFlags extra = RPMSENSE_ANY;
-    char N2[_MAX_PATH];
     Header h = pkg->header; /* just a shortcut */
     rpmds newds, *dsp = NULL;
 
@@ -104,9 +103,6 @@ int addReqProv(Package pkg, rpmTagVal tagN,
     
     newds = rpmdsSinglePool(pkg->pool, tagN, N, EVR, Flags);
     /* Avoid adding duplicate dependencies. */
-//CHECKME
-    strcpy( N2, "");
-    strcat( N2, N);
     if (isNewDep(dsp, newds, h, indextag, index)) {
 	headerPutString(h, tagN, N);
 	headerPutString(h, versiontag, EVR);
