@@ -405,6 +405,12 @@ doShellEscape(MacroBuf mb, const char * cmd, size_t clen)
     if (rc)
 	goto exit;
 
+#ifdef __KLIBC__
+    // FIXME popen() does not recognize unixroot
+    if (strstr( buf, "/@unixroot") && !getenv("EMXSHELL"))
+        putenv( "EMXSHELL=sh");
+#endif
+
     if ((shf = popen(buf, "r")) == NULL) {
 	rc = 1;
 	goto exit;
