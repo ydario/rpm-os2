@@ -399,6 +399,9 @@ char *rpmCleanPath(char * path)
 	s++;
     if (s[2] == ':')
 	s++;
+    // clean '/@unixroot///@unixroot/...'
+    if (strncmp( s, AT_UNIXROOT "//" AT_UNIXROOT, AT_UNIXROOT_LEN*2) == 0)
+       s += (AT_UNIXROOT_LEN+2);
     // clean '/@unixroot//@unixroot/...'
     if (strncmp( s, AT_UNIXROOT "/" AT_UNIXROOT, AT_UNIXROOT_LEN*2) == 0)
        s += (AT_UNIXROOT_LEN);

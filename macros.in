@@ -168,7 +168,7 @@
 %_dbpath		%{_var}/lib/rpm
 
 #	The location of the rpm database file(s) after "rpm --rebuilddb".
-%_dbpath_rebuild	%{_var}/lib/rpm.rebuild
+%_dbpath_rebuild	%{_dbpath}
 
 %_keyringpath		%{_dbpath}/pubkeys/
 
