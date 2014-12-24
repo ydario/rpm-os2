@@ -892,7 +892,7 @@ rpm$(EXEEXT): $(rpm_OBJECTS) $(rpm_DEPENDENCIES) $(EXTRA_rpm_DEPENDENCIES)
 		build/.libs/rpmbuild_s.a lib/.libs/rpm_s.a rpmio/.libs/rpmio_s.a \
 		.libs/cliutils.a \
 		-lnss3 -llzma \
-		-lz -lbz2 -ldb -lpopt -lmagic -lintl_s -lurpo -lmmap_s -lpthread_s -lssp
+		-lz -lbz2 -ldb -lpopt -lmagic -lssp $(LIBS)
 
 rpm2cpio$(EXEEXT): $(rpm2cpio_OBJECTS) $(rpm2cpio_DEPENDENCIES) $(EXTRA_rpm2cpio_DEPENDENCIES) 
 	@rm -f rpm2cpio$(EXEEXT)
@@ -904,7 +904,7 @@ rpmbuild$(EXEEXT): $(rpmbuild_OBJECTS) $(rpmbuild_DEPENDENCIES) $(EXTRA_rpmbuild
 	$(CC) $(LDFLAGS) -o rpmbuild_s.exe $(rpmbuild_OBJECTS) \
 		build/.libs/rpmbuild_s.a lib/.libs/rpm_s.a rpmio/.libs/rpmio_s.a .libs/cliutils.a \
 		-lnss3 -llzma \
-		-lz -lbz2 -ldb -lpopt -lmagic -lintl_s -lurpo -lmmap -lpthread -lssp
+		-lz -lbz2 -ldb -lpopt -lmagic -lssp $(LIBS)
 
 rpmdb$(EXEEXT): $(rpmdb_OBJECTS) $(rpmdb_DEPENDENCIES) $(EXTRA_rpmdb_DEPENDENCIES) 
 	@rm -f rpmdb$(EXEEXT)
