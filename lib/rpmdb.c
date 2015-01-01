@@ -2807,7 +2807,8 @@ static int rpmdbMoveDatabase(const char * prefix,
 	    if (stat(src, &st) < 0)
 		goto cont;
 
-	if ((xx = rename(src, dest)) != 0) {
+	/* YD use URPO renameForce() to override EACCESS on locked files */
+	if ((xx = renameForce(src, dest)) != 0) {
 	    rc = 1;
 	    goto cont;
 	}
