@@ -4,12 +4,26 @@ if [ -z "$RPM_BUILD_ROOT" -o "$RPM_BUILD_ROOT" = "/" ]; then
 	exit 0
 fi
 
-# Strip and pack OS/2 binaries
-for f in `find $RPM_BUILD_ROOT -type f -name "*.exe"`; do
-	emxomfstrip -D "${f%.*}.dbg" $f
-	lxlite /ml1 /mf2 /ydd /yxd /b- "$f" ;
+NO_COMPRESS=
+NO_DEBUGINFO=
+
+while test "$1" != "" ; do
+    case "$1" in
+    --no-compress)
+        NO_COMPRESS=1
+    ;;
+    --no-debuginfo)
+        NO_DEBUGINFO=1
+    ;;
+    esac
+    shift
 done
-for f in `find $RPM_BUILD_ROOT -type f -name "*.dll"`; do
-	emxomfstrip -D "${f%.*}.dbg" $f
-	lxlite /ml1 /mf2 /ydd /yxd /b- "$f" ;
+
+# Exit early if nothing to do
+[ -n "$NO_COMPRESS" -a -n "$NO_DEBUGINFO" ] && exit
+
+# Strip and pack OS/2 binaries and DLLs
+for f in `find $RPM_BUILD_ROOT -type f -name "*.exe" -o -name "*.dll"`; do
+	[ -z "$NO_DEBUGINFO" ] && emxomfstrip -D "${f%.*}.dbg" $f
+	[ -z "$NO_COMPRESS" ] && lxlite /ml1 /mf2 /ydd /yxd /b- "$f"
 done

@@ -612,7 +612,7 @@ package or when debugging this package.\
 #
 # Define per-arch and per-os defaults. Normally overridden by per-target macros.
 %__arch_install_post	%{nil}
-%__os_install_post	%{_rpmconfigdir}/brp-strip.os2
+%__os_install_post	%{_rpmconfigdir}/brp-strip.os2 %{?_strip_no_compress:--no-compress} %{?_strip_no_debuginfo:--no-debuginfo}
 
 # Macro to fix broken permissions in sources
 %_fixperms      %{__chmod} -Rf @FIXPERMS@
