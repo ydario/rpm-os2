@@ -63,6 +63,7 @@
 %__os_install_post    \
     %{_rpmconfigdir}/brp-compress \
     %{_rpmconfigdir}/brp-strip %{__strip} \
+    %{_rpmconfigdir}/brp-strip.os2 %{?_strip_no_compress:--no-compress} %{?_strip_no_debuginfo:--no-debuginfo} \
     %{_rpmconfigdir}/brp-strip-static-archive %{__strip} \
     %{_rpmconfigdir}/brp-strip-comment-note %{__strip} %{__objdump} \
 %{nil}

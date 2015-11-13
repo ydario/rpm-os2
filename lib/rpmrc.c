@@ -440,15 +440,19 @@ static void setDefaults(void)
     }
 
 #ifndef MACROFILES
+    // @FIXME FIXME TODO YD this breaks upgrades...
+    // hardcoded in macrofiles listing (ticket#135)
     if (!macrofiles) {
 	macrofiles = rstrscat(NULL, confdir, "/macros", ":",
 				confdir, "/macros.d/macros.*", ":",
 				confdir, "/platform/%{_target}/macros", ":",
+				confdir, "/platform/%{_target_cpu}-os2-emx/macros", ":",
 				confdir, "/fileattrs/*.attr", ":",
   				confdir, "/" RPMCANONVENDOR "/macros", ":",
 				SYSCONFDIR "/rpm/macros.*", ":",
 				SYSCONFDIR "/rpm/macros", ":",
 				SYSCONFDIR "/rpm/%{_target}/macros", ":",
+				SYSCONFDIR "/rpm/%{_target_cpu}-os2-emx/macros", ":",
 				"~/.rpmmacros", NULL);
     }
 #else
@@ -993,6 +997,13 @@ static void defaultMachine(const char ** arch,
 	    strcpy(un.machine, __power_pc() ? "ppc" : "rs6000");
 	    sprintf(un.sysname,"aix%s.%s", un.version, un.release);
 	}
+	// @FIXME FIXME TODO YD this breaks upgrades...
+	// hardcoded in macrofiles listing (ticket#135)
+#if 0
+	else if(rstreq(un.sysname, "OS/2")) { 
+	    strcpy(un.sysname, "os2-emx");
+	}
+#endif
 	else if(rstreq(un.sysname, "Darwin")) { 
 #ifdef __ppc__
 	    strcpy(un.machine, "ppc");
