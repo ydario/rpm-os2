@@ -1,11 +1,11 @@
 AC_PREREQ(2.61)
-AC_INIT(rpm, 4.11.1, rpm-maint@lists.rpm.org)
+AC_INIT(rpm, 4.13.0-rc1, rpm-maint@lists.rpm.org)
 
 AC_CONFIG_SRCDIR([rpmqv.c])
 AC_CONFIG_HEADERS([config.h])
 AC_CONFIG_MACRO_DIR([m4])
 
-AM_INIT_AUTOMAKE([1.10 foreign tar-ustar dist-bzip2 subdir-objects nostdinc])
+AM_INIT_AUTOMAKE([1.10 foreign tar-pax dist-bzip2 subdir-objects nostdinc])
 dnl Allow silent build on automake versions that support it
 m4_ifdef([AM_SILENT_RULES], [AM_SILENT_RULES])
 
@@ -90,7 +90,7 @@ fi
 dnl
 dnl Find some common programs
 dnl
-AC_PATH_PROG(__7ZIP, 7zip, /usr/bin/7za, $MYPATH)
+AC_PATH_PROGS(__7ZIP, [7zip 7za 7z], /usr/bin/7za, $MYPATH)
 AC_PATH_PROG(__BZIP2, bzip2, /usr/bin/bzip2, $MYPATH)
 AC_PATH_PROG(__CAT, cat, /bin/cat, $MYPATH)
 AC_PATH_PROG(__CHGRP, chgrp, /bin/chgrp, $MYPATH)
@@ -335,6 +335,31 @@ AC_SUBST(WITH_POPT_INCLUDE)
 AC_SUBST(WITH_POPT_LIB)
 
 #=================
+# Check for libarchive library.
+AC_ARG_WITH([archive], [AS_HELP_STRING([--with-archive], [build rpm2archive - requires libarchive])],
+            [],
+            [with_archive=yes])
+
+WITH_ARCHIVE_INCLUDE=
+WITH_ARCHIVE_LIB=
+AS_IF([test "$with_archive" != no],[
+  AC_CHECK_HEADER([archive.h], [
+    AC_CHECK_LIB(archive, archive_write_open_filename, [
+      WITH_ARCHIVE_INCLUDE=
+      WITH_ARCHIVE_LIB="-larchive"
+    ],[
+      AC_MSG_ERROR([missing required library 'libarchive'])
+    ])
+],[
+      AC_MSG_ERROR([missing required header archive.h])
+  ])
+])
+
+AC_SUBST(WITH_ARCHIVE_INCLUDE)
+AC_SUBST(WITH_ARCHIVE_LIB)
+AM_CONDITIONAL(WITH_ARCHIVE,[test "$with_archive" = yes])
+
+#=================
 # Process --with/without-external-db
 AC_ARG_WITH(external_db, [AS_HELP_STRING([--with-external-db],[build against an external Berkeley db])],
 [case "$with_external_db" in
@@ -371,8 +396,23 @@ esac
 
 AC_SUBST([WITH_DB_LIB])
 
+#=================
+# Process --enable-ndb
+AC_ARG_ENABLE([ndb], [AS_HELP_STRING([--enable-ndb],[enable the new rpm database format])],
+[case "$enable_ndb" in
+yes|no) ;;
+*) AC_MSG_ERROR([invalid argument to --enable-ndb])
+  ;;
+esac],
+[enable_ndb=no])
+AS_IF([test "$enable_ndb" = yes],[
+  AC_DEFINE(ENABLE_NDB, 1, [Enable new rpm database format?])
+])
+AM_CONDITIONAL([NDB], [test "$enable_ndb" = yes])
+
 AM_GNU_GETTEXT_VERSION([0.16.1])
 AM_GNU_GETTEXT([external])
+AM_ICONV
 
 dnl Checks for header files we can live without.
 AC_HEADER_STDC
@@ -386,6 +426,7 @@ AC_CHECK_HEADERS(sys/utsname.h)
 
 AC_CHECK_HEADERS(sys/systemcfg.h)
 AC_CHECK_HEADERS(sys/param.h)
+AC_CHECK_HEADERS(sys/auxv.h)
 
 dnl statfs portability fiddles.
 dnl
@@ -518,13 +559,16 @@ dnl Checks for library functions.
 AC_CHECK_FUNCS(putenv)
 AC_CHECK_FUNCS(mempcpy)
 AC_CHECK_FUNCS(fdatasync)
+AC_CHECK_FUNCS(lutimes)
+AC_CHECK_FUNCS(mergesort)
+AC_CHECK_FUNCS(getauxval)
 
 AC_REPLACE_FUNCS(stpcpy stpncpy)
 
 AC_CHECK_FUNCS([secure_getenv __secure_getenv])
 
 AC_CHECK_FUNCS(
-   [mkstemp getcwd basename dirname realpath setenv unsetenv regcomp lchown],
+   [mkstemp getcwd basename dirname realpath setenv unsetenv regcomp lchown utimes],
    [], [AC_MSG_ERROR([function required by rpm])])
 
 AC_LIBOBJ(fnmatch)
@@ -601,6 +645,8 @@ AS_IF([test "$with_selinux" = yes],[
       AC_MSG_ERROR([--with-selinux given, but selinux_getpolicytype not found in libselinux])])
     AC_CHECK_LIB([selinux],[selinux_reset_config],[],[
       AC_MSG_ERROR([--with-selinux given, but selinux_reset_config not found in libselinux])])
+    AC_CHECK_LIB([selinux],[setexecfilecon],[
+      AC_DEFINE([HAVE_SETEXECFILECON],[1],[Define to 1 if SELinux setexecfilecon is present])])
     LIBS="$save_LIBS"
   ],[
     AC_MSG_ERROR([--with-selinux given, but selinux/selinux.h not found])
@@ -618,52 +664,24 @@ AS_IF([test "$with_selinux" = yes],[
   ],[
     AC_MSG_ERROR([--with-selinux given, but selinux/label.h not found])
   ])
-
-  dnl FIXME: semanage is only needed for the sepolicy plugin
-  AC_CHECK_HEADER([semanage/semanage.h],[
-    save_LIBS="$LIBS"
-    AC_CHECK_LIB([semanage],[semanage_begin_transaction],[],[
-      AC_MSG_ERROR([--with-selinux given, but semanage_begin_transaction missing in libsemanage])])
-    AC_CHECK_LIB([semanage],[semanage_commit],[],[
-      AC_MSG_ERROR([--with-selinux given, but semanage_commit missing in libsemanage])])
-    AC_CHECK_LIB([semanage],[semanage_connect],[],[
-      AC_MSG_ERROR([--with-selinux given, but semanage_connect missing in libsemanage])])
-    AC_CHECK_LIB([semanage],[semanage_disconnect],[],[
-      AC_MSG_ERROR([--with-selinux given, but semanage_disconnect missing in libsemanage])])
-    AC_CHECK_LIB([semanage],[semanage_handle_create],[],[
-      AC_MSG_ERROR([--with-selinux given, but semanage_handle_create missing in libsemanage])])
-    AC_CHECK_LIB([semanage],[semanage_handle_destroy],[],[
-      AC_MSG_ERROR([--with-selinux given, but semanage_handle_destroy missing in libsemanage])])
-    AC_CHECK_LIB([semanage],[semanage_is_connected],[],[
-      AC_MSG_ERROR([--with-selinux given, but semanage_is_connected missing in libsemanage])])
-    AC_CHECK_LIB([semanage],[semanage_module_install_base_file],[],[
-      AC_MSG_ERROR([--with-selinux given, but semanage_module_install_base_file missing in libsemanage])])
-    AC_CHECK_LIB([semanage],[semanage_module_install_file],[],[
-      AC_MSG_ERROR([--with-selinux given, but semanage_module_install_file missing in libsemanage])])
-    AC_CHECK_LIB([semanage],[semanage_module_remove],[],[
-      AC_MSG_ERROR([--with-selinux given, but semanage_module_remove missing in libsemanage])])
-    AC_CHECK_LIB([semanage],[semanage_select_store],[],[
-      AC_MSG_ERROR([--with-selinux given, but semanage_select_store missing in libsemanage])])
-    AC_CHECK_LIB([semanage],[semanage_set_check_contexts],[],[
-      AC_MSG_ERROR([--with-selinux given, but semanage_set_check_contexts missing in libsemanage])])
-    AC_CHECK_LIB([semanage],[semanage_set_create_store],[],[
-      AC_MSG_ERROR([--with-selinux given, but semanage_set_create_store missing in libsemanage])])
-    AC_CHECK_LIB([semanage],[semanage_set_reload],[],[
-      AC_MSG_ERROR([--with-selinux given, but semanage_set_reload missing in libsemanage])])
-    LIBS="$save_LIBS"
-  ],[
-    AC_MSG_ERROR([--with-selinux given, but semanage/semanage.h not found])
-  ])
 ])
 
 AS_IF([test "$with_selinux" = yes],[
   AC_DEFINE(WITH_SELINUX, 1, [Build with selinux support?])
   WITH_SELINUX_LIB="-lselinux"
-  WITH_SEMANAGE_LIB="-lsemanage"
 ])
 AC_SUBST(WITH_SELINUX_LIB)
 AC_SUBST(WITH_SEMANAGE_LIB)
 AM_CONDITIONAL(SELINUX,[test "$with_selinux" = yes])
+
+# libimaevm
+with_iamevm=no
+AC_ARG_WITH(imaevm, [AS_HELP_STRING([--with-imaevm],[build with imaevm support])])
+if test "$with_imaevm" = yes ; then
+  AC_DEFINE(WITH_IMAEVM, 1, [Build with imaevm support?])
+  LIBS="$LIBS -limaevm"
+fi
+AM_CONDITIONAL(WITH_IMAEVM,[test "$with_imaevm" = yes])
 
 # libcap
 WITH_CAP_LIB=
@@ -744,6 +762,16 @@ AS_IF([test "$enable_plugins" = yes],[
 ])
 AM_CONDITIONAL(ENABLE_PLUGINS,[test "$enable_plugins" = yes])
 
+with_dbus=no
+AS_IF([test "$enable_plugins" != no],[
+  PKG_CHECK_MODULES([DBUS],
+    [dbus-1 >= 1.3],
+    [AC_DEFINE(DBUS, 1, [Build with dbus support?]) with_dbus=yes],
+    [with_dbus=no])
+  AC_SUBST(DBUS_CFLAGS)
+  AC_SUBST(DBUS_LIBS)
+])
+AM_CONDITIONAL(DBUS, [test "$with_dbus" = yes])
 
 with_dmalloc=no
 AC_ARG_WITH(dmalloc, [AS_HELP_STRING([--with-dmalloc],[build with dmalloc debugging support])])
@@ -751,8 +779,6 @@ if test "$with_dmalloc" = yes ; then
   AC_DEFINE(DMALLOC, 1, [Build with dmalloc support?])
   LIBS="$LIBS -ldmalloc"
 fi
-
-AC_CHECK_FUNCS(getpassphrase)
 
 #
 # get rid of the 4-th tuple, if config.guess returned "linux-gnu" for host_os
@@ -775,31 +801,6 @@ host_os_major=`echo "${host_os}" | sed 's/\..*$//'`
 host_os_noversion=`echo "${host_os}" | sed 's/[0-9]*\..*$//'`
 changequote([, ])
 
-for provscript in ${host_cpu}-${host_os_exact}.prov ${host_os_exact}.prov ${host_os_major}.prov ${host_os_noversion}.prov none ; do {
-    if test -f ${srcdir}/autodeps/${provscript} ; then
-       if [[ ${provscript} == none ]] ; then
-           echo "*** no default provides information is available for ${host_os_noversion}"
-       else
-           echo "using ${srcdir}/autodeps/${provscript} for automatic provides generation"
-       fi
-       ln -sf ${provscript} ${srcdir}/autodeps/find-provides
-       break
-    fi
-}; done
-
-
-for reqscript in ${host_cpu}-${host_os_exact}.req ${host_os_exact}.req ${host_os_major}.req ${host_os_noversion}.req none ; do {
-    if test -f ${srcdir}/autodeps/${reqscript} ; then
-       if [[ ${reqscript} == none ]] ; then
-           echo "*** no default requires information is available for ${host_os_noversion}"
-       else
-	  echo "using ${srcdir}/autodeps/${reqscript} for automatic requires generation"
-       fi
-       ln -sf ${reqscript} ${srcdir}/autodeps/find-requires
-       break
-    fi
-} done
-
 dnl permit overriding build_vendor for "canonical rpm vendor"
 RPMCANONVENDOR="$build_vendor"
 AC_ARG_WITH([vendor], 
@@ -812,6 +813,13 @@ RPMCANONGNU="$host_os_gnu"
 AC_SUBST(RPMCANONVENDOR)
 AC_SUBST(RPMCANONOS)
 AC_SUBST(RPMCANONGNU)
+
+RUNDIR="/run"
+AC_ARG_WITH([rundir], 
+  AS_HELP_STRING([--with-rundir=RUNDIR], [specify run-time variable directory]),
+  [RUNDIR=$withval])
+AC_DEFINE_UNQUOTED([RUNDIR],["${RUNDIR}"],[run-time variable directory])
+AC_SUBST(RUNDIR)
 
 if test X"$prefix" = XNONE ; then
     usrprefix="$ac_default_prefix"

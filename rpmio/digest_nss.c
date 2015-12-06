@@ -224,17 +224,13 @@ static SECOidTag getHashAlg(unsigned int hashalgo)
     return SEC_OID_UNKNOWN;
 }
 
-static int pgpMpiSet(unsigned int lbits, uint8_t *dest,
-		     const uint8_t * p, const uint8_t * pend)
+static int pgpMpiSet(unsigned int lbits, uint8_t *dest, const uint8_t * p)
 {
     unsigned int mbits = pgpMpiBits(p);
     unsigned int nbits;
     size_t nbytes;
     uint8_t *t = dest;
     unsigned int ix;
-
-    if ((p + ((mbits+7) >> 3)) > pend)
-	return 1;
 
     if (mbits > lbits)
 	return 1;
@@ -250,13 +246,9 @@ static int pgpMpiSet(unsigned int lbits, uint8_t *dest,
     return 0;
 }
 
-static SECItem *pgpMpiItem(PRArenaPool *arena, SECItem *item,
-			   const uint8_t *p, const uint8_t *pend)
+static SECItem *pgpMpiItem(PRArenaPool *arena, SECItem *item, const uint8_t *p)
 {
     size_t nbytes = pgpMpiLen(p)-2;
-
-    if (p + nbytes + 2 > pend)
-	return NULL;
 
     if (item == NULL) {
     	if ((item=SECITEM_AllocItem(arena, item, nbytes)) == NULL)
@@ -313,25 +305,28 @@ static SECKEYPublicKey *pgpNewPublicKey(KeyType type)
 #define DSA1_Q_BITS DSA_Q_BITS
 #endif
 
-static int pgpSetSigMpiDSA(pgpDigAlg pgpsig, int num,
-			   const uint8_t *p, const uint8_t *pend)
+static int pgpSetSigMpiDSA(pgpDigAlg pgpsig, int num, const uint8_t *p)
 {
     SECItem *sig = pgpsig->data;
-    int lbits = DSA1_Q_BITS;
+    unsigned int qbits = DSA1_Q_BITS;
+    unsigned int subprlen = DSA1_SUBPRIME_LEN;
+    unsigned int siglen = DSA1_SIGNATURE_LEN;
     int rc = 1; /* assume failure */
 
     switch (num) {
     case 0:
-	sig = pgpsig->data = SECITEM_AllocItem(NULL, NULL, DSA1_SIGNATURE_LEN);
+	sig = pgpsig->data = SECITEM_AllocItem(NULL, NULL, siglen);
 	if (sig) {
-	    memset(sig->data, 0, DSA1_SIGNATURE_LEN);
-	    rc = pgpMpiSet(lbits, sig->data, p, pend);
+	    memset(sig->data, 0, siglen);
+	    rc = pgpMpiSet(qbits, sig->data, p);
 	}
 	break;
     case 1:
-	if (sig && pgpMpiSet(lbits, sig->data+DSA1_SUBPRIME_LEN, p, pend) == 0) {
+	if (sig && pgpMpiSet(qbits, sig->data+subprlen, p) == 0) {
 	    SECItem *signew = SECITEM_AllocItem(NULL, NULL, 0);
-	    if (signew && DSAU_EncodeDerSig(signew, sig) == SECSuccess) {
+	    if (signew == NULL)
+		break;
+	    if (DSAU_EncodeDerSigWithLen(signew, sig, siglen) == SECSuccess) {
 		SECITEM_FreeItem(sig, PR_TRUE);
 		pgpsig->data = signew;
 		rc = 0;
@@ -343,8 +338,7 @@ static int pgpSetSigMpiDSA(pgpDigAlg pgpsig, int num,
     return rc;
 }
 
-static int pgpSetKeyMpiDSA(pgpDigAlg pgpkey, int num,
-			   const uint8_t *p, const uint8_t *pend)
+static int pgpSetKeyMpiDSA(pgpDigAlg pgpkey, int num, const uint8_t *p)
 {
     SECItem *mpi = NULL;
     SECKEYPublicKey *key = pgpkey->data;
@@ -355,16 +349,16 @@ static int pgpSetKeyMpiDSA(pgpDigAlg pgpkey, int num,
     if (key) {
 	switch (num) {
 	case 0:
-	    mpi = pgpMpiItem(key->arena, &key->u.dsa.params.prime, p, pend);
+	    mpi = pgpMpiItem(key->arena, &key->u.dsa.params.prime, p);
 	    break;
 	case 1:
-	    mpi = pgpMpiItem(key->arena, &key->u.dsa.params.subPrime, p, pend);
+	    mpi = pgpMpiItem(key->arena, &key->u.dsa.params.subPrime, p);
 	    break;
 	case 2:
-	    mpi = pgpMpiItem(key->arena, &key->u.dsa.params.base, p, pend);
+	    mpi = pgpMpiItem(key->arena, &key->u.dsa.params.base, p);
 	    break;
 	case 3:
-	    mpi = pgpMpiItem(key->arena, &key->u.dsa.publicValue, p, pend);
+	    mpi = pgpMpiItem(key->arena, &key->u.dsa.publicValue, p);
 	    break;
 	}
     }
@@ -389,21 +383,19 @@ static int pgpVerifySigDSA(pgpDigAlg pgpkey, pgpDigAlg pgpsig,
     return (rc != SECSuccess);
 }
 
-static int pgpSetSigMpiRSA(pgpDigAlg pgpsig, int num,
-			   const uint8_t *p, const uint8_t *pend)
+static int pgpSetSigMpiRSA(pgpDigAlg pgpsig, int num, const uint8_t *p)
 {
     SECItem *sigitem = NULL;
 
     if (num == 0) {
-       sigitem = pgpMpiItem(NULL, pgpsig->data, p, pend);
+       sigitem = pgpMpiItem(NULL, pgpsig->data, p);
        if (sigitem)
            pgpsig->data = sigitem;
     }
     return (sigitem == NULL);
 }
 
-static int pgpSetKeyMpiRSA(pgpDigAlg pgpkey, int num,
-			   const uint8_t *p, const uint8_t *pend)
+static int pgpSetKeyMpiRSA(pgpDigAlg pgpkey, int num, const uint8_t *p)
 {
     SECItem *kitem = NULL;
     SECKEYPublicKey *key = pgpkey->data;
@@ -414,10 +406,10 @@ static int pgpSetKeyMpiRSA(pgpDigAlg pgpkey, int num,
     if (key) {
 	switch (num) {
 	case 0:
-	    kitem = pgpMpiItem(key->arena, &key->u.rsa.modulus, p, pend);
+	    kitem = pgpMpiItem(key->arena, &key->u.rsa.modulus, p);
 	    break;
 	case 1:
-	    kitem = pgpMpiItem(key->arena, &key->u.rsa.publicExponent, p, pend);
+	    kitem = pgpMpiItem(key->arena, &key->u.rsa.publicExponent, p);
 	    break;
 	}
     }
@@ -472,8 +464,7 @@ static void pgpFreeKeyRSADSA(pgpDigAlg ka)
     ka->data = NULL;
 }
 
-static int pgpSetMpiNULL(pgpDigAlg pgpkey, int num,
-			 const uint8_t *p, const uint8_t *pend)
+static int pgpSetMpiNULL(pgpDigAlg pgpkey, int num, const uint8_t *p)
 {
     return 1;
 }

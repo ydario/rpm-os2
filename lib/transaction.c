@@ -4,6 +4,8 @@
 
 #include "system.h"
 
+#include <inttypes.h>
+
 #include <rpm/rpmlib.h>		/* rpmMachineScore, rpmReadPackageFile */
 #include <rpm/rpmmacro.h>	/* XXX for rpmExpand */
 #include <rpm/rpmlog.h>
@@ -21,6 +23,9 @@
 #include "lib/rpmte_internal.h"	/* only internal apis */
 #include "lib/rpmts_internal.h"
 #include "rpmio/rpmhook.h"
+#include "lib/rpmtriggers.h"
+
+#include "lib/rpmplugins.h"
 
 /* XXX FIXME: merge with existing (broken?) tests in system.h */
 /* portability fiddles */
@@ -285,17 +290,21 @@ static uint64_t countFiles(rpmts ts)
     uint64_t fc = 0;
     rpmtsi pi = rpmtsiInit(ts);
     rpmte p;
-    while ((p = rpmtsiNext(pi, 0)) != NULL)
-	fc += rpmfiFC(rpmteFI(p));
+    rpmfiles files;
+    while ((p = rpmtsiNext(pi, 0)) != NULL) {
+	files = rpmteFiles(p);
+	fc += rpmfilesFC(files);
+	rpmfilesFree(files);
+    }
     rpmtsiFree(pi);
     return fc;
 }
 
-static int handleRemovalConflict(rpmfi fi, int fx, rpmfi ofi, int ofx)
+static int handleRemovalConflict(rpmfiles fi, int fx, rpmfiles ofi, int ofx)
 {
     int rConflicts = 0; /* Removed files don't conflict, normally */
-    rpmFileTypes ft = rpmfiWhatis(rpmfiFModeIndex(fi, fx));
-    rpmFileTypes oft = rpmfiWhatis(rpmfiFModeIndex(ofi, ofx));
+    rpmFileTypes ft = rpmfiWhatis(rpmfilesFMode(fi, fx));
+    rpmFileTypes oft = rpmfiWhatis(rpmfilesFMode(ofi, ofx));
     struct stat sb;
     char *fn = NULL;
 
@@ -306,7 +315,7 @@ static int handleRemovalConflict(rpmfi fi, int fx, rpmfi ofi, int ofx)
     } else if (oft == LINK) {
 	/* We can't correctly handle directory symlink changing to directory */
 	if (ft == XDIR) {
-	    fn = rpmfiFNIndex(fi, fx);
+	    fn = rpmfilesFN(fi, fx);
 	    if (stat(fn, &sb) == 0 && S_ISDIR(sb.st_mode))
 		rConflicts = 1;
 	}
@@ -318,7 +327,7 @@ static int handleRemovalConflict(rpmfi fi, int fx, rpmfi ofi, int ofx)
      */
     if (rConflicts) {
 	if (fn == NULL)
-	    fn = rpmfiFNIndex(fi, fx);
+	    fn = rpmfilesFN(fi, fx);
 	if (lstat(fn, &sb) || rpmfiWhatis(sb.st_mode) == ft)
 	    rConflicts = 0;
     }
@@ -336,15 +345,15 @@ static int handleRemovalConflict(rpmfi fi, int fx, rpmfi ofi, int ofx)
  * unnecessary with careful packaging.
  */
 static int handleColorConflict(rpmts ts,
-			       rpmfs fs, rpmfi fi, int fx,
-			       rpmfs ofs, rpmfi ofi, int ofx)
+			       rpmfs fs, rpmfiles fi, int fx,
+			       rpmfs ofs, rpmfiles ofi, int ofx)
 {
     int rConflicts = 1;
     rpm_color_t tscolor = rpmtsColor(ts);
 
     if (tscolor != 0) {
-	rpm_color_t fcolor = rpmfiFColorIndex(fi, fx) & tscolor;
-	rpm_color_t ofcolor = rpmfiFColorIndex(ofi, ofx) & tscolor;
+	rpm_color_t fcolor = rpmfilesFColor(fi, fx) & tscolor;
+	rpm_color_t ofcolor = rpmfilesFColor(ofi, ofx) & tscolor;
 
 	if (fcolor != 0 && ofcolor != 0 && fcolor != ofcolor) {
 	    rpm_color_t prefcolor = rpmtsPrefColor(ts);
@@ -371,22 +380,24 @@ static int handleColorConflict(rpmts ts,
  * @param ts		transaction set
  * @param p		current transaction element
  * @param fi		file info set
- * @param shared	shared file info
- * @param sharedCount	no. of shared elements
- * @param reportConflicts
+ * @param fx		file index
+ * @param otherHeader	header containing the matching file
+ * @param otherFi	matching file info set
+ * @param ofx		matching file index
+ * @param beingRemoved  file being removed (installed otherwise)
  */
 /* XXX only ts->{probs,rpmdb} modified */
-static void handleInstInstalledFile(const rpmts ts, rpmte p, rpmfi fi, int fx,
-				   Header otherHeader, rpmfi otherFi, int ofx,
+static void handleInstInstalledFile(const rpmts ts, rpmte p, rpmfiles fi, int fx,
+				   Header otherHeader, rpmfiles otherFi, int ofx,
 				   int beingRemoved)
 {
     rpmfs fs = rpmteGetFileStates(p);
-    int isCfgFile = ((rpmfiFFlagsIndex(otherFi, ofx) | rpmfiFFlagsIndex(fi, fx)) & RPMFILE_CONFIG);
+    int isCfgFile = ((rpmfilesFFlags(otherFi, ofx) | rpmfilesFFlags(fi, fx)) & RPMFILE_CONFIG);
 
     if (XFA_SKIPPING(rpmfsGetAction(fs, fx)))
 	return;
 
-    if (rpmfiCompareIndex(otherFi, ofx, fi, fx)) {
+    if (rpmfilesCompare(otherFi, ofx, fi, fx)) {
 	int rConflicts = 1;
 	char rState = RPMFILE_STATE_REPLACED;
 
@@ -421,7 +432,7 @@ static void handleInstInstalledFile(const rpmts ts, rpmte p, rpmfi fi, int fx,
 
 	if (rConflicts) {
 	    char *altNEVR = headerGetAsString(otherHeader, RPMTAG_NEVRA);
-	    char *fn = rpmfiFNIndex(fi, fx);
+	    char *fn = rpmfilesFN(fi, fx);
 	    rpmteAddProblem(p, RPMPROB_FILE_CONFLICT, altNEVR, fn,
 			    headerGetInstance(otherHeader));
 	    free(fn);
@@ -440,30 +451,30 @@ static void handleInstInstalledFile(const rpmts ts, rpmte p, rpmfi fi, int fx,
     if (isCfgFile) {
 	int skipMissing = ((rpmtsFlags(ts) & RPMTRANS_FLAG_ALLFILES) ? 0 : 1);
 	rpmFileAction action;
-	action = rpmfiDecideFateIndex(otherFi, ofx, fi, fx, skipMissing);
+	action = rpmfilesDecideFate(otherFi, ofx, fi, fx, skipMissing);
 	rpmfsSetAction(fs, fx, action);
     }
-    rpmfiSetFReplacedSizeIndex(fi, fx, rpmfiFSizeIndex(otherFi, ofx));
+    rpmfilesSetFReplacedSize(fi, fx, rpmfilesFSize(otherFi, ofx));
 }
 
 /**
  * Update disk space needs on each partition for this package's files.
  */
 /* XXX only ts->{probs,di} modified */
-static void handleOverlappedFiles(rpmts ts, fingerPrintCache fpc, rpmte p, rpmfi fi)
+static void handleOverlappedFiles(rpmts ts, fingerPrintCache fpc, rpmte p, rpmfiles fi)
 {
     rpm_loff_t fixupSize = 0;
     int i, j;
     rpmfs fs = rpmteGetFileStates(p);
     rpmfs otherFs;
-    rpm_count_t fc = rpmfiFC(fi);
+    rpm_count_t fc = rpmfilesFC(fi);
     int reportConflicts = !(rpmtsFilterFlags(ts) & RPMPROB_FILTER_REPLACENEWFILES);
-    fingerPrint * fpList = rpmfiFps(fi);
+    fingerPrint * fpList = rpmfilesFps(fi);
 
     for (i = 0; i < fc; i++) {
 	struct fingerPrint_s * fiFps;
 	int otherPkgNum, otherFileNum;
-	rpmfi otherFi;
+	rpmfiles otherFi;
 	rpmte otherTe;
 	rpmfileAttrs FFlags;
 	struct rpmffi_s * recs;
@@ -472,7 +483,7 @@ static void handleOverlappedFiles(rpmts ts, fingerPrintCache fpc, rpmte p, rpmfi
 	if (XFA_SKIPPING(rpmfsGetAction(fs, i)))
 	    continue;
 
-	FFlags = rpmfiFFlagsIndex(fi, i);
+	FFlags = rpmfilesFFlags(fi, i);
 
 	fixupSize = 0;
 
@@ -522,7 +533,6 @@ static void handleOverlappedFiles(rpmts ts, fingerPrintCache fpc, rpmte p, rpmfi
 
 	for (otherPkgNum = j - 1; otherPkgNum >= 0; otherPkgNum--) {
 	    otherTe = recs[otherPkgNum].p;
-	    otherFi = rpmteFI(otherTe);
 	    otherFileNum = recs[otherPkgNum].fileno;
 	    otherFs = rpmteGetFileStates(otherTe);
 
@@ -531,8 +541,10 @@ static void handleOverlappedFiles(rpmts ts, fingerPrintCache fpc, rpmte p, rpmfi
 		continue;
 
 	    /* XXX Happens iff fingerprint for incomplete package install. */
-	    if (rpmfsGetAction(otherFs, otherFileNum) != FA_UNKNOWN)
+	    if (rpmfsGetAction(otherFs, otherFileNum) != FA_UNKNOWN) {
+		otherFi = rpmteFiles(otherTe);
 		break;
+	    }
 	}
 
 	switch (rpmteType(p)) {
@@ -542,7 +554,7 @@ static void handleOverlappedFiles(rpmts ts, fingerPrintCache fpc, rpmte p, rpmfi
 		rpmFileAction action;
 		if (rpmfsGetAction(fs, i) != FA_UNKNOWN)
 		    break;
-		if (rpmfiConfigConflictIndex(fi, i)) {
+		if (rpmfilesConfigConflict(fi, i)) {
 		    /* Here is a non-overlapped pre-existing config file. */
 		    action = (FFlags & RPMFILE_NOREPLACE) ?
 			      FA_ALTNAME : FA_BACKUP;
@@ -555,7 +567,7 @@ static void handleOverlappedFiles(rpmts ts, fingerPrintCache fpc, rpmte p, rpmfi
 
 assert(otherFi != NULL);
 	    /* Mark added overlapped non-identical files as a conflict. */
-	    if (rpmfiCompareIndex(otherFi, otherFileNum, fi, i)) {
+	    if (rpmfilesCompare(otherFi, otherFileNum, fi, i)) {
 		int rConflicts;
 
 		/* If enabled, resolve colored conflicts to preferred type */
@@ -563,7 +575,7 @@ assert(otherFi != NULL);
 						otherFs, otherFi, otherFileNum);
 
 		if (rConflicts && reportConflicts) {
-		    char *fn = rpmfiFNIndex(fi, i);
+		    char *fn = rpmfilesFN(fi, i);
 		    rpmteAddProblem(p, RPMPROB_NEW_FILE_CONFLICT,
 				    rpmteNEVRA(otherTe), fn, 0);
 		    free(fn);
@@ -574,10 +586,13 @@ assert(otherFi != NULL);
 		if (oaction != FA_UNKNOWN && !XFA_SKIPPING(oaction)) {
 		    rpmfileAttrs oflags;
 		    /* ...but ghosts aren't really created so... */
-		    oflags = rpmfiFFlagsIndex(otherFi, otherFileNum);
+		    oflags = rpmfilesFFlags(otherFi, otherFileNum);
 		    if (!(oflags & RPMFILE_GHOST)) {
 			rpmfsSetAction(fs, i, FA_SKIP);
 		    }
+		/* if the other file is color skipped then skip this file too */
+		} else if (oaction == FA_SKIPCOLOR) {
+		    rpmfsSetAction(fs, i, FA_SKIPCOLOR);
 		}
 	    }
 
@@ -586,9 +601,9 @@ assert(otherFi != NULL);
 		break;
 
 	    /* Try to get the disk accounting correct even if a conflict. */
-	    fixupSize = rpmfiFSizeIndex(otherFi, otherFileNum);
+	    fixupSize = rpmfilesFSize(otherFi, otherFileNum);
 
-	    if (rpmfiConfigConflictIndex(fi, i)) {
+	    if (rpmfilesConfigConflict(fi, i)) {
 		/* Here is an overlapped  pre-existing config file. */
 		rpmFileAction action;
 		action = (FFlags & RPMFILE_NOREPLACE) ? FA_ALTNAME : FA_SKIP;
@@ -614,12 +629,12 @@ assert(otherFi != NULL);
 	    }
 	    if (XFA_SKIPPING(rpmfsGetAction(fs, i)))
 		break;
-	    if (rpmfiFStateIndex(fi, i) != RPMFILE_STATE_NORMAL)
+	    if (rpmfilesFState(fi, i) != RPMFILE_STATE_NORMAL)
 		break;
 		
 	    /* Pre-existing modified config files need to be saved. */
-	    if (rpmfiConfigConflictIndex(fi, i)) {
-		rpmfsSetAction(fs, i, FA_BACKUP);
+	    if (rpmfilesConfigConflict(fi, i)) {
+		rpmfsSetAction(fs, i, FA_SAVE);
 		break;
 	    }
 	
@@ -627,10 +642,11 @@ assert(otherFi != NULL);
 	    rpmfsSetAction(fs, i, FA_ERASE);
 	    break;
 	}
+	rpmfilesFree(otherFi);
 
 	/* Update disk space info for a file. */
 	rpmtsUpdateDSI(ts, fpEntryDev(fpc, fiFps), fpEntryDir(fpc, fiFps),
-		       rpmfiFSizeIndex(fi, i), rpmfiFReplacedSizeIndex(fi, i),
+		       rpmfilesFSize(fi, i), rpmfilesFReplacedSize(fi, i),
 		       fixupSize, rpmfsGetAction(fs, i));
 
     }
@@ -641,7 +657,6 @@ assert(otherFi != NULL);
  * @param tspool	transaction string pool
  * @param p		current transaction element
  * @param h		installed header
- * @param ps		problem set
  */
 static void ensureOlder(rpmstrPool tspool, const rpmte p, const Header h)
 {
@@ -707,10 +722,8 @@ static char ** matchNetsharedpath(const rpmts ts, rpmfi fi)
     return nsp;
 }
 
-static void skipEraseFiles(const rpmts ts, rpmte p)
+static void skipEraseFiles(const rpmts ts, rpmfiles files, rpmfs fs)
 {
-    rpmfi fi = rpmteFI(p);
-    rpmfs fs = rpmteGetFileStates(p);
     int i;
     char ** nsp;
     /*
@@ -719,7 +732,7 @@ static void skipEraseFiles(const rpmts ts, rpmte p)
      * they do need to take package relocations into account).
      */
     if (ts->netsharedPaths) {
-	fi = rpmfiInit(fi, 0);
+	rpmfi fi = rpmfilesIter(files, RPMFI_ITER_FWD);
 	while ((i = rpmfiNext(fi)) >= 0)
 	{
 	    nsp = matchNetsharedpath(ts, fi);
@@ -727,6 +740,7 @@ static void skipEraseFiles(const rpmts ts, rpmte p)
 		rpmfsSetAction(fs, i, FA_SKIPNETSHARED);
 	    }
 	}
+	rpmfiFree(fi);
     }
 }
 
@@ -734,9 +748,10 @@ static void skipEraseFiles(const rpmts ts, rpmte p)
 /**
  * Skip any files that do not match install policies.
  * @param ts		transaction set
- * @param fi		file info set
+ * @param files		file info set
+ * @param fs		file states
  */
-static void skipInstallFiles(const rpmts ts, rpmte p)
+static void skipInstallFiles(const rpmts ts, rpmfiles files, rpmfs fs)
 {
     rpm_color_t tscolor = rpmtsColor(ts);
     rpm_color_t FColor;
@@ -746,8 +761,7 @@ static void skipInstallFiles(const rpmts ts, rpmte p)
     char * dff;
     int dc;
     int i, j, ix;
-    rpmfi fi = rpmteFI(p);
-    rpmfs fs = rpmteGetFileStates(p);
+    rpmfi fi = rpmfilesIter(files, RPMFI_ITER_FWD);
 
     if (!noDocs)
 	noDocs = rpmExpandNumeric("%{_excludedocs}");
@@ -838,7 +852,8 @@ static void skipInstallFiles(const rpmts ts, rpmte p)
     }
 
     /* Skip (now empty) directories that had skipped files. */
-    for (j = 0; j < dc; j++) {
+    /* Iterate over dirs in reversed order to solve subdirs at first */
+    for (j = dc - 1; j >= 0; j--) {
 	const char * dn, * bn;
 	size_t dnlen, bnlen;
 
@@ -846,7 +861,7 @@ static void skipInstallFiles(const rpmts ts, rpmte p)
 	if (!dff[j]) continue;	/* dir was not emptied here. */
 	
 	/* Find parent directory and basename. */
-	dn = rpmfiDNIndex(fi, j); dnlen = strlen(dn) - 1;
+	dn = rpmfilesDN(files, j); dnlen = strlen(dn) - 1;
 	bn = dn + dnlen;	bnlen = 0;
 	while (bn > dn && bn[-1] != '/') {
 		bnlen++;
@@ -879,12 +894,18 @@ static void skipInstallFiles(const rpmts ts, rpmte p)
 		continue;
 	    rpmlog(RPMLOG_DEBUG, "excluding directory %s\n", dn);
 	    rpmfsSetAction(fs, i, FA_SKIPNSTATE);
+	    ix = rpmfiDX(fi);
+	    /* Decrease count of files for parent directory */
+	    drc[ix]--;
+	    /* Mark directory because something was removed from them */
+	    dff[ix] = 1;
 	    break;
 	}
     }
 
     free(drc);
     free(dff);
+    rpmfiFree(fi);
 }
 
 #undef HASHTYPE
@@ -919,6 +940,7 @@ rpmdbMatchIterator rpmFindBaseNamesInDB(rpmts ts, uint64_t fileCount)
     tsMembers tsmem = rpmtsMembers(ts);
     rpmstrPool tspool = rpmtsPool(ts);
     rpmtsi pi;  rpmte p;
+    rpmfiles files;
     rpmfi fi;
     rpmdbMatchIterator mi;
     int oc = 0;
@@ -937,7 +959,8 @@ rpmdbMatchIterator rpmFindBaseNamesInDB(rpmts ts, uint64_t fileCount)
 	rpmtsNotify(ts, NULL, RPMCALLBACK_TRANS_PROGRESS, oc++, tsmem->orderCount);
 
 	/* Gather all installed headers with matching basename's. */
-	fi = rpmfiInit(rpmteFI(p), 0);
+	files = rpmteFiles(p);
+	fi = rpmfilesIter(files, RPMFI_ITER_FWD);
 	while (rpmfiNext(fi) >= 0) {
 	    size_t keylen;
 
@@ -952,7 +975,9 @@ rpmdbMatchIterator rpmFindBaseNamesInDB(rpmts ts, uint64_t fileCount)
 		keylen++;	/* XXX "/" fixup. */
 	    rpmdbExtendIterator(mi, baseName, keylen);
 	    rpmStringSetAddEntry(baseNames, baseNameId);
-	 }
+	}
+	rpmfiFree(fi);
+	rpmfilesFree(files);
     }
     rpmtsiFree(pi);
     rpmStringSetFree(baseNames);
@@ -973,7 +998,7 @@ void checkInstalledFiles(rpmts ts, uint64_t fileCount, fingerPrintCache fpc)
 {
     tsMembers tsmem = rpmtsMembers(ts);
     rpmte p;
-    rpmfi fi;
+    rpmfiles fi;
     rpmfs fs;
     int j;
     unsigned int fileNum;
@@ -1002,15 +1027,15 @@ void checkInstalledFiles(rpmts ts, uint64_t fileCount, fingerPrintCache fpc)
 	fingerPrint *fpp = NULL;
 	unsigned int installedPkg;
 	int beingRemoved = 0;
-	rpmfi otherFi = NULL;
+	rpmfiles otherFi = NULL;
 	rpmte *removedPkg = NULL;
 
 	/* Is this package being removed? */
 	installedPkg = rpmdbGetIteratorOffset(mi);
-	if (removedHashGetEntry(tsmem->removedPackages, installedPkg,
+	if (packageHashGetEntry(tsmem->removedPackages, installedPkg,
 				&removedPkg, NULL, NULL)) {
 	    beingRemoved = 1;
-	    otherFi = rpmfiLink(rpmteFI(removedPkg[0]));
+	    otherFi = rpmteFiles(removedPkg[0]);
 	}
 
 	h = headerLink(h);
@@ -1044,7 +1069,7 @@ void checkInstalledFiles(rpmts ts, uint64_t fileCount, fingerPrintCache fpc)
 		fpLookup(fpc, dirName, baseName, &fpp);
 		fpIx = 0;
 	    } else {
-		fpp = rpmfiFps(otherFi);
+		fpp = rpmfilesFps(otherFi);
 		fpIx = fileNum;
 	    }
 
@@ -1053,7 +1078,7 @@ void checkInstalledFiles(rpmts ts, uint64_t fileCount, fingerPrintCache fpc)
 
 	    for (j = 0; j < numRecs; j++) {
 	        p = recs[j].p;
-		fi = rpmteFI(p);
+		fi = rpmteFiles(p);
 		fs = rpmteGetFileStates(p);
 
 		/* Determine the fate of each file. */
@@ -1061,7 +1086,7 @@ void checkInstalledFiles(rpmts ts, uint64_t fileCount, fingerPrintCache fpc)
 		case TR_ADDED:
 		    if (!otherFi) {
 			/* XXX What to do if this fails? */
-		        otherFi = rpmfiNew(ts, h, RPMTAG_BASENAMES, RPMFI_KEEPHEADER);
+		        otherFi = rpmfilesNew(NULL, h, RPMTAG_BASENAMES, RPMFI_KEEPHEADER);
 		    }
 		    handleInstInstalledFile(ts, p, fi, recs[j].fileno,
 					    h, otherFi, fileNum, beingRemoved);
@@ -1073,13 +1098,14 @@ void checkInstalledFiles(rpmts ts, uint64_t fileCount, fingerPrintCache fpc)
 		    }
 		    break;
 		}
+		rpmfilesFree(fi);
 	    }
 
 	    newheader = rpmdbNextIterator(mi);
 
 	} while (newheader==h);
 
-	otherFi = rpmfiFree(otherFi);
+	otherFi = rpmfilesFree(otherFi);
 	if (!beingRemoved) {
 	    rpmtdFreeData(&ostates);
 	    rpmtdFreeData(&bnames);
@@ -1133,7 +1159,7 @@ static rpmps checkProblems(rpmts ts)
 	if (!(probFilter & RPMPROB_FILTER_REPLACEPKG)) {
 	    Header h;
 	    rpmdbMatchIterator mi;
-	    mi = rpmtsInitIterator(ts, RPMDBI_NAME, rpmteN(p), 0);
+	    mi = rpmtsPrunedIterator(ts, RPMDBI_NAME, rpmteN(p), 1);
 	    rpmdbSetIteratorRE(mi, RPMTAG_EPOCH, RPMMIRE_STRCMP, rpmteE(p));
 	    rpmdbSetIteratorRE(mi, RPMTAG_VERSION, RPMMIRE_STRCMP, rpmteV(p));
 	    rpmdbSetIteratorRE(mi, RPMTAG_RELEASE, RPMMIRE_STRCMP, rpmteR(p));
@@ -1167,92 +1193,15 @@ static int runTransScripts(rpmts ts, pkgGoal goal)
     int rc = 0;
     rpmte p;
     rpmtsi pi = rpmtsiInit(ts);
-    while ((p = rpmtsiNext(pi, TR_ADDED)) != NULL) {
+    rpmElementTypes types = TR_ADDED;
+    if (goal == PKG_TRANSFILETRIGGERUN)
+	types = TR_REMOVED;
+
+    while ((p = rpmtsiNext(pi, types)) != NULL) {
 	rc += rpmteProcess(p, goal);
     }
     rpmtsiFree(pi);
     return rc;
-}
-
-static int rpmtsSetupCollections(rpmts ts)
-{
-    /* seenCollectionsPost and TEs are basically a key-value pair. each item in
-     * seenCollectionsPost is a collection that has been seen from any package,
-     * and the associated index in the TEs is the last transaction element
-     * where that collection was seen. */
-    ARGV_t seenCollectionsPost = NULL;
-    rpmte *TEs = NULL;
-    int numSeenPost = 0;
-
-    /* seenCollectionsPre is a list of collections that have been seen from
-     * only removed packages */
-    ARGV_t seenCollectionsPre = NULL;
-    int numSeenPre = 0;
-
-    ARGV_const_t collname;
-    int installing = 1;
-    int i;
-
-    rpmte p;
-    rpmtsi pi = rpmtsiInit(ts);
-    while ((p = rpmtsiNext(pi, 0)) != NULL) {
-	/* detect when we switch from installing to removing packages, and
-	 * update the lastInCollectionAdd lists */
-	if (installing && rpmteType(p) == TR_REMOVED) {
-	    installing = 0;
-	    for (i = 0; i < numSeenPost; i++) {
-		rpmteAddToLastInCollectionAdd(TEs[i], seenCollectionsPost[i]);
-	    }
-	}
-
-	rpmteSetupCollectionPlugins(p);
-
-	for (collname = rpmteCollections(p); collname && *collname; collname++) {
-	    /* figure out if we've seen this collection in post before */
-	    for (i = 0; i < numSeenPost && strcmp(*collname, seenCollectionsPost[i]); i++) {
-	    }
-	    if (i < numSeenPost) {
-		/* we've seen the collection, update the index */
-		TEs[i] = p;
-	    } else {
-		/* haven't seen the collection yet, add it */
-		argvAdd(&seenCollectionsPost, *collname);
-		TEs = xrealloc(TEs, sizeof(*TEs) * (numSeenPost + 1));
-		TEs[numSeenPost] = p;
-		numSeenPost++;
-	    }
-
-	    /* figure out if we've seen this collection in pre remove before */
-	    if (installing == 0) {
-		for (i = 0; i < numSeenPre && strcmp(*collname, seenCollectionsPre[i]); i++) {
-		}
-		if (i >= numSeenPre) {
-		    /* haven't seen this collection, add it */
-		    rpmteAddToFirstInCollectionRemove(p, *collname);
-		    argvAdd(&seenCollectionsPre, *collname);
-		    numSeenPre++;
-		}
-	    }
-	}
-    }
-    rpmtsiFree(pi);
-
-    /* we've looked at all the rpmte's, update the lastInCollectionAny lists */
-    for (i = 0; i < numSeenPost; i++) {
-	rpmteAddToLastInCollectionAny(TEs[i], seenCollectionsPost[i]);
-	if (installing == 1) {
-	    /* lastInCollectionAdd is only updated above if packages were
-	     * removed. if nothing is removed in the transaction, we need to
-	     * update that list here */
-	    rpmteAddToLastInCollectionAdd(TEs[i], seenCollectionsPost[i]);
-	}
-    }
-
-    argvFree(seenCollectionsPost);
-    argvFree(seenCollectionsPre);
-    _free(TEs);
-
-    return 0;
 }
 
 static int rpmtsSetup(rpmts ts, rpmprobFilterFlags ignoreSet)
@@ -1266,21 +1215,7 @@ static int rpmtsSetup(rpmts ts, rpmprobFilterFlags ignoreSet)
 	(void) rpmtsSetFlags(ts, (rpmtsFlags(ts) | _noTransTriggers));
 
     if (rpmtsFlags(ts) & (RPMTRANS_FLAG_JUSTDB | RPMTRANS_FLAG_TEST))
-	(void) rpmtsSetFlags(ts, (rpmtsFlags(ts) | _noTransScripts | _noTransTriggers | RPMTRANS_FLAG_NOCOLLECTIONS));
-
-    /* if SELinux isn't enabled or it is a test run, don't bother... */
-    if (!is_selinux_enabled() || (rpmtsFlags(ts) & RPMTRANS_FLAG_TEST)) {
-        rpmtsSetFlags(ts, (rpmtsFlags(ts) | RPMTRANS_FLAG_NOCONTEXTS));
-    }
-
-    if (rpmtsFlags(ts) & RPMTRANS_FLAG_NOCONTEXTS) {
-	rpmlog(RPMLOG_DEBUG, "Selinux disabled.\n");
-    } else {
-	if (rpmtsSELabelInit(ts, 1)) {
-	    rpmlog(RPMLOG_WARNING, "Failed to open SELinux handle.\n");
-	    rpmtsSetFlags(ts, (rpmtsFlags(ts) | RPMTRANS_FLAG_NOCONTEXTS));
-	}
-    }
+	(void) rpmtsSetFlags(ts, (rpmtsFlags(ts) | _noTransScripts | _noTransTriggers));
 
     /* 
      * Make sure the database is open RDWR for package install/erase.
@@ -1302,9 +1237,6 @@ static int rpmtsSetup(rpmts ts, rpmprobFilterFlags ignoreSet)
 
 static int rpmtsFinish(rpmts ts)
 {
-    if (!(rpmtsFlags(ts) & RPMTRANS_FLAG_NOCONTEXTS)) {
-	rpmtsSELabelFini(ts, 1);
-    }
     return rpmChrootSet(NULL);
 }
 
@@ -1313,7 +1245,6 @@ static int rpmtsPrepare(rpmts ts)
     tsMembers tsmem = rpmtsMembers(ts);
     rpmtsi pi;
     rpmte p;
-    rpmfi fi;
     int rc = 0;
     uint64_t fileCount = countFiles(ts);
     const char *dbhome = NULL;
@@ -1323,16 +1254,21 @@ static int rpmtsPrepare(rpmts ts)
 
     rpmlog(RPMLOG_DEBUG, "computing %" PRIu64 " file fingerprints\n", fileCount);
 
-    /* Skip netshared paths, not our i18n files, and excluded docs */
+    /* Reset actions, set skip for netshared paths and excluded files */
     pi = rpmtsiInit(ts);
     while ((p = rpmtsiNext(pi, 0)) != NULL) {
-	if (rpmfiFC(rpmteFI(p)) == 0)
-	    continue;
-	if (rpmteType(p) == TR_ADDED) {
-	    skipInstallFiles(ts, p);
-	} else {
-	    skipEraseFiles(ts, p);
+	rpmfiles files = rpmteFiles(p);
+	if (rpmfilesFC(files) > 0) {
+	    rpmfs fs = rpmteGetFileStates(p);
+	    /* Ensure clean state, this could get called more than once. */
+	    rpmfsResetActions(fs);
+	    if (rpmteType(p) == TR_ADDED) {
+		skipInstallFiles(ts, files, fs);
+	    } else {
+		skipEraseFiles(ts, files, fs);
+	    }
 	}
+	rpmfilesFree(files);
     }
     rpmtsiFree(pi);
 
@@ -1355,13 +1291,14 @@ static int rpmtsPrepare(rpmts ts)
 
     pi = rpmtsiInit(ts);
     while ((p = rpmtsiNext(pi, 0)) != NULL) {
-	if ((fi = rpmteFI(p)) == NULL)
+	rpmfiles files = rpmteFiles(p);;
+	if (files == NULL)
 	    continue;   /* XXX can't happen */
 
 	(void) rpmswEnter(rpmtsOp(ts, RPMTS_OP_FINGERPRINT), 0);
 	/* check files in ts against each other and update disk space
 	   needs on each partition for this package. */
-	handleOverlappedFiles(ts, fpc, p, fi);
+	handleOverlappedFiles(ts, fpc, p, files);
 
 	/* Check added package has sufficient space on each partition used. */
 	if (rpmteType(p) == TR_ADDED) {
@@ -1378,6 +1315,7 @@ static int rpmtsPrepare(rpmts ts)
 	    rpmtsCheckDSIProblems(ts, p);
 	}
 	(void) rpmswExit(rpmtsOp(ts, RPMTS_OP_FINGERPRINT), 0);
+	rpmfilesFree(files);
     }
     rpmtsiFree(pi);
     rpmtsNotify(ts, NULL, RPMCALLBACK_TRANS_STOP, 6, tsmem->orderCount);
@@ -1390,7 +1328,7 @@ static int rpmtsPrepare(rpmts ts)
     if (!(rpmtsFlags(ts) & (RPMTRANS_FLAG_TEST|RPMTRANS_FLAG_BUILD_PROBS))) {
 	pi = rpmtsiInit(ts);
 	while ((p = rpmtsiNext(pi, 0)) != NULL) {
-	    rpmteSetFI(p, NULL);
+	    rpmteCleanFiles(p);
 	}
 	rpmtsiFree(pi);
     }
@@ -1416,19 +1354,99 @@ static int rpmtsProcess(rpmts ts)
 	rpmlog(RPMLOG_DEBUG, "========== +++ %s %s-%s 0x%x\n",
 		rpmteNEVR(p), rpmteA(p), rpmteO(p), rpmteColor(p));
 
-	if (!(rpmtsFlags(ts) & RPMTRANS_FLAG_NOCONTEXTS)) {
-	    rpmtsSELabelInit(ts, 0);
-	}
-
 	failed = rpmteProcess(p, rpmteType(p));
 	if (failed) {
 	    rpmlog(RPMLOG_ERR, "%s: %s %s\n", rpmteNEVRA(p),
 		   rpmteTypeString(p), failed > 1 ? _("skipped") : _("failed"));
 	    rc++;
 	}
-	(void) rpmdbSync(rpmtsGetRdb(ts));
     }
     rpmtsiFree(pi);
+    return rc;
+}
+
+rpmRC rpmtsSetupTransactionPlugins(rpmts ts)
+{
+    rpmRC rc = RPMRC_OK;
+    ARGV_t files = NULL;
+    int nfiles = 0;
+    char *dsoPath = NULL;
+
+    /*
+     * Assume allocated equals initialized. There are some oddball cases
+     * (verification of non-installed package) where this is not true
+     * currently but that's not a new issue.
+     */
+    if ((rpmtsFlags(ts) & RPMTRANS_FLAG_NOPLUGINS) || ts->plugins != NULL)
+	return RPMRC_OK;
+
+    dsoPath = rpmExpand("%{__plugindir}/*.so", NULL);
+    if (rpmGlob(dsoPath, &nfiles, &files) == 0) {
+	rpmPlugins tsplugins = rpmtsPlugins(ts);
+	for (int i = 0; i < nfiles; i++) {
+	    char *bn = basename(files[i]);
+	    bn[strlen(bn)-strlen(".so")] = '\0';
+	    if (rpmpluginsAddPlugin(tsplugins, "transaction", bn) == RPMRC_FAIL)
+		rc = RPMRC_FAIL;
+	}
+	files = argvFree(files);
+    }
+    free(dsoPath);
+
+    return rc;
+}
+/**
+ * Run a scriptlet with args.
+ *
+ * Run a script with an interpreter. If the interpreter is not specified,
+ * /bin/sh will be used. If the interpreter is /bin/sh, then the args from
+ * the header will be ignored, passing instead arg1 and arg2.
+ *
+ * @param ts		transaction set
+ * @param te		transaction element
+ * @param prefixes	install prefixes
+ * @param script	scriptlet from header
+ * @param arg1		no. instances of package installed after scriptlet exec
+ *			(-1 is no arg)
+ * @param arg2		ditto, but for the target package
+ * @return		0 on success
+ */
+rpmRC runScript(rpmts ts, rpmte te, ARGV_const_t prefixes,
+		       rpmScript script, int arg1, int arg2)
+{
+    rpmRC stoprc, rc = RPMRC_OK;
+    rpmTagVal stag = rpmScriptTag(script);
+    FD_t sfd = NULL;
+    int warn_only = (stag != RPMTAG_PREIN &&
+		     stag != RPMTAG_PREUN &&
+		     stag != RPMTAG_PRETRANS &&
+		     stag != RPMTAG_VERIFYSCRIPT);
+
+    sfd = rpmtsNotify(ts, te, RPMCALLBACK_SCRIPT_START, stag, 0);
+    if (sfd == NULL)
+	sfd = rpmtsScriptFd(ts);
+
+    rpmswEnter(rpmtsOp(ts, RPMTS_OP_SCRIPTLETS), 0);
+    rc = rpmScriptRun(script, arg1, arg2, sfd,
+		      prefixes, warn_only, rpmtsPlugins(ts));
+    rpmswExit(rpmtsOp(ts, RPMTS_OP_SCRIPTLETS), 0);
+
+    /* Map warn-only errors to "notfound" for script stop callback */
+    stoprc = (rc != RPMRC_OK && warn_only) ? RPMRC_NOTFOUND : rc;
+    rpmtsNotify(ts, te, RPMCALLBACK_SCRIPT_STOP, stag, stoprc);
+
+    /*
+     * Notify callback for all errors. "total" abused for warning/error,
+     * rc only reflects whether the condition prevented install/erase
+     * (which is only happens with %prein and %preun scriptlets) or not.
+     */
+    if (rc != RPMRC_OK) {
+	if (warn_only) {
+	    rc = RPMRC_OK;
+	}
+	rpmtsNotify(ts, te, RPMCALLBACK_SCRIPT_ERROR, stag, rc);
+    }
+
     return rc;
 }
 
@@ -1436,8 +1454,10 @@ int rpmtsRun(rpmts ts, rpmps okProbs, rpmprobFilterFlags ignoreSet)
 {
     int rc = -1; /* assume failure */
     tsMembers tsmem = rpmtsMembers(ts);
-    rpmlock lock = NULL;
+    rpmtxn txn = NULL;
     rpmps tsprobs = NULL;
+    int TsmPreDone = 0; /* TsmPre hook hasn't been called */
+    
     /* Force default 022 umask during transaction for consistent results */
     mode_t oldmask = umask(022);
 
@@ -1449,7 +1469,7 @@ int rpmtsRun(rpmts ts, rpmps okProbs, rpmprobFilterFlags ignoreSet)
 
     /* If we are in test mode, then there's no need for transaction lock. */
     if (!(rpmtsFlags(ts) & RPMTRANS_FLAG_TEST)) {
-	if (!(lock = rpmtsAcquireLock(ts))) {
+	if (!(txn = rpmtxnBegin(ts, RPMTXN_WRITE))) {
 	    goto exit;
 	}
     }
@@ -1459,14 +1479,26 @@ int rpmtsRun(rpmts ts, rpmps okProbs, rpmprobFilterFlags ignoreSet)
 	goto exit;
     }
 
-    rpmtsSetupCollections(ts);
-
     /* Check package set for problems */
     tsprobs = checkProblems(ts);
 
+    /* Run pre transaction hook for all plugins */
+    TsmPreDone = 1;
+    if (rpmpluginsCallTsmPre(rpmtsPlugins(ts), ts) == RPMRC_FAIL) {
+	goto exit;
+    }
+
+    if (!rpmpsNumProblems(tsprobs)) {
+	/* Run file triggers in this package other package(s) set off. */
+	runFileTriggers(ts, NULL, RPMSENSE_TRIGGERUN,
+			RPMSCRIPT_TRANSFILETRIGGER, 0);
+	/* Run file triggers in other package(s) this package sets off. */
+	runTransScripts(ts, PKG_TRANSFILETRIGGERUN);
+    }
+
     /* Run pre-transaction scripts, but only if there are no known
      * problems up to this point and not disabled otherwise. */
-    if (!((rpmtsFlags(ts) & (RPMTRANS_FLAG_BUILD_PROBS|RPMTRANS_FLAG_NOPRE))
+    if (!((rpmtsFlags(ts) & (RPMTRANS_FLAG_BUILD_PROBS|RPMTRANS_FLAG_NOPRETRANS))
      	  || (rpmpsNumProblems(tsprobs)))) {
 	rpmlog(RPMLOG_DEBUG, "running pre-transaction scripts\n");
 	runTransScripts(ts, PKG_PRETRANS);
@@ -1498,20 +1530,31 @@ int rpmtsRun(rpmts ts, rpmps okProbs, rpmprobFilterFlags ignoreSet)
     if (!(rpmtsFlags(ts) & (RPMTRANS_FLAG_TEST|RPMTRANS_FLAG_BUILD_PROBS)))
 	tsmem->pool = rpmstrPoolFree(tsmem->pool);
 
+
     /* Actually install and remove packages, get final exit code */
     rc = rpmtsProcess(ts) ? -1 : 0;
 
     /* Run post-transaction scripts unless disabled */
-    if (!(rpmtsFlags(ts) & (RPMTRANS_FLAG_NOPOST))) {
+    if (!(rpmtsFlags(ts) & (RPMTRANS_FLAG_NOPOSTTRANS))) {
 	rpmlog(RPMLOG_DEBUG, "running post-transaction scripts\n");
 	runTransScripts(ts, PKG_POSTTRANS);
     }
 
+    /* Run file triggers in other package(s) this package sets off. */
+    runFileTriggers(ts, NULL, RPMSENSE_TRIGGERIN, RPMSCRIPT_TRANSFILETRIGGER, 0);
+    runPostUnTransFileTrigs(ts);
+
+    /* Run file triggers in this package other package(s) set off. */
+    runTransScripts(ts, PKG_TRANSFILETRIGGERIN);
 exit:
+    /* Run post transaction hook for all plugins */
+    if (TsmPreDone) /* If TsmPre hook has been called, call the TsmPost hook */
+	rpmpluginsCallTsmPost(rpmtsPlugins(ts), ts, rc);
+
     /* Finish up... */
     (void) umask(oldmask);
     (void) rpmtsFinish(ts);
     rpmpsFree(tsprobs);
-    rpmlockFree(lock);
+    rpmtxnEnd(txn);
     return rc;
 }

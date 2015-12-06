@@ -12,34 +12,37 @@
 #define STR1(x) #x
 #define STR(x) STR1(x)
 
+static rpmRC rpmpluginsCallInit(rpmPlugin plugin, rpmts ts);
+
+struct rpmPlugin_s {
+    char *name;
+    char *opts;
+    void *handle;
+    void *priv;
+    rpmPluginHooks hooks;
+};
+
 struct rpmPlugins_s {
-    void **handles;
-    ARGV_t names;
+    rpmPlugin *plugins;
     int count;
     rpmts ts;
 };
 
-static int rpmpluginsGetPluginIndex(rpmPlugins plugins, const char *name)
+static rpmPlugin rpmpluginsGetPlugin(rpmPlugins plugins, const char *name)
 {
     int i;
     for (i = 0; i < plugins->count; i++) {
-	if (rstreq(plugins->names[i], name)) {
-	    return i;
+	rpmPlugin plugin = plugins->plugins[i];
+	if (rstreq(plugin->name, name)) {
+	    return plugin;
 	}
     }
-    return -1;
-}
-
-static int rpmpluginsHookIsSupported(void *handle, rpmPluginHook hook)
-{
-    rpmPluginHook *supportedHooks =
-	(rpmPluginHook *) dlsym(handle, STR(PLUGIN_HOOKS));
-    return (*supportedHooks & hook);
+    return NULL;
 }
 
 int rpmpluginsPluginAdded(rpmPlugins plugins, const char *name)
 {
-    return (rpmpluginsGetPluginIndex(plugins, name) >= 0);
+    return (rpmpluginsGetPlugin(plugins, name) != NULL);
 }
 
 rpmPlugins rpmpluginsNew(rpmts ts)
@@ -49,43 +52,108 @@ rpmPlugins rpmpluginsNew(rpmts ts)
     return plugins;
 }
 
-rpmRC rpmpluginsAdd(rpmPlugins plugins, const char *name, const char *path,
-		    const char *opts)
+static rpmPlugin rpmPluginNew(const char *name, const char *path,
+			      const char *opts)
 {
+    rpmPlugin plugin = NULL;
+    rpmPluginHooks hooks = NULL;
     char *error;
+    char *hooks_name = NULL;
 
     void *handle = dlopen(path, RTLD_LAZY);
     if (!handle) {
 	rpmlog(RPMLOG_ERR, _("Failed to dlopen %s %s\n"), path, dlerror());
-	return RPMRC_FAIL;
+	return NULL;
     }
 
     /* make sure the plugin has the supported hooks flag */
-    (void) dlsym(handle, STR(PLUGIN_HOOKS));
+    hooks_name = rstrscat(NULL, name, "_hooks", NULL);
+    hooks = dlsym(handle, hooks_name);
     if ((error = dlerror()) != NULL) {
 	rpmlog(RPMLOG_ERR, _("Failed to resolve symbol %s: %s\n"),
-	       STR(PLUGIN_HOOKS), error);
-	return RPMRC_FAIL;
+	       hooks_name, error);
+    } else {
+	plugin = xcalloc(1, sizeof(*plugin));
+	plugin->name = xstrdup(name);
+	plugin->handle = handle;
+	plugin->hooks = hooks;
+	if (opts)
+	    plugin->opts = xstrdup(opts);
     }
+    free(hooks_name);
 
-    argvAdd(&plugins->names, name);
-    plugins->handles = xrealloc(plugins->handles, (plugins->count + 1) * sizeof(*plugins->handles));
-    plugins->handles[plugins->count] = handle;
-    plugins->count++;
-
-    return rpmpluginsCallInit(plugins, name, opts);
+    return plugin;
 }
 
-rpmRC rpmpluginsAddCollectionPlugin(rpmPlugins plugins, const char *name)
+static rpmPlugin rpmPluginFree(rpmPlugin plugin)
+{
+    if (plugin) {
+	rpmPluginHooks hooks = plugin->hooks;
+	if (hooks->cleanup)
+	    hooks->cleanup(plugin);
+	dlclose(plugin->handle);
+	free(plugin->name);
+	free(plugin->opts);
+	free(plugin);
+    }
+    return NULL;
+}
+
+const char *rpmPluginName(rpmPlugin plugin)
+{
+    return (plugin != NULL) ? plugin->name : NULL;
+}
+
+const char *rpmPluginOpts(rpmPlugin plugin)
+{
+    return (plugin != NULL) ? plugin->opts : NULL;
+}
+
+void * rpmPluginGetData(rpmPlugin plugin)
+{
+    return (plugin != NULL) ? plugin->priv : NULL;
+}
+
+void rpmPluginSetData(rpmPlugin plugin, void *data)
+{
+    if (plugin)
+	plugin->priv = data;
+}
+
+rpmRC rpmpluginsAdd(rpmPlugins plugins, const char *name, const char *path,
+		    const char *opts)
+{
+    rpmRC rc;
+    rpmPlugin plugin = rpmPluginNew(name, path, opts);
+
+    if (plugin == NULL)
+	return RPMRC_FAIL;
+    
+    rc = rpmpluginsCallInit(plugin, plugins->ts);
+
+    if (rc == RPMRC_OK) {
+	plugins->plugins = xrealloc(plugins->plugins,
+			    (plugins->count + 1) * sizeof(*plugins->plugins));
+	plugins->plugins[plugins->count] = plugin;
+	plugins->count++;
+    } else {
+	rpmPluginFree(plugin);
+    }
+
+    return rc;
+}
+
+rpmRC rpmpluginsAddPlugin(rpmPlugins plugins, const char *type, const char *name)
 {
     char *path;
     char *options;
     rpmRC rc = RPMRC_FAIL;
 
-    path = rpmExpand("%{?__collection_", name, "}", NULL);
+    path = rpmExpand("%{?__", type, "_", name, "}", NULL);
     if (!path || rstreq(path, "")) {
-	rpmlog(RPMLOG_ERR, _("Failed to expand %%__collection_%s macro\n"),
-	       name);
+	rpmlog(RPMLOG_DEBUG, _("Plugin %%__%s_%s not configured\n"),
+	       type, name);
+	rc = RPMRC_NOTFOUND;
 	goto exit;
     }
 
@@ -112,86 +180,205 @@ rpmRC rpmpluginsAddCollectionPlugin(rpmPlugins plugins, const char *name)
 
 rpmPlugins rpmpluginsFree(rpmPlugins plugins)
 {
-    int i;
-    for (i = 0; i < plugins->count; i++) {
-	rpmpluginsCallCleanup(plugins, plugins->names[i]);
-	dlclose(plugins->handles[i]);
+    if (plugins) {
+	for (int i = 0; i < plugins->count; i++) {
+	    rpmPlugin plugin = plugins->plugins[i];
+	    rpmPluginFree(plugin);
+	}
+	plugins->plugins = _free(plugins->plugins);
+	plugins->ts = NULL;
+	_free(plugins);
     }
-    plugins->handles = _free(plugins->handles);
-    plugins->names = argvFree(plugins->names);
-    plugins->ts = NULL;
-    _free(plugins);
 
     return NULL;
 }
 
+#define RPMPLUGINS_GET_PLUGIN(name) \
+	plugin = rpmpluginsGetPlugin(plugins, name); \
+	if (plugin == NULL || plugin->handle == NULL) { \
+		rpmlog(RPMLOG_ERR, _("Plugin %s not loaded\n"), name); \
+		return RPMRC_FAIL; \
+	}
 
 /* Common define for all rpmpluginsCall* hook functions */
 #define RPMPLUGINS_SET_HOOK_FUNC(hook) \
-	void *handle = NULL; \
-	int index; \
-	char * error; \
-	index = rpmpluginsGetPluginIndex(plugins, name); \
-	if (index < 0) { \
-		rpmlog(RPMLOG_ERR, _("Plugin %s not loaded\n"), name); \
-		return RPMRC_FAIL; \
-	} \
-	handle = plugins->handles[index]; \
-	if (!handle) { \
-		rpmlog(RPMLOG_ERR, _("Plugin %s not loaded\n"), name); \
-		return RPMRC_FAIL; \
-	} \
-	if (!rpmpluginsHookIsSupported(handle, hook)) { \
-		return RPMRC_OK; \
-	} \
-	*(void **)(&hookFunc) = dlsym(handle, STR(hook##_FUNC)); \
-	if ((error = dlerror()) != NULL) { \
-		rpmlog(RPMLOG_ERR, _("Failed to resolve %s plugin symbol %s: %s\n"), name, STR(hook##_FUNC), error); \
-		return RPMRC_FAIL; \
-	} \
-	if (rpmtsFlags(plugins->ts) & (RPMTRANS_FLAG_TEST | RPMTRANS_FLAG_JUSTDB)) { \
-		return RPMRC_OK; \
-	} \
-	rpmlog(RPMLOG_DEBUG, "Plugin: calling hook %s in %s plugin\n", STR(hook##_FUNC), name);
+	rpmPluginHooks hooks = (plugin != NULL) ? plugin->hooks : NULL; \
+	hookFunc = (hooks != NULL) ? hooks->hook : NULL; \
+	if (hookFunc) { \
+	    rpmlog(RPMLOG_DEBUG, "Plugin: calling hook %s in %s plugin\n", \
+		   STR(hook), plugin->name); \
+	}
 
-rpmRC rpmpluginsCallInit(rpmPlugins plugins, const char *name, const char *opts)
+static rpmRC rpmpluginsCallInit(rpmPlugin plugin, rpmts ts)
 {
-    rpmRC (*hookFunc)(rpmts, const char *, const char *);
-    RPMPLUGINS_SET_HOOK_FUNC(PLUGINHOOK_INIT);
-    return hookFunc(plugins->ts, name, opts);
+    rpmRC rc = RPMRC_OK;
+    plugin_init_func hookFunc;
+    RPMPLUGINS_SET_HOOK_FUNC(init);
+    if (hookFunc)
+	rc = hookFunc(plugin, ts);
+    return rc;
 }
 
-rpmRC rpmpluginsCallCleanup(rpmPlugins plugins, const char *name)
+rpmRC rpmpluginsCallTsmPre(rpmPlugins plugins, rpmts ts)
 {
-    rpmRC (*hookFunc)(void);
-    RPMPLUGINS_SET_HOOK_FUNC(PLUGINHOOK_CLEANUP);
-    return hookFunc();
+    plugin_tsm_pre_func hookFunc;
+    int i;
+    rpmRC rc = RPMRC_OK;
+
+    for (i = 0; i < plugins->count; i++) {
+	rpmPlugin plugin = plugins->plugins[i];
+	RPMPLUGINS_SET_HOOK_FUNC(tsm_pre);
+	if (hookFunc && hookFunc(plugin, ts) == RPMRC_FAIL)
+	    rc = RPMRC_FAIL;
+    }
+
+    return rc;
 }
 
-rpmRC rpmpluginsCallOpenTE(rpmPlugins plugins, const char *name, rpmte te)
+rpmRC rpmpluginsCallTsmPost(rpmPlugins plugins, rpmts ts, int res)
 {
-    rpmRC (*hookFunc)(rpmte);
-    RPMPLUGINS_SET_HOOK_FUNC(PLUGINHOOK_OPENTE);
-    return hookFunc(te);
+    plugin_tsm_post_func hookFunc;
+    int i;
+    rpmRC rc = RPMRC_OK;
+
+    for (i = 0; i < plugins->count; i++) {
+	rpmPlugin plugin = plugins->plugins[i];
+	RPMPLUGINS_SET_HOOK_FUNC(tsm_post);
+	if (hookFunc && hookFunc(plugin, ts, res) == RPMRC_FAIL)
+	    rc = RPMRC_FAIL;
+    }
+
+    return rc;
 }
 
-rpmRC rpmpluginsCallCollectionPostAdd(rpmPlugins plugins, const char *name)
+rpmRC rpmpluginsCallPsmPre(rpmPlugins plugins, rpmte te)
 {
-    rpmRC (*hookFunc)(void);
-    RPMPLUGINS_SET_HOOK_FUNC(PLUGINHOOK_COLL_POST_ADD);
-    return hookFunc();
+    plugin_psm_pre_func hookFunc;
+    int i;
+    rpmRC rc = RPMRC_OK;
+
+    for (i = 0; i < plugins->count; i++) {
+	rpmPlugin plugin = plugins->plugins[i];
+	RPMPLUGINS_SET_HOOK_FUNC(psm_pre);
+	if (hookFunc && hookFunc(plugin, te) == RPMRC_FAIL)
+	    rc = RPMRC_FAIL;
+    }
+
+    return rc;
 }
 
-rpmRC rpmpluginsCallCollectionPostAny(rpmPlugins plugins, const char *name)
+rpmRC rpmpluginsCallPsmPost(rpmPlugins plugins, rpmte te, int res)
 {
-    rpmRC (*hookFunc)(void);
-    RPMPLUGINS_SET_HOOK_FUNC(PLUGINHOOK_COLL_POST_ANY);
-    return hookFunc();
+    plugin_psm_post_func hookFunc;
+    int i;
+    rpmRC rc = RPMRC_OK;
+
+    for (i = 0; i < plugins->count; i++) {
+	rpmPlugin plugin = plugins->plugins[i];
+	RPMPLUGINS_SET_HOOK_FUNC(psm_post);
+	if (hookFunc && hookFunc(plugin, te, res) == RPMRC_FAIL)
+	    rc = RPMRC_FAIL;
+    }
+
+    return rc;
 }
 
-rpmRC rpmpluginsCallCollectionPreRemove(rpmPlugins plugins, const char *name)
+rpmRC rpmpluginsCallScriptletPre(rpmPlugins plugins, const char *s_name, int type)
 {
-    rpmRC (*hookFunc)(void);
-    RPMPLUGINS_SET_HOOK_FUNC(PLUGINHOOK_COLL_PRE_REMOVE);
-    return hookFunc();
+    plugin_scriptlet_pre_func hookFunc;
+    int i;
+    rpmRC rc = RPMRC_OK;
+
+    for (i = 0; i < plugins->count; i++) {
+	rpmPlugin plugin = plugins->plugins[i];
+	RPMPLUGINS_SET_HOOK_FUNC(scriptlet_pre);
+	if (hookFunc && hookFunc(plugin, s_name, type) == RPMRC_FAIL)
+	    rc = RPMRC_FAIL;
+    }
+
+    return rc;
+}
+
+rpmRC rpmpluginsCallScriptletForkPost(rpmPlugins plugins, const char *path, int type)
+{
+    plugin_scriptlet_fork_post_func hookFunc;
+    int i;
+    rpmRC rc = RPMRC_OK;
+
+    for (i = 0; i < plugins->count; i++) {
+	rpmPlugin plugin = plugins->plugins[i];
+	RPMPLUGINS_SET_HOOK_FUNC(scriptlet_fork_post);
+	if (hookFunc && hookFunc(plugin, path, type) == RPMRC_FAIL)
+	    rc = RPMRC_FAIL;
+    }
+
+    return rc;
+}
+
+rpmRC rpmpluginsCallScriptletPost(rpmPlugins plugins, const char *s_name, int type, int res)
+{
+    plugin_scriptlet_post_func hookFunc;
+    int i;
+    rpmRC rc = RPMRC_OK;
+
+    for (i = 0; i < plugins->count; i++) {
+	rpmPlugin plugin = plugins->plugins[i];
+	RPMPLUGINS_SET_HOOK_FUNC(scriptlet_post);
+	if (hookFunc && hookFunc(plugin, s_name, type, res) == RPMRC_FAIL)
+	    rc = RPMRC_FAIL;
+    }
+
+    return rc;
+}
+
+rpmRC rpmpluginsCallFsmFilePre(rpmPlugins plugins, rpmfi fi, const char *path,
+			       mode_t file_mode, rpmFsmOp op)
+{
+    plugin_fsm_file_pre_func hookFunc;
+    int i;
+    rpmRC rc = RPMRC_OK;
+
+    for (i = 0; i < plugins->count; i++) {
+	rpmPlugin plugin = plugins->plugins[i];
+	RPMPLUGINS_SET_HOOK_FUNC(fsm_file_pre);
+	if (hookFunc && hookFunc(plugin, fi, path, file_mode, op) == RPMRC_FAIL)
+	    rc = RPMRC_FAIL;
+    }
+
+    return rc;
+}
+
+rpmRC rpmpluginsCallFsmFilePost(rpmPlugins plugins, rpmfi fi, const char *path,
+                                mode_t file_mode, rpmFsmOp op, int res)
+{
+    plugin_fsm_file_post_func hookFunc;
+    int i;
+    rpmRC rc = RPMRC_OK;
+
+    for (i = 0; i < plugins->count; i++) {
+	rpmPlugin plugin = plugins->plugins[i];
+	RPMPLUGINS_SET_HOOK_FUNC(fsm_file_post);
+	if (hookFunc && hookFunc(plugin, fi, path, file_mode, op, res) == RPMRC_FAIL)
+	    rc = RPMRC_FAIL;
+    }
+
+    return rc;
+}
+
+rpmRC rpmpluginsCallFsmFilePrepare(rpmPlugins plugins, rpmfi fi,
+				   const char *path, const char *dest,
+				   mode_t file_mode, rpmFsmOp op)
+{
+    plugin_fsm_file_prepare_func hookFunc;
+    int i;
+    rpmRC rc = RPMRC_OK;
+
+    for (i = 0; i < plugins->count; i++) {
+	rpmPlugin plugin = plugins->plugins[i];
+	RPMPLUGINS_SET_HOOK_FUNC(fsm_file_prepare);
+	if (hookFunc && hookFunc(plugin, fi, path, dest, file_mode, op) == RPMRC_FAIL)
+	    rc = RPMRC_FAIL;
+    }
+
+    return rc;
 }

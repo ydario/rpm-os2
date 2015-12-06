@@ -5,12 +5,27 @@
 
 typedef struct rpmlock_s * rpmlock;
 
+enum {
+    RPMLOCK_READ   = 1 << 0,
+    RPMLOCK_WRITE  = 1 << 1,
+    RPMLOCK_WAIT   = 1 << 2,
+};
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 RPM_GNUC_INTERNAL
-rpmlock rpmlockAcquire(const char *lock_path, const char *descr);
+rpmlock rpmlockNew(const char *lock_path, const char *descr);
+
+RPM_GNUC_INTERNAL
+rpmlock rpmlockNewAcquire(const char *lock_path, const char *descr);
+
+RPM_GNUC_INTERNAL
+int rpmlockAcquire(rpmlock lock);
+
+RPM_GNUC_INTERNAL
+void rpmlockRelease(rpmlock lock);
 
 RPM_GNUC_INTERNAL
 rpmlock rpmlockFree(rpmlock lock);

@@ -4,32 +4,92 @@
 #include <sys/wait.h>
 #include <errno.h>
 #include <unistd.h>
+#include <sys/resource.h>
+#if defined(__linux__)
+#include <sys/syscall.h>        /* For ionice */
+#endif
 
 #include <rpm/rpmfileutil.h>
 #include <rpm/rpmmacro.h>
 #include <rpm/rpmio.h>
 #include <rpm/rpmlog.h>
 #include <rpm/header.h>
+#include <rpm/rpmds.h>
 
 #include "rpmio/rpmlua.h"
 #include "lib/rpmscript.h"
 
+#include "lib/rpmplugins.h"     /* rpm plugins hooks */
+
 #include "debug.h"
 
+struct scriptNextFileFunc_s {
+    char *(*func)(void *);	/* function producing input for script */
+    void *param;		/* parameter for func */
+};
+
+typedef struct scriptNextFileFunc_s *scriptNextFileFunc;
+
 struct rpmScript_s {
+    rpmscriptTypes type;	/* script type */
     rpmTagVal tag;		/* script tag */
     char **args;		/* scriptlet call arguments */
     char *body;			/* script body */
     char *descr;		/* description for logging */
     rpmscriptFlags flags;	/* flags to control operation */
+    struct scriptNextFileFunc_s nextFileFunc;  /* input function */
 };
 
+struct scriptInfo_s {
+    rpmscriptTypes type;
+    const char *desc;
+    rpmsenseFlags sense;
+    rpmTagVal tag;
+    rpmTagVal progtag;
+    rpmTagVal flagtag;
+};
+
+static const struct scriptInfo_s scriptInfo[] = {
+    { RPMSCRIPT_PREIN, "%prein", 0,
+	RPMTAG_PREIN, RPMTAG_PREINPROG, RPMTAG_PREINFLAGS },
+    { RPMSCRIPT_PREUN, "%preun", 0,
+	RPMTAG_PREUN, RPMTAG_PREUNPROG, RPMTAG_PREUNFLAGS },
+    { RPMSCRIPT_POSTIN, "%post", 0,
+	RPMTAG_POSTIN, RPMTAG_POSTINPROG, RPMTAG_POSTINFLAGS },
+    { RPMSCRIPT_POSTUN, "%postun", 0,
+	RPMTAG_POSTUN, RPMTAG_POSTUNPROG, RPMTAG_POSTUNFLAGS },
+    { RPMSCRIPT_PRETRANS, "%pretrans", 0,
+	RPMTAG_PRETRANS, RPMTAG_PRETRANSPROG, RPMTAG_PRETRANSFLAGS },
+    { RPMSCRIPT_POSTTRANS, "%posttrans", 0,
+	RPMTAG_POSTTRANS, RPMTAG_POSTTRANSPROG, RPMTAG_POSTTRANSFLAGS },
+    { RPMSCRIPT_TRIGGERPREIN, "%triggerprein", RPMSENSE_TRIGGERPREIN,
+	RPMTAG_TRIGGERPREIN, 0, 0 },
+    { RPMSCRIPT_TRIGGERUN, "%triggerun", RPMSENSE_TRIGGERUN,
+	RPMTAG_TRIGGERUN, 0, 0 },
+    { RPMSCRIPT_TRIGGERIN, "%triggerin", RPMSENSE_TRIGGERIN,
+	RPMTAG_TRIGGERIN, 0, 0 },
+    { RPMSCRIPT_TRIGGERPOSTUN, "%triggerpostun", RPMSENSE_TRIGGERPOSTUN,
+	RPMTAG_TRIGGERPOSTUN, 0, 0 },
+    { RPMSCRIPT_VERIFY, "%verify", 0,
+	RPMTAG_VERIFYSCRIPT, RPMTAG_VERIFYSCRIPTPROG, RPMTAG_VERIFYSCRIPTFLAGS},
+    { 0, "unknown", 0,
+	RPMTAG_NOT_FOUND, RPMTAG_NOT_FOUND, RPMTAG_NOT_FOUND }
+};
+
+static const struct scriptInfo_s * findTag(rpmTagVal tag)
+{
+    const struct scriptInfo_s * si = scriptInfo;
+    while (si->type && si->tag != tag)
+	si++;
+    return si;
+}
 /**
  * Run internal Lua script.
  */
-static rpmRC runLuaScript(int selinux, ARGV_const_t prefixes,
+static rpmRC runLuaScript(rpmPlugins plugins, ARGV_const_t prefixes,
 		   const char *sname, rpmlogLvl lvl, FD_t scriptFd,
-		   ARGV_t * argvp, const char *script, int arg1, int arg2)
+		   ARGV_t * argvp, const char *script, int arg1, int arg2,
+		   scriptNextFileFunc nextFileFunc)
 {
     rpmRC rc = RPMRC_FAIL;
 #ifdef WITH_LUA
@@ -43,6 +103,7 @@ static rpmRC runLuaScript(int selinux, ARGV_const_t prefixes,
     /* Create arg variable */
     rpmluaPushTable(lua, "arg");
     rpmluavSetListMode(var, 1);
+    rpmluaSetNextFileFunc(nextFileFunc->func, nextFileFunc->param);
     if (argv) {
 	char **p;
 	for (p = argv; *p; p++) {
@@ -66,9 +127,15 @@ static rpmRC runLuaScript(int selinux, ARGV_const_t prefixes,
     if (cwd != -1) {
 	mode_t oldmask = umask(0);
 	umask(oldmask);
+	pid_t pid = getpid();
 
 	if (chdir("/") == 0 && rpmluaRunScript(lua, script, sname) == 0) {
 	    rc = RPMRC_OK;
+	}
+	if (pid != getpid()) {
+	    /* Terminate child process forked in lua scriptlet */
+	    rpmlog(RPMLOG_ERR, _("No exec() called after fork() in lua scriptlet\n"));
+	    _exit(EXIT_FAILURE);
 	}
 	/* This failing would be fatal, return something different for it... */
 	if (fchdir(cwd)) {
@@ -91,22 +158,15 @@ static rpmRC runLuaScript(int selinux, ARGV_const_t prefixes,
 
 static const char * const SCRIPT_PATH = "PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/X11R6/bin";
 
-static void doScriptExec(int selinux, ARGV_const_t argv, ARGV_const_t prefixes,
+static void doScriptExec(ARGV_const_t argv, ARGV_const_t prefixes,
 			FD_t scriptFd, FD_t out)
 {
-    int pipes[2];
     int flag;
     int fdno;
     int xx;
     int open_max;
 
     (void) signal(SIGPIPE, SIG_DFL);
-    pipes[0] = pipes[1] = 0;
-    /* make stdin inaccessible */
-    xx = pipe(pipes);
-    xx = close(pipes[1]);
-    xx = dup2(pipes[0], STDIN_FILENO);
-    xx = close(pipes[0]);
 
     /* XXX Force FD_CLOEXEC on all inherited fdno's. */
     open_max = sysconf(_SC_OPEN_MAX);
@@ -163,11 +223,6 @@ static void doScriptExec(int selinux, ARGV_const_t argv, ARGV_const_t prefixes,
 	/* XXX Don't mtrace into children. */
 	unsetenv("MALLOC_CHECK_");
 
-	/* Permit libselinux to do the scriptlet exec. */
-	if (selinux == 1) {	
-	    xx = rpm_execcon(0, argv[0], argv, environ);
-	}
-
 	if (xx == 0) {
 	    xx = execv(argv[0], argv);
 	}
@@ -202,14 +257,19 @@ exit:
 /**
  * Run an external script.
  */
-static rpmRC runExtScript(int selinux, ARGV_const_t prefixes,
+static rpmRC runExtScript(rpmPlugins plugins, ARGV_const_t prefixes,
 		   const char *sname, rpmlogLvl lvl, FD_t scriptFd,
-		   ARGV_t * argvp, const char *script, int arg1, int arg2)
+		   ARGV_t * argvp, const char *script, int arg1, int arg2,
+		   scriptNextFileFunc nextFileFunc)
 {
     FD_t out = NULL;
     char * fn = NULL;
     pid_t pid, reaped;
     int status;
+    int inpipe[2];
+    FILE *in = NULL;
+    const char *line;
+    char *mline = NULL;
     rpmRC rc = RPMRC_FAIL;
 
     rpmlog(RPMLOG_DEBUG, "%s: scriptlet start\n", sname);
@@ -231,6 +291,14 @@ static rpmRC runExtScript(int selinux, ARGV_const_t prefixes,
 	    argvAddNum(argvp, arg2);
 	}
     }
+
+    if (pipe(inpipe) < 0) {
+	rpmlog(RPMLOG_ERR,
+		("Couldn't create pipe: %s\n"), strerror(errno));
+	goto exit;
+    }
+    in = fdopen(inpipe[1], "w");
+    inpipe[1] = 0;
 
     if (scriptFd != NULL) {
 	if (rpmIsVerbose()) {
@@ -258,8 +326,68 @@ static rpmRC runExtScript(int selinux, ARGV_const_t prefixes,
     } else if (pid == 0) {/* Child */
 	rpmlog(RPMLOG_DEBUG, "%s: execv(%s) pid %d\n",
 	       sname, *argvp[0], (unsigned)getpid());
-	doScriptExec(selinux, *argvp, prefixes, scriptFd, out);
+
+	fclose(in);
+	dup2(inpipe[0], STDIN_FILENO);
+
+        /* If RPM was invoked with nice and/or ionice, the scripts that we run
+         * will be also nice'd/ionice'd.  This is terrible if you restart any
+         * daemon (e.g. mysqld), so let's reset this to default values before
+         * taking any actions.
+         */
+
+        /* Call for resetting nice priority. */
+        int ret;
+        ret = setpriority(PRIO_PROCESS, 0, 0);
+        if (ret == -1) {
+            rpmlog(RPMLOG_WARNING, _("Unable to reset nice value: %s"),
+                strerror(errno));
+        }
+
+        /* Call for resetting IO priority. */
+        #if defined(__linux__)
+        /* Defined at include/linux/ioprio.h */
+        const int _IOPRIO_WHO_PROCESS = 1;
+        const int _IOPRIO_CLASS_NONE = 0;
+        ret = syscall(SYS_ioprio_set, _IOPRIO_WHO_PROCESS, 0, _IOPRIO_CLASS_NONE);
+        if (ret == -1) {
+            rpmlog(RPMLOG_WARNING, _("Unable to reset I/O priority: %s"),
+                strerror(errno));
+        }
+        #endif
+
+	/* Run scriptlet post fork hook for all plugins */
+	if (rpmpluginsCallScriptletForkPost(plugins, *argvp[0], RPMSCRIPTLET_FORK | RPMSCRIPTLET_EXEC) != RPMRC_FAIL) {
+	    doScriptExec(*argvp, prefixes, scriptFd, out);
+	} else {
+	    _exit(126); /* exit 126 for compatibility with bash(1) */
+	}
     }
+    close(inpipe[0]);
+    inpipe[0] = 0;
+
+    if (nextFileFunc->func) {
+	while ((line = nextFileFunc->func(nextFileFunc->param)) != NULL) {
+	    size_t size = strlen(line);
+	    size_t ret_size;
+	    mline = xstrdup(line);
+	    mline[size] = '\n';
+
+	    ret_size = fwrite(mline, size + 1, 1, in);
+	    mline = _free(mline);
+	    if (ret_size != 1) {
+		if (errno == EPIPE) {
+		    break;
+		} else {
+		    rpmlog(RPMLOG_ERR, _("Fwrite failed: %s"), strerror(errno));
+		    rc = RPMRC_FAIL;
+		    goto exit;
+		}
+	    }
+	}
+    }
+    fclose(in);
+    in = NULL;
 
     do {
 	reaped = waitpid(pid, &status, 0);
@@ -285,6 +413,12 @@ static rpmRC runExtScript(int selinux, ARGV_const_t prefixes,
     }
 
 exit:
+    if (in)
+	fclose(in);
+
+    if (inpipe[0])
+	close(inpipe[0]);
+
     if (out)
 	Fclose(out);	/* XXX dup'd STDOUT_FILENO */
 
@@ -293,15 +427,17 @@ exit:
 	    unlink(fn);
 	free(fn);
     }
+    free(mline);
     return rc;
 }
 
 rpmRC rpmScriptRun(rpmScript script, int arg1, int arg2, FD_t scriptFd,
-		   ARGV_const_t prefixes, int warn_only, int selinux)
+		   ARGV_const_t prefixes, int warn_only, rpmPlugins plugins)
 {
     ARGV_t args = NULL;
     rpmlogLvl lvl = warn_only ? RPMLOG_WARNING : RPMLOG_ERR;
     rpmRC rc;
+    int script_type = RPMSCRIPTLET_FORK | RPMSCRIPTLET_EXEC;
 
     if (script == NULL) return RPMRC_OK;
 
@@ -311,65 +447,47 @@ rpmRC rpmScriptRun(rpmScript script, int arg1, int arg2, FD_t scriptFd,
     } else {
 	argvAdd(&args, "/bin/sh");
     }
+    
+    if (rstreq(args[0], "<lua>"))
+	script_type = RPMSCRIPTLET_NONE;
 
-    if (rstreq(args[0], "<lua>")) {
-	rc = runLuaScript(selinux, prefixes, script->descr, lvl, scriptFd, &args, script->body, arg1, arg2);
-    } else {
-	rc = runExtScript(selinux, prefixes, script->descr, lvl, scriptFd, &args, script->body, arg1, arg2);
+    /* Run scriptlet pre hook for all plugins */
+    rc = rpmpluginsCallScriptletPre(plugins, script->descr, script_type);
+
+    if (rc != RPMRC_FAIL) {
+	if (script_type & RPMSCRIPTLET_EXEC) {
+	    rc = runExtScript(plugins, prefixes, script->descr, lvl, scriptFd, &args, script->body, arg1, arg2, &script->nextFileFunc);
+	} else {
+	    rc = runLuaScript(plugins, prefixes, script->descr, lvl, scriptFd, &args, script->body, arg1, arg2, &script->nextFileFunc);
+	}
     }
+
+    /* Run scriptlet post hook for all plugins */
+    rpmpluginsCallScriptletPost(plugins, script->descr, script_type, rc);
+
     argvFree(args);
 
     return rc;
 }
 
+static rpmscriptTypes getScriptType(rpmTagVal scriptTag)
+{
+    return findTag(scriptTag)->type;
+}
+
 static rpmTagVal getProgTag(rpmTagVal scriptTag)
 {
-    switch (scriptTag) {
-    case RPMTAG_PREIN:		return RPMTAG_PREINPROG;
-    case RPMTAG_POSTIN: 	return RPMTAG_POSTINPROG;
-    case RPMTAG_PREUN: 		return RPMTAG_PREUNPROG;
-    case RPMTAG_POSTUN: 	return RPMTAG_POSTUNPROG;
-    case RPMTAG_PRETRANS: 	return RPMTAG_PRETRANSPROG;
-    case RPMTAG_POSTTRANS:	return RPMTAG_POSTTRANSPROG;
-    case RPMTAG_VERIFYSCRIPT:	return RPMTAG_VERIFYSCRIPTPROG;
-    default:			return RPMTAG_NOT_FOUND;
-    }
+    return findTag(scriptTag)->progtag;
 }
 
 static rpmTagVal getFlagTag(rpmTagVal scriptTag)
 {
-    switch (scriptTag) {
-    case RPMTAG_PRETRANS:	return RPMTAG_PRETRANSFLAGS;
-    case RPMTAG_POSTTRANS:	return RPMTAG_POSTTRANSFLAGS;
-    case RPMTAG_PREUN:		return RPMTAG_PREUNFLAGS;
-    case RPMTAG_POSTUN:		return RPMTAG_POSTUNFLAGS;
-    case RPMTAG_PREIN:		return RPMTAG_PREINFLAGS;
-    case RPMTAG_POSTIN:		return RPMTAG_POSTINFLAGS;
-    case RPMTAG_VERIFYSCRIPT:	return RPMTAG_VERIFYSCRIPTFLAGS;
-    case RPMTAG_TRIGGERSCRIPTS:	return RPMTAG_TRIGGERSCRIPTFLAGS;
-    default:
-       break;
-    }
-    return RPMTAG_NOT_FOUND;
+    return findTag(scriptTag)->flagtag;
 }
 
 static const char * tag2sln(rpmTagVal tag)
 {
-    switch (tag) {
-    case RPMTAG_PRETRANS:       return "%pretrans";
-    case RPMTAG_TRIGGERPREIN:   return "%triggerprein";
-    case RPMTAG_PREIN:          return "%pre";
-    case RPMTAG_POSTIN:         return "%post";
-    case RPMTAG_TRIGGERIN:      return "%triggerin";
-    case RPMTAG_TRIGGERUN:      return "%triggerun";
-    case RPMTAG_PREUN:          return "%preun";
-    case RPMTAG_POSTUN:         return "%postun";
-    case RPMTAG_POSTTRANS:      return "%posttrans";
-    case RPMTAG_TRIGGERPOSTUN:  return "%triggerpostun";
-    case RPMTAG_VERIFYSCRIPT:   return "%verify";
-    default: break;
-    }
-    return "%unknownscript";
+    return findTag(tag)->desc;
 }
 
 static rpmScript rpmScriptNew(Header h, rpmTagVal tag, const char *body,
@@ -378,6 +496,7 @@ static rpmScript rpmScriptNew(Header h, rpmTagVal tag, const char *body,
     char *nevra = headerGetAsString(h, RPMTAG_NEVRA);
     rpmScript script = xcalloc(1, sizeof(*script));
     script->tag = tag;
+    script->type = getScriptType(tag);
     script->flags = flags;
     script->body = (body != NULL) ? xstrdup(body) : NULL;
     rasprintf(&script->descr, "%s(%s)", tag2sln(tag), nevra);
@@ -395,20 +514,101 @@ static rpmScript rpmScriptNew(Header h, rpmTagVal tag, const char *body,
 	script->body = body;
     }
 
+    script->nextFileFunc.func = NULL;
+    script->nextFileFunc.param = NULL;
+
     free(nevra);
     return script;
 }
 
-rpmScript rpmScriptFromTriggerTag(Header h, rpmTagVal triggerTag, uint32_t ix)
+void rpmScriptSetNextFileFunc(rpmScript script, char *(*func)(void *),
+			    void *param)
+{
+    script->nextFileFunc.func = func;
+    script->nextFileFunc.param = param;
+}
+
+rpmTagVal triggerDsTag(rpmscriptTriggerModes tm)
+{
+    rpmTagVal tag = RPMTAG_NOT_FOUND;
+    switch (tm) {
+    case RPMSCRIPT_NORMALTRIGGER:
+	tag = RPMTAG_TRIGGERNAME;
+	break;
+    case RPMSCRIPT_FILETRIGGER:
+	tag = RPMTAG_FILETRIGGERNAME;
+	break;
+    case RPMSCRIPT_TRANSFILETRIGGER:
+	tag = RPMTAG_TRANSFILETRIGGERNAME;
+	break;
+    }
+    return tag;
+}
+
+rpmscriptTriggerModes triggerMode(rpmTagVal tag)
+{
+    rpmscriptTriggerModes tm = 0;
+    switch (tag) {
+    case RPMTAG_TRIGGERNAME:
+	tm = RPMSCRIPT_NORMALTRIGGER;
+	break;
+    case RPMTAG_FILETRIGGERNAME:
+	tm = RPMSCRIPT_FILETRIGGER;
+	break;
+    case RPMTAG_TRANSFILETRIGGERNAME:
+	tm = RPMSCRIPT_TRANSFILETRIGGER;
+	break;
+    }
+    return tm;
+}
+
+rpmTagVal triggertag(rpmsenseFlags sense)
+{
+    rpmTagVal tag = RPMTAG_NOT_FOUND;
+    switch (sense) {
+    case RPMSENSE_TRIGGERIN:
+	tag = RPMTAG_TRIGGERIN;
+	break;
+    case RPMSENSE_TRIGGERUN:
+	tag = RPMTAG_TRIGGERUN;
+	break;
+    case RPMSENSE_TRIGGERPOSTUN:
+	tag = RPMTAG_TRIGGERPOSTUN;
+	break;
+    case RPMSENSE_TRIGGERPREIN:
+	tag = RPMTAG_TRIGGERPREIN;
+	break;
+    default:
+	break;
+    }
+    return tag;
+}
+
+rpmScript rpmScriptFromTriggerTag(Header h, rpmTagVal triggerTag,
+			    rpmscriptTriggerModes tm, uint32_t ix)
 {
     rpmScript script = NULL;
     struct rpmtd_s tscripts, tprogs, tflags;
     headerGetFlags hgflags = HEADERGET_MINMEM;
 
-    headerGet(h, RPMTAG_TRIGGERSCRIPTS, &tscripts, hgflags);
-    headerGet(h, RPMTAG_TRIGGERSCRIPTPROG, &tprogs, hgflags);
-    headerGet(h, RPMTAG_TRIGGERSCRIPTFLAGS, &tflags, hgflags);
-    
+    switch(tm) {
+	case RPMSCRIPT_NORMALTRIGGER:
+	    headerGet(h, RPMTAG_TRIGGERSCRIPTS, &tscripts, hgflags);
+	    headerGet(h, RPMTAG_TRIGGERSCRIPTPROG, &tprogs, hgflags);
+	    headerGet(h, RPMTAG_TRIGGERSCRIPTFLAGS, &tflags, hgflags);
+	    break;
+	case RPMSCRIPT_FILETRIGGER:
+	    headerGet(h, RPMTAG_FILETRIGGERSCRIPTS, &tscripts, hgflags);
+	    headerGet(h, RPMTAG_FILETRIGGERSCRIPTPROG, &tprogs, hgflags);
+	    headerGet(h, RPMTAG_FILETRIGGERSCRIPTFLAGS, &tflags, hgflags);
+	    break;
+	case RPMSCRIPT_TRANSFILETRIGGER:
+	    headerGet(h, RPMTAG_TRANSFILETRIGGERSCRIPTS, &tscripts, hgflags);
+	    headerGet(h, RPMTAG_TRANSFILETRIGGERSCRIPTPROG, &tprogs, hgflags);
+	    headerGet(h, RPMTAG_TRANSFILETRIGGERSCRIPTFLAGS, &tflags, hgflags);
+	    break;
+    }
+
     if (rpmtdSetIndex(&tscripts, ix) >= 0 && rpmtdSetIndex(&tprogs, ix) >= 0) {
 	rpmscriptFlags sflags = 0;
 	const char *prog = rpmtdGetString(&tprogs);
@@ -465,4 +665,9 @@ rpmScript rpmScriptFree(rpmScript script)
 rpmTagVal rpmScriptTag(rpmScript script)
 {
     return (script != NULL) ? script->tag : RPMTAG_NOT_FOUND;
+}
+
+rpmscriptTypes rpmScriptType(rpmScript script)
+{
+    return (script != NULL) ? script->type : 0;
 }

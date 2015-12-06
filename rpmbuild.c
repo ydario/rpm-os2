@@ -28,9 +28,10 @@ static struct rpmBuildArguments_s rpmBTArgs;
 #define	POPT_NOBUILD		-1017
 #define	POPT_RMSPEC		-1019
 #define POPT_NODIRTOKENS	-1020
+#define POPT_BUILDINPLACE	-1021
 
-#define	POPT_REBUILD		0x4220
-#define	POPT_RECOMPILE		0x4320
+#define	POPT_REBUILD		0x4262 /* Bb */
+#define	POPT_RECOMPILE		0x4369 /* Ci */
 #define	POPT_BA			0x6261
 #define	POPT_BB			0x6262
 #define	POPT_BC			0x6263
@@ -38,6 +39,13 @@ static struct rpmBuildArguments_s rpmBTArgs;
 #define	POPT_BL			0x626c
 #define	POPT_BP			0x6270
 #define	POPT_BS			0x6273
+#define	POPT_RA			0x4261
+#define	POPT_RB			0x4262
+#define	POPT_RC			0x4263
+#define	POPT_RI			0x4269
+#define	POPT_RL			0x426c
+#define	POPT_RP			0x4270
+#define	POPT_RS			0x4273
 #define	POPT_TA			0x7461
 #define	POPT_TB			0x7462
 #define	POPT_TC			0x7463
@@ -55,6 +63,7 @@ static char buildMode = 0;		/*!< Build mode (one of "btBC") */
 static char buildChar = 0;		/*!< Build stage (one of "abcilps ") */
 static rpmBuildFlags nobuildAmount = 0;	/*!< Build stage disablers */
 static ARGV_t build_targets = NULL;	/*!< Target platform(s) */
+static int buildInPlace = 0;		/*!< from --build-in-place */
 
 static void buildArgCallback( poptContext con,
 	enum poptCallbackReason reason,
@@ -73,6 +82,13 @@ static void buildArgCallback( poptContext con,
     case POPT_BL:
     case POPT_BP:
     case POPT_BS:
+    case POPT_RA:
+    /* case POPT_RB: same value as POPT_REBUILD */
+    case POPT_RC:
+    case POPT_RI:
+    case POPT_RL:
+    case POPT_RP:
+    case POPT_RS:
     case POPT_TA:
     case POPT_TB:
     case POPT_TC:
@@ -109,6 +125,10 @@ static void buildArgCallback( poptContext con,
 	spec_flags |= RPMSPEC_FORCE;
 	break;
 
+    case POPT_BUILDINPLACE:
+	rpmDefineMacro(NULL, "_build_in_place 1", 0);
+	buildInPlace = 1;
+	break;
     }
 }
 
@@ -137,6 +157,28 @@ static struct poptOption rpmBuildPoptTable[] = {
  { "bs", 0, POPT_ARGFLAG_ONEDASH, 0, POPT_BS,
 	N_("build source package only from <specfile>"),
 	N_("<specfile>") },
+
+ { "rp", 0, POPT_ARGFLAG_ONEDASH, 0, POPT_RP,
+	N_("build through %prep (unpack sources and apply patches) from <source package>"),
+	N_("<source package>") },
+ { "rc", 0, POPT_ARGFLAG_ONEDASH, 0, POPT_RC,
+	N_("build through %build (%prep, then compile) from <source package>"),
+	N_("<source package>") },
+ { "ri", 0, POPT_ARGFLAG_ONEDASH, 0, POPT_RI,
+	N_("build through %install (%prep, %build, then install) from <source package>"),
+	N_("<source package>") },
+ { "rl", 0, POPT_ARGFLAG_ONEDASH, 0, POPT_RL,
+	N_("verify %files section from <source package>"),
+	N_("<source package>") },
+ { "ra", 0, POPT_ARGFLAG_ONEDASH, 0, POPT_RA,
+	N_("build source and binary packages from <source package>"),
+	N_("<source package>") },
+ { "rb", 0, POPT_ARGFLAG_ONEDASH, 0, POPT_RB,
+	N_("build binary package only from <source package>"),
+	N_("<source package>") },
+ { "rs", 0, POPT_ARGFLAG_ONEDASH, 0, POPT_RS,
+	N_("build source package only from <source package>"),
+	N_("<source package>") },
 
  { "tp", 0, POPT_ARGFLAG_ONEDASH, 0, POPT_TP,
 	N_("build through %prep (unpack sources and apply patches) from <tarball>"),
@@ -169,6 +211,8 @@ static struct poptOption rpmBuildPoptTable[] = {
 
  { "buildroot", '\0', POPT_ARG_STRING, 0,  POPT_BUILDROOT,
 	N_("override build root"), "DIRECTORY" },
+ { "build-in-place", '\0', 0, 0, POPT_BUILDINPLACE,
+	N_("run build in current directory"), NULL },
  { "clean", '\0', 0, 0, POPT_RMBUILD,
 	N_("remove build tree when done"), NULL},
  { "force", '\0', POPT_ARGFLAG_DOC_HIDDEN, 0, RPMCLI_POPT_FORCE,
@@ -185,6 +229,8 @@ static struct poptOption rpmBuildPoptTable[] = {
 
  { "noclean", '\0', POPT_BIT_SET, &nobuildAmount, RPMBUILD_CLEAN,
 	N_("do not execute %clean stage of the build"), NULL },
+ { "noprep", '\0', POPT_BIT_SET, &nobuildAmount, RPMBUILD_PREP,
+	N_("do not execute %prep stage of the build"), NULL },
  { "nocheck", '\0', POPT_BIT_SET, &nobuildAmount, RPMBUILD_CHECK,
 	N_("do not execute %check stage of the build"), NULL },
 
@@ -308,9 +354,10 @@ static char * getTarSpec(const char *arg)
     for (spec = tryspec; *spec != NULL; spec++) {
 	FILE *fp;
 	char *cmd;
+	int specfiles = 0;
 
 	cmd = rpmExpand("%{uncompress: ", arg, "} | ",
-			"%{__tar} xOvf - --wildcards ", *spec,
+			"%{__tar} xOvof - --wildcards ", *spec,
 			" 2>&1 > ", tmpSpecFile, NULL);
 
 	if (!(fp = popen(cmd, "r"))) {
@@ -319,12 +366,19 @@ static char * getTarSpec(const char *arg)
 	    char *fok;
 	    for (;;) {
 		fok = fgets(tarbuf, sizeof(tarbuf) - 1, fp);
+		if (!fok) break;
 		/* tar sometimes prints "tar: Record size = 16" messages */
-		if (!fok || strncmp(fok, "tar: ", 5) != 0)
-		    break;
+		if (strstr(fok, "tar: ")) {
+		    continue;
+		}
+		specfiles++;
 	    }
 	    pclose(fp);
-	    gotspec = (fok != NULL) && isSpecFile(tmpSpecFile);
+	    gotspec = (specfiles == 1) && isSpecFile(tmpSpecFile);
+	    if (specfiles > 1) {
+		rpmlog(RPMLOG_ERR, _("Found more than one spec file in %s\n"), arg);
+		goto exit;
+	    }
 	}
 
 	if (!gotspec) 
@@ -372,6 +426,13 @@ static int buildForTarget(rpmts ts, const char * arg, BTA_t ba)
     int rc = 1; /* assume failure */
     int justRm = ((buildAmount & ~(RPMBUILD_RMSOURCE|RPMBUILD_RMSPEC)) == 0);
     rpmSpecFlags specFlags = spec_flags;
+
+    /* Override default BUILD value for _builddir */
+    if (buildInPlace) {
+	char *cwd = rpmGetCwd();
+	addMacro(NULL, "_builddir", NULL, cwd, 0);
+	free(cwd);
+    }
 
     if (ba->buildRootOverride)
 	buildRootURL = rpmGenPath(NULL, ba->buildRootOverride, NULL);
@@ -505,6 +566,10 @@ static int build(rpmts ts, const char * arg, BTA_t ba, const char * rcfile)
 
 	/* Read in configuration for target. */
 	rpmFreeMacros(NULL);
+	if (buildInPlace) {
+		/* Need to redefine this after freeing all the macros */
+		rpmDefineMacro(NULL, "_build_in_place 1", 0);
+	}
 	rpmFreeRpmrc();
 	(void) rpmReadConfigFiles(rcfile, *target);
 	rc = buildForTarget(ts, arg, ba);
@@ -558,16 +623,46 @@ int main(int argc, char *argv[])
 	
     ts = rpmtsCreate();
     (void) rpmtsSetRootDir(ts, rpmcliRootDir);
+
+    switch (buildChar) {
+    case 'a':
+	ba->buildAmount |= RPMBUILD_PACKAGESOURCE;
+    case 'b':
+	ba->buildAmount |= RPMBUILD_PACKAGEBINARY;
+	ba->buildAmount |= RPMBUILD_CLEAN;
+	if ((buildChar == 'b') && shortCircuit)
+	    break;
+    case 'i':
+	ba->buildAmount |= RPMBUILD_INSTALL;
+	ba->buildAmount |= RPMBUILD_CHECK;
+	if ((buildChar == 'i') && shortCircuit)
+	    break;
+    case 'c':
+	ba->buildAmount |= RPMBUILD_BUILD;
+	if ((buildChar == 'c') && shortCircuit)
+	    break;
+    case 'p':
+	ba->buildAmount |= RPMBUILD_PREP;
+	break;
+    case 'l':
+	ba->buildAmount |= RPMBUILD_FILECHECK;
+	break;
+    case 's':
+	ba->buildAmount |= RPMBUILD_PACKAGESOURCE;
+	break;
+    }
+    ba->buildAmount &= ~(nobuildAmount);
+
     switch (bigMode) {
     case MODE_REBUILD:
     case MODE_RECOMPILE:
-	ba->buildAmount =
-	    RPMBUILD_PREP | RPMBUILD_BUILD | RPMBUILD_INSTALL | RPMBUILD_CHECK;
-	if (bigMode == MODE_REBUILD) {
-	    ba->buildAmount |= RPMBUILD_PACKAGEBINARY;
+	if (bigMode == MODE_REBUILD &&
+	    buildChar != 'p' &&
+	    buildChar != 'c' &&
+	    buildChar != 'i' &&
+	    buildChar != 'l') {
 	    ba->buildAmount |= RPMBUILD_RMSOURCE;
 	    ba->buildAmount |= RPMBUILD_RMSPEC;
-	    ba->buildAmount |= RPMBUILD_CLEAN;
 	    ba->buildAmount |= RPMBUILD_RMBUILD;
 	}
 	ba->buildAmount &= ~(nobuildAmount);
@@ -590,35 +685,6 @@ int main(int argc, char *argv[])
 	break;
     case MODE_BUILD:
     case MODE_TARBUILD:
-	switch (buildChar) {
-	case 'a':
-	    ba->buildAmount |= RPMBUILD_PACKAGESOURCE;
-	case 'b':
-	    ba->buildAmount |= RPMBUILD_PACKAGEBINARY;
-	    ba->buildAmount |= RPMBUILD_CLEAN;
-	    if ((buildChar == 'b') && shortCircuit)
-		break;
-	case 'i':
-	    ba->buildAmount |= RPMBUILD_INSTALL;
-	    ba->buildAmount |= RPMBUILD_CHECK;
-	    if ((buildChar == 'i') && shortCircuit)
-		break;
-	case 'c':
-	    ba->buildAmount |= RPMBUILD_BUILD;
-	    if ((buildChar == 'c') && shortCircuit)
-		break;
-	case 'p':
-	    ba->buildAmount |= RPMBUILD_PREP;
-	    break;
-	    
-	case 'l':
-	    ba->buildAmount |= RPMBUILD_FILECHECK;
-	    break;
-	case 's':
-	    ba->buildAmount |= RPMBUILD_PACKAGESOURCE;
-	    break;
-	}
-	ba->buildAmount &= ~(nobuildAmount);
 
 	while ((pkg = poptGetArg(optCon))) {
 	    ba->rootdir = rpmcliRootDir;

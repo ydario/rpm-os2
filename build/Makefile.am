@@ -1,5 +1,7 @@
 # Makefile for rpmbuild library.
 
+include $(top_srcdir)/rpm.am
+
 AM_CPPFLAGS =  -I$(top_builddir) -I$(top_srcdir) -I$(top_builddir)/include/
 AM_CPPFLAGS += @WITH_NSS_INCLUDE@
 AM_CPPFLAGS += @WITH_MAGIC_INCLUDE@
@@ -16,10 +18,11 @@ librpmbuild_la_SOURCES = \
 	parsePolicies.c policies.c \
 	rpmbuild_internal.h rpmbuild_misc.h
 
-librpmbuild_la_LDFLAGS = -version-info 5:0:2
+librpmbuild_la_LDFLAGS = -version-info $(rpm_version_info)
 librpmbuild_la_LIBADD = \
 	$(top_builddir)/lib/librpm.la \
 	$(top_builddir)/rpmio/librpmio.la \
 	$(top_builddir)/misc/libmisc.la \
+	@LTLIBICONV@ \
 	@WITH_POPT_LIB@ \
 	@WITH_MAGIC_LIB@

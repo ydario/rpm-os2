@@ -67,6 +67,19 @@ rpm	alias --requires	--qf \
 	--POPTdesc=$"list capabilities required by package(s)"
 rpm	alias -R --requires
 
+rpm	alias --recommends	--qf \
+  "[%|VERBOSE?{%{RECOMMENDFLAGS:deptype}: }:{}|%{RECOMMENDNEVRS}\n]" \
+	--POPTdesc=$"list capabilities recommended by package(s)"
+rpm	alias --suggests	--qf \
+  "[%|VERBOSE?{%{SUGGESTFLAGS:deptype}: }:{}|%{SUGGESTNEVRS}\n]" \
+	--POPTdesc=$"list capabilities suggested by package(s)"
+rpm	alias --supplements	--qf \
+  "[%|VERBOSE?{%{SUPPLEMENTFLAGS:deptype}: }:{}|%{SUPPLEMENTNEVRS}\n]" \
+	--POPTdesc=$"list capabilities supplemented by package(s)"
+rpm	alias --enhances	--qf \
+  "[%|VERBOSE?{%{ENHANCEFLAGS:deptype}: }:{}|%{ENHANCENEVRS}\n]" \
+	--POPTdesc=$"list capabilities enhanced by package(s)"
+
 rpm	alias --info --qf '\
 Name        : %{NAME}\n\
 %|EPOCH?{Epoch       : %{EPOCH}\n}|\
@@ -102,8 +115,16 @@ rpm	alias --triggerscripts --qf '\
 rpm	alias --triggers --triggerscripts \
 	--POPTdesc=$"list trigger scriptlets from package(s)"
 
+rpm	alias --filetriggerscripts --qf '\
+[filetrigger%{FILETRIGGERTYPE} scriptlet (using %{FILETRIGGERSCRIPTPROG}) -- \
+%{FILETRIGGERCONDS}\n%{FILETRIGGERSCRIPTS}\n]\
+[transfiletrigger%{TRANSFILETRIGGERTYPE} scriptlet (using %{TRANSFILETRIGGERSCRIPTPROG}) -- \
+%{TRANSFILETRIGGERCONDS}\n%{TRANSFILETRIGGERSCRIPTS}\n]'
+rpm	alias --filetriggers --filetriggerscripts \
+	--POPTdesc=$"list filetrigger scriptlets from package(s)"
+
 rpm	alias --last --qf '%|INSTALLTIME?{%{INSTALLTIME}}:{000000000}| %{NVRA} %|INSTALLTIME?{%{INSTALLTIME:date}}:{(not installed)}|\n' \
-	--pipe "sort -r -n | sed 's,^[0-9]\+ ,,' | awk '{printf(\"%-45s %-s\n\", $1, substr($0,length($1)+2))}' " \
+	--pipe "LC_NUMERIC=C sort -r -n | sed 's,^[0-9]\+ ,,' | awk '{printf(\"%-45s %-s\n\", $1, substr($0,length($1)+2))}' " \
 	--POPTdesc=$"list package(s) by install time, most recent first"
 
 rpm	alias --dupes   --qf '%|SOURCERPM?{%{name}.%{arch}}:{%|ARCH?{%{name}}:{%{name}-%{version}}|}|\n' --pipe "sort | uniq -d" \
@@ -149,6 +170,7 @@ rpm	alias --httpproxy	--define '_httpproxy !#:+'
 rpm	exec --addsign		rpmsign --addsign
 rpm	exec --delsign		rpmsign --delsign
 rpm	exec --resign		rpmsign --resign
+#rpm	exec --signfiles	rpmsign --signfiles
 rpm	exec --checksig		rpmkeys --checksig
 rpm	exec -K			rpmkeys --checksig
 rpm	exec --import		rpmkeys --import
@@ -174,8 +196,8 @@ rpmbuild alias --buildpolicy --define '__os_install_post %{_rpmconfigdir}/brp-!#
 	--POPTargs=$"<policy>"
 # Minimally preserve rpmbuild's --sign functionality
 rpmbuild alias --sign \
-	--pipe "grep '.*: .*\.rpm$'|cut -d: -f2|xargs -r rpm --addsign" \
-	--POPTdesc=$"generate GPG signature"
+	--pipe 'rpm --addsign `grep ".*: .*\.rpm$"|cut -d: -f2` < "/dev/"`ps -p $$ -o tty | tail -n 1`' \
+	--POPTdesc=$"generate GPG signature (deprecated, use command rpmsign instead)"
 
 rpmsign alias --key-id  --define '_gpg_name !#:+' \
 	--POPTdesc=$"key id/name to sign with" \

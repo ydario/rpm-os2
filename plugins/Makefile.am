@@ -13,14 +13,25 @@ AM_LDFLAGS = -avoid-version -module -shared
 
 pluginsdir = $(libdir)/rpm-plugins
 
-plugins_LTLIBRARIES = exec.la
-
-exec_la_SOURCES = plugin.h exec.c
-exec_la_LIBADD = $(top_builddir)/lib/librpm.la $(top_builddir)/rpmio/librpmio.la
+plugins_LTLIBRARIES =
 
 if SELINUX
-sepolicy_la_SOURCES = plugin.h sepolicy.c
-sepolicy_la_LIBADD = $(top_builddir)/lib/librpm.la $(top_builddir)/rpmio/librpmio.la @WITH_SELINUX_LIB@ @WITH_SEMANAGE_LIB@
-
-plugins_LTLIBRARIES += sepolicy.la
+selinux_la_SOURCES = selinux.c
+selinux_la_LIBADD = $(top_builddir)/lib/librpm.la $(top_builddir)/rpmio/librpmio.la @WITH_SELINUX_LIB@
+plugins_LTLIBRARIES += selinux.la
 endif
+
+if DBUS
+systemd_inhibit_la_SOURCES = systemd_inhibit.c
+systemd_inhibit_la_CPPFLAGS = $(AM_CPPFLAGS) @DBUS_CFLAGS@
+systemd_inhibit_la_LIBADD = $(top_builddir)/lib/librpm.la $(top_builddir)/rpmio/librpmio.la @DBUS_LIBS@
+plugins_LTLIBRARIES += systemd_inhibit.la
+endif
+
+syslog_la_SOURCES = syslog.c
+syslog_la_LIBADD = $(top_builddir)/lib/librpm.la $(top_builddir)/rpmio/librpmio.la
+plugins_LTLIBRARIES += syslog.la
+
+ima_la_sources = ima.c
+ima_la_LIBADD = $(top_builddir)/lib/librpm.la $(top_builddir)/rpmio/librpmio.la
+plugins_LTLIBRARIES += ima.la

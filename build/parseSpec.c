@@ -6,6 +6,9 @@
 #include "system.h"
 
 #include <errno.h>
+#ifdef HAVE_ICONV
+#include <iconv.h>
+#endif
 
 #include <rpm/rpmtypes.h>
 #include <rpm/rpmlib.h>		/* RPM_MACHTABLE & related */
@@ -60,6 +63,15 @@ static const struct PartRec {
     { PART_TRIGGERIN,     LEN_AND_STR("%trigger")},
     { PART_VERIFYSCRIPT,  LEN_AND_STR("%verifyscript")},
     { PART_POLICIES,      LEN_AND_STR("%sepolicy")},
+    { PART_FILETRIGGERIN,	    LEN_AND_STR("%filetriggerin")},
+    { PART_FILETRIGGERIN,	    LEN_AND_STR("%filetrigger")},
+    { PART_FILETRIGGERUN,	    LEN_AND_STR("%filetriggerun")},
+    { PART_FILETRIGGERPOSTUN,	    LEN_AND_STR("%filetriggerpostun")},
+    { PART_TRANSFILETRIGGERIN,	    LEN_AND_STR("%transfiletriggerin")},
+    { PART_TRANSFILETRIGGERIN,	    LEN_AND_STR("%transfiletrigger")},
+    { PART_TRANSFILETRIGGERUN,	    LEN_AND_STR("%transfiletriggerun")},
+    { PART_TRANSFILETRIGGERUN,	    LEN_AND_STR("%transfiletriggerun")},
+    { PART_TRANSFILETRIGGERPOSTUN,  LEN_AND_STR("%transfiletriggerpostun")},
     {0, 0, 0}
 };
 
@@ -102,11 +114,14 @@ static int matchTok(const char *token, const char *line)
     return rc;
 }
 
-void handleComments(char *s)
+int handleComments(char *s)
 {
     SKIPSPACE(s);
-    if (*s == '#')
+    if (*s == '#') {
 	*s = '\0';
+	return 1;
+    }
+    return 0;
 }
 
 /* Push a file to spec's file stack, return the newly pushed entry */
@@ -151,8 +166,58 @@ static int restoreFirstChar(rpmSpec spec)
     return 0;
 }
 
+static int expandMacrosInSpecBuf(rpmSpec spec, int strip)
+{
+    char *lbuf = NULL;
+    int rc = 0, isComment = 0;
+
+     /* Don't expand macros (eg. %define) in false branch of %if clause */
+    if (!spec->readStack->reading)
+	return 0;
+
+    lbuf = spec->lbuf;
+    SKIPSPACE(lbuf);
+    if (lbuf[0] == '#')
+	isComment = 1;
+
+    lbuf = xstrdup(spec->lbuf);
+
+    rc = expandMacros(spec, spec->macros, spec->lbuf, spec->lbufSize);
+    if (rc) {
+	rpmlog(RPMLOG_ERR, _("line %d: %s\n"),
+		spec->lineNum, spec->lbuf);
+	goto exit;
+    }
+
+    if (strip & STRIP_COMMENTS && isComment) {
+	char *bufA = lbuf;
+	char *bufB = spec->lbuf;
+
+	while (*bufA != '\0' && *bufB != '\0') {
+	    if (*bufA == '%' && *(bufA + 1) == '%')
+		bufA++;
+
+	    if (*bufA != *bufB)
+		break;
+
+	    bufA++;
+	    bufB++;
+	}
+
+	if (*bufA != '\0' || *bufB != '\0')
+	    rpmlog(RPMLOG_WARNING,
+		_("Macro expanded in comment on line %d: %s\n"),
+		spec->lineNum, lbuf);
+    }
+
+exit:
+    free(lbuf);
+
+    return rc;
+}
+
 /* Return zero on success, 1 if we need to read more and -1 on errors. */
-static int copyNextLineFromOFI(rpmSpec spec, OFI_t *ofi)
+static int copyNextLineFromOFI(rpmSpec spec, OFI_t *ofi, int strip)
 {
     /* Expand next line from file into line buffer */
     if (!(spec->nextline && *spec->nextline)) {
@@ -203,13 +268,9 @@ static int copyNextLineFromOFI(rpmSpec spec, OFI_t *ofi)
 	}
 	spec->lbufOff = 0;
 
-	/* Don't expand macros (eg. %define) in false branch of %if clause */
-	if (spec->readStack->reading &&
-	    expandMacros(spec, spec->macros, spec->lbuf, spec->lbufSize)) {
-		rpmlog(RPMLOG_ERR, _("line %d: %s\n"),
-			spec->lineNum, spec->lbuf);
-		return -1;
-	}
+	if (expandMacrosInSpecBuf(spec, strip))
+	    return -1;
+
 	spec->nextline = spec->lbuf;
     }
     return 0;
@@ -320,7 +381,7 @@ int readLine(rpmSpec spec, int strip)
 	ofi = spec->fileStack;
 
 	/* Copy next file line into the spec line buffer */
-	rc = copyNextLineFromOFI(spec, ofi);
+	rc = copyNextLineFromOFI(spec, ofi, strip);
 	if (rc > 0) {
 	    if (startLine == 0)
 		startLine = spec->lineNum;
@@ -350,7 +411,7 @@ int readLine(rpmSpec spec, int strip)
 	match = !match;
     } else if (ISMACROWITHARG(s, "%if")) {
 	s += 3;
-        match = parseExpressionBoolean(spec, s);
+        match = parseExpressionBoolean(s);
 	if (match < 0) {
 	    rpmlog(RPMLOG_ERR,
 			_("%s:%d: bad %%if condition\n"),
@@ -464,6 +525,10 @@ static void initSourceHeader(rpmSpec spec)
     headerCopyTags(spec->packages->header, sourcePkg->header, sourceTags);
 
     /* Add the build restrictions */
+    for (int i=0; i<PACKAGE_NUM_DEPS; i++) {
+	rpmdsPutToHeader(sourcePkg->dependencies[i], sourcePkg->header);
+    }
+
     {
 	HeaderIterator hi = headerInitIterator(spec->buildRestrictions);
 	struct rpmtd_s td;
@@ -542,13 +607,88 @@ static void addTargets(Package Pkgs)
 	headerPutString(pkg->header, RPMTAG_PLATFORM, platform);
 	headerPutString(pkg->header, RPMTAG_OPTFLAGS, optflags);
 
-	pkg->ds = rpmdsThis(pkg->header, RPMTAG_REQUIRENAME, RPMSENSE_EQUAL);
+	/* Add manual dependencies early for rpmspec etc to look at */
 	addPackageProvides(pkg);
+	for (int i=0; i<PACKAGE_NUM_DEPS; i++) {
+	    rpmdsPutToHeader(pkg->dependencies[i], pkg->header);
+	}
+
+	pkg->ds = rpmdsThis(pkg->header, RPMTAG_REQUIRENAME, RPMSENSE_EQUAL);
     }
     free(platform);
     free(arch);
     free(os);
     free(optflags);
+}
+
+rpmRC checkForEncoding(Header h, int addtag)
+{
+    rpmRC rc = RPMRC_OK;
+#if HAVE_ICONV
+    const char *encoding = "utf-8";
+    rpmTagVal tag;
+    iconv_t ic = (iconv_t) -1;
+    char *dest = NULL;
+    size_t destlen = 0;
+    int strict = rpmExpandNumeric("%{_invalid_encoding_terminates_build}");
+    HeaderIterator hi = headerInitIterator(h);
+
+    ic = iconv_open(encoding, encoding);
+    if (ic == (iconv_t) -1) {
+	rpmlog(RPMLOG_WARNING,
+		_("encoding %s not supported by system\n"), encoding);
+	goto exit;
+    }
+
+    while ((tag = headerNextTag(hi)) != RPMTAG_NOT_FOUND) {
+	struct rpmtd_s td;
+	const char *src = NULL;
+
+	if (rpmTagGetClass(tag) != RPM_STRING_CLASS)
+	    continue;
+
+	headerGet(h, tag, &td, (HEADERGET_RAW|HEADERGET_MINMEM));
+	while ((src = rpmtdNextString(&td)) != NULL) {
+	    size_t srclen = strlen(src);
+	    size_t outlen, inlen = srclen;
+	    char *out, *in = (char *) src;
+
+	    if (destlen < srclen) {
+		destlen = srclen * 2;
+		dest = xrealloc(dest, destlen);
+	    }
+	    out = dest;
+	    outlen = destlen;
+
+	    /* reset conversion state */
+	    iconv(ic, NULL, &inlen, &out, &outlen);
+
+	    if (iconv(ic, &in, &inlen, &out, &outlen) == (size_t) -1) {
+		rpmlog(strict ? RPMLOG_ERR : RPMLOG_WARNING,
+			_("Package %s: invalid %s encoding in %s: %s - %s\n"),
+			headerGetString(h, RPMTAG_NAME),
+			encoding, rpmTagGetName(tag), src, strerror(errno));
+		rc = RPMRC_FAIL;
+	    }
+
+	}
+	rpmtdFreeData(&td);
+    }
+
+    /* Stomp "known good utf" mark in header if requested */
+    if (rc == RPMRC_OK && addtag)
+	headerPutString(h, RPMTAG_ENCODING, encoding);
+    if (!strict)
+	rc = RPMRC_OK;
+
+exit:
+    if (ic != (iconv_t) -1)
+	iconv_close(ic);
+    headerFreeIterator(hi);
+    free(dest);
+#endif /* HAVE_ICONV */
+
+    return rc;
 }
 
 static rpmSpec parseSpec(const char *specFile, rpmSpecFlags flags,
@@ -616,6 +756,12 @@ static rpmSpec parseSpec(const char *specFile, rpmSpecFlags flags,
 	case PART_TRIGGERIN:
 	case PART_TRIGGERUN:
 	case PART_TRIGGERPOSTUN:
+	case PART_FILETRIGGERIN:
+	case PART_FILETRIGGERUN:
+	case PART_FILETRIGGERPOSTUN:
+	case PART_TRANSFILETRIGGERIN:
+	case PART_TRANSFILETRIGGERUN:
+	case PART_TRANSFILETRIGGERPOSTUN:
 	    parsePart = parseScript(spec, parsePart);
 	    break;
 
@@ -706,6 +852,18 @@ static rpmSpec parseSpec(const char *specFile, rpmSpecFlags flags,
 
     /* Add arch, os and platform, self-provides etc for each package */
     addTargets(spec->packages);
+
+    /* Check for encoding in each package unless disabled */
+    if (!(spec->flags & RPMSPEC_NOUTF8)) {
+	int badenc = 0;
+	for (Package pkg = spec->packages; pkg != NULL; pkg = pkg->next) {
+	    if (checkForEncoding(pkg->header, 0) != RPMRC_OK) {
+		badenc = 1;
+	    }
+	}
+	if (badenc)
+	    goto errxit;
+    }
 
     closeSpec(spec);
 exit:

@@ -15,6 +15,8 @@
 int filter_private = 0;
 int soname_only = 0;
 int fake_soname = 1;
+int filter_soname = 1;
+int require_interp = 0;
 
 typedef struct elfInfo_s {
     Elf *elf;
@@ -25,6 +27,7 @@ typedef struct elfInfo_s {
     int gotHASH;
     int gotGNUHASH;
     char *soname;
+    char *interp;
     const char *marker;		/* elf class marker or NULL */
 
     ARGV_t requires;
@@ -34,6 +37,45 @@ typedef struct elfInfo_s {
 static int skipPrivate(const char *s)
 { 
     return (filter_private && rstreq(s, "GLIBC_PRIVATE"));
+}
+
+/*
+ * Rough soname sanity filtering: all sane soname's dependencies need to
+ * contain ".so", and normal linkable libraries start with "lib",
+ * everything else is an exception of some sort. The most notable
+ * and common exception is the dynamic linker itself, which we allow
+ * here, the rest can use --no-filter-soname.
+ */
+static int skipSoname(const char *soname)
+{
+    int sane = 0;
+
+    /* Filter out empty and all-whitespace sonames */
+    for (const char *s = soname; *s != '\0'; s++) {
+	if (!risspace(*s)) {
+	    sane = 1;
+	    break;
+	}
+    }
+
+    if (!sane)
+	return 1;
+
+    if (filter_soname) {
+	if (!strstr(soname, ".so"))
+	    return 1;
+
+	if (rstreqn(soname, "ld.", 3) || rstreqn(soname, "ld-", 3) ||
+	    rstreqn(soname, "ld64.", 3) || rstreqn(soname, "ld64-", 3))
+	    return 0;
+
+	if (rstreqn(soname, "lib", 3))
+	    return 0;
+	else
+	    return 1;
+    }
+
+    return 0;
 }
 
 static const char *mkmarker(GElf_Ehdr *ehdr)
@@ -58,6 +100,10 @@ static void addDep(ARGV_t *deps,
 		   const char *soname, const char *ver, const char *marker)
 {
     char *dep = NULL;
+
+    if (skipSoname(soname))
+	return;
+
     if (ver || marker) {
 	rasprintf(&dep,
 		  "%s(%s)%s", soname, ver ? ver : "", marker ? marker : "");
@@ -211,6 +257,24 @@ static void processSections(elfInfo *ei)
     }
 }
 
+static void processProgHeaders(elfInfo *ei, GElf_Ehdr *ehdr)
+{
+    for (size_t i = 0; i < ehdr->e_phnum; i++) {
+	GElf_Phdr mem;
+	GElf_Phdr *phdr = gelf_getphdr(ei->elf, i, &mem);
+
+	if (phdr && phdr->p_type == PT_INTERP) {
+	    size_t maxsize;
+	    char * filedata = elf_rawfile(ei->elf, &maxsize);
+
+	    if (filedata && phdr->p_offset < maxsize) {
+		ei->interp = rstrdup(filedata + phdr->p_offset);
+		break;
+	    }
+	}
+    }
+}
+
 static int processFile(const char *fn, int dtype)
 {
     int rc = 1;
@@ -237,6 +301,7 @@ static int processFile(const char *fn, int dtype)
     	ei->isDSO = (ehdr->e_type == ET_DYN);
 	ei->isExec = (st.st_mode & (S_IXUSR|S_IXGRP|S_IXOTH));
 
+	processProgHeaders(ei, ehdr);
 	processSections(ei);
     }
 
@@ -262,6 +327,10 @@ static int processFile(const char *fn, int dtype)
 	    addDep(&ei->provides, ei->soname, NULL, ei->marker);
     }
 
+    /* If requested and present, add dep for interpreter (ie dynamic linker) */
+    if (ei->interp && require_interp)
+	argvAdd(&ei->requires, ei->interp);
+
     rc = 0;
     /* dump the requested dependencies for this file */
     for (ARGV_t dep = dtype ? ei->requires : ei->provides; dep && *dep; dep++) {
@@ -274,6 +343,7 @@ exit:
 	argvFree(ei->provides);
 	argvFree(ei->requires);
 	free(ei->soname);
+	free(ei->interp);
     	if (ei->elf) elf_end(ei->elf);
 	rfree(ei);
     }
@@ -292,6 +362,8 @@ int main(int argc, char *argv[])
 	{ "filter-private", 0, POPT_ARG_VAL, &filter_private, -1, NULL, NULL },
 	{ "soname-only", 0, POPT_ARG_VAL, &soname_only, -1, NULL, NULL },
 	{ "no-fake-soname", 0, POPT_ARG_VAL, &fake_soname, 0, NULL, NULL },
+	{ "no-filter-soname", 0, POPT_ARG_VAL, &filter_soname, 0, NULL, NULL },
+	{ "require-interp", 0, POPT_ARG_VAL, &require_interp, -1, NULL, NULL },
 	POPT_AUTOHELP 
 	POPT_TABLEEND
     };

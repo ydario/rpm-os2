@@ -143,12 +143,14 @@ ls -i "${RPMTEST}"/foo/hello* | awk {'print $1'} | sort -u | wc -l
 
 ],
 [0],
-[1 /foo/copyllo
+[2 /foo/aaaa
+1 /foo/copyllo
 4 /foo/hello
 4 /foo/hello-bar
 4 /foo/hello-foo
 4 /foo/hello-world
-58
+2 /foo/zzzz
+87
 1
 ],
 [])
@@ -183,5 +185,122 @@ lrwxrwxrwx /opt/globtest/linkgood
 -rw-r--r-- /opt/globtest/zeb
 -rw-r--r-- /opt/globtest/zib
 ],
+[])
+AT_CLEANUP
+
+AT_SETUP([rpmbuild prefixpostfix])
+AT_KEYWORDS([build])
+AT_CHECK([
+RPMDB_CLEAR
+RPMDB_INIT
+rm -rf ${TOPDIR}
+
+runroot rpmbuild -bb --quiet \
+	/data/SPECS/prefixtest.spec
+runroot rpm -qp \
+	--qf "[[%{filemodes:perms} %{filenames}\n]]" \
+	"${TOPDIR}"/RPMS/noarch/prefixtest-1.0-1.noarch.rpm
+],
+[0],
+[-rw-r--r-- /opt/prefixtest/ba
+drwxr-xr-x /opt/prefixtest/ban
+-rw-r--r-- /opt/prefixtest/bi
+drwxr-xr-x /opt/prefixtest/bin
+drwxr-xr-x /opt/prefixtest/bon
+drwxr-xr-x /opt/prefixtest/foo
+-rw-r--r-- /opt/prefixtest/foo/one
+-rw-r--r-- /opt/prefixtest/foo/three
+-rw-r--r-- /opt/prefixtest/foo/two
+lrwxrwxrwx /opt/prefixtest/linkbad
+lrwxrwxrwx /opt/prefixtest/linkgood
+-rw-r--r-- /opt/prefixtest/weird%name
+-rw-r--r-- /opt/prefixtest/zab
+-rw-r--r-- /opt/prefixtest/zeb
+-rw-r--r-- /opt/prefixtest/zib
+],
+[])
+AT_CLEANUP
+
+# ------------------------------
+# Check if weak and reverse requires can be built
+AT_SETUP([Weak and reverse requires])
+AT_KEYWORDS([build])
+AT_CHECK([
+
+runroot rpmbuild -bb --quiet \
+	--define "pkg weakdeps" \
+	--define "recs foo > 1.2.3" \
+	--define "sugs bar >= 0.1.2" \
+	--define "sups baz" \
+	--define "ens zap = 3" \
+	  /data/SPECS/deptest.spec
+
+runroot rpm -qp --recommends /build/RPMS/noarch/deptest-weakdeps-1.0-1.noarch.rpm
+runroot rpm -qp --suggests /build/RPMS/noarch/deptest-weakdeps-1.0-1.noarch.rpm
+runroot rpm -qp --supplements /build/RPMS/noarch/deptest-weakdeps-1.0-1.noarch.rpm
+runroot rpm -qp --enhances /build/RPMS/noarch/deptest-weakdeps-1.0-1.noarch.rpm
+],
+[0],
+[foo > 1.2.3
+bar >= 0.1.2
+baz
+zap = 3
+],
+[ignore])
+AT_CLEANUP
+
+# ------------------------------
+# Test BuildRequire functionality
+AT_SETUP([Build requires])
+AT_KEYWORDS([build])
+AT_CHECK([
+
+runroot rpmbuild -bb --quiet \
+		--define "pkg buildreq" \
+		--define "buildreqs foo > 1.2.3" \
+		/data/SPECS/deptest.spec
+],
+[1],
+[],
+[error: Failed build dependencies:
+	foo > 1.2.3 is needed by deptest-buildreq-1.0-1.noarch
+])
+AT_CLEANUP
+
+# ------------------------------
+# Test spec query functionality
+AT_SETUP([rpmspec query 1])
+AT_KEYWORDS([build])
+AT_CHECK([
+
+runroot rpmspec -q \
+		--define "pkg dep" \
+		--define "reqs foo > 1.2.3 bar <= 2.3" \
+		--requires \
+		/data/SPECS/deptest.spec
+],
+[0],
+[bar <= 2.3
+foo > 1.2.3
+],
+[])
+
+AT_CLEANUP
+
+# ------------------------------
+# archive sanity check
+AT_SETUP([rpmbuild archive sanity])
+AT_KEYWORDS([build])
+AT_CHECK([
+rm -rf ${TOPDIR}
+
+runroot rpmbuild \
+  -bb --quiet /data/SPECS/attrtest.spec
+
+runroot rpm2cpio \
+  "${TOPDIR}"/RPMS/noarch/attrtest-1.0-1.noarch.rpm > /tmp/attrtest.cpio
+],
+[0],
+[],
 [])
 AT_CLEANUP

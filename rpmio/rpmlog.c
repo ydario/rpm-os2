@@ -5,11 +5,21 @@
 #include "system.h"
 #include <stdarg.h>
 #include <stdlib.h>
+#include <pthread.h>
+#include <errno.h>
 #include <rpm/rpmlog.h>
 #include "debug.h"
 
-static int nrecs = 0;
-static rpmlogRec recs = NULL;
+typedef struct rpmlogCtx_s * rpmlogCtx;
+struct rpmlogCtx_s {
+    pthread_rwlock_t lock;
+    unsigned mask;
+    int nrecs;
+    rpmlogRec recs;
+    rpmlogCallback cbfunc;
+    rpmlogCallbackData cbdata;
+    FILE *stdlog;
+};
 
 struct rpmlogRec_s {
     int		code;		/* unused */
@@ -17,64 +27,110 @@ struct rpmlogRec_s {
     char * message;		/* log message string */
 };
 
+/* Force log context acquisition through a function */
+static rpmlogCtx rpmlogCtxAcquire(int write)
+{
+    static struct rpmlogCtx_s _globalCtx = { PTHREAD_RWLOCK_INITIALIZER,
+					     RPMLOG_UPTO(RPMLOG_NOTICE),
+					     0, NULL, NULL, NULL, NULL };
+    rpmlogCtx ctx = &_globalCtx;
+    int xx;
+
+    /* XXX Silently failing is bad, but we can't very well use log here... */
+    if (write)
+	xx = pthread_rwlock_wrlock(&ctx->lock);
+    else
+	xx = pthread_rwlock_rdlock(&ctx->lock);
+
+    return (xx == 0) ? ctx : NULL;
+}
+
+/* Release log context */
+static rpmlogCtx rpmlogCtxRelease(rpmlogCtx ctx)
+{
+    if (ctx)
+	pthread_rwlock_unlock(&ctx->lock);
+    return NULL;
+}
+
 int rpmlogGetNrecs(void)
 {
+    rpmlogCtx ctx = rpmlogCtxAcquire(0);
+    int nrecs = -1;
+    if (ctx)
+	nrecs = ctx->nrecs;
+    rpmlogCtxRelease(ctx);
     return nrecs;
 }
 
 int rpmlogCode(void)
 {
-    if (recs != NULL && nrecs > 0)
-	return recs[nrecs-1].code;
-    return -1;
-}
+    int code = -1;
+    rpmlogCtx ctx = rpmlogCtxAcquire(0);
+    
+    if (ctx && ctx->recs != NULL && ctx->nrecs > 0)
+	code = ctx->recs[ctx->nrecs-1].code;
 
+    rpmlogCtxRelease(ctx);
+    return code;
+}
 
 const char * rpmlogMessage(void)
 {
-    if (recs != NULL && nrecs > 0)
-	return recs[nrecs-1].message;
-    return _("(no error)");
+    const char *msg = _("(no error)");
+    rpmlogCtx ctx = rpmlogCtxAcquire(0);
+
+    if (ctx && ctx->recs != NULL && ctx->nrecs > 0)
+	msg = ctx->recs[ctx->nrecs-1].message;
+
+    rpmlogCtxRelease(ctx);
+    return msg;
 }
 
 const char * rpmlogRecMessage(rpmlogRec rec)
 {
-    assert(rec != NULL);
-    return (rec->message);
+    return (rec != NULL) ? rec->message : NULL;
 }
 
 rpmlogLvl rpmlogRecPriority(rpmlogRec rec)
 {
-    assert(rec != NULL);
-    return (rec->pri);
+    return (rec != NULL) ? rec->pri : (rpmlogLvl)-1;
 }
 
 void rpmlogPrint(FILE *f)
 {
-    int i;
+    rpmlogCtx ctx = rpmlogCtxAcquire(0);
+
+    if (ctx == NULL)
+	return;
 
     if (f == NULL)
 	f = stderr;
 
-    if (recs)
-    for (i = 0; i < nrecs; i++) {
-	rpmlogRec rec = recs + i;
+    for (int i = 0; i < ctx->nrecs; i++) {
+	rpmlogRec rec = ctx->recs + i;
 	if (rec->message && *rec->message)
 	    fprintf(f, "    %s", rec->message);
     }
+
+    rpmlogCtxRelease(ctx);
 }
 
 void rpmlogClose (void)
 {
-    int i;
+    rpmlogCtx ctx = rpmlogCtxAcquire(1);
 
-    if (recs)
-    for (i = 0; i < nrecs; i++) {
-	rpmlogRec rec = recs + i;
+    if (ctx == NULL)
+	return;
+
+    for (int i = 0; i < ctx->nrecs; i++) {
+	rpmlogRec rec = ctx->recs + i;
 	rec->message = _free(rec->message);
     }
-    recs = _free(recs);
-    nrecs = 0;
+    ctx->recs = _free(ctx->recs);
+    ctx->nrecs = 0;
+
+    rpmlogCtxRelease(ctx);
 }
 
 void rpmlogOpen (const char *ident, int option,
@@ -82,41 +138,48 @@ void rpmlogOpen (const char *ident, int option,
 {
 }
 
-static unsigned rpmlogMask = RPMLOG_UPTO( RPMLOG_NOTICE );
-
 #ifdef NOTYET
 static unsigned rpmlogFacility = RPMLOG_USER;
 #endif
 
 int rpmlogSetMask (int mask)
 {
-    int omask = rpmlogMask;
-    if (mask)
-        rpmlogMask = mask;
+    rpmlogCtx ctx = rpmlogCtxAcquire(mask ? 1 : 0);
+
+    int omask = -1;
+    if (ctx) {
+	omask = ctx->mask;
+	if (mask)
+	    ctx->mask = mask;
+    }
+
+    rpmlogCtxRelease(ctx);
     return omask;
 }
 
-static rpmlogCallback _rpmlogCallback = NULL;
-static rpmlogCallbackData _rpmlogCallbackData = NULL;
-
 rpmlogCallback rpmlogSetCallback(rpmlogCallback cb, rpmlogCallbackData data)
 {
-    rpmlogCallback ocb = _rpmlogCallback;
-    _rpmlogCallback = cb;
-    _rpmlogCallbackData = data;
+    rpmlogCtx ctx = rpmlogCtxAcquire(1);
+
+    rpmlogCallback ocb = NULL;
+    if (ctx) {
+	ocb = ctx->cbfunc;
+	ctx->cbfunc = cb;
+	ctx->cbdata = data;
+    }
+
+    rpmlogCtxRelease(ctx);
     return ocb;
 }
 
-static FILE * _stdlog = NULL;
-
-static int rpmlogDefault(rpmlogRec rec)
+static int rpmlogDefault(FILE *stdlog, rpmlogRec rec)
 {
-    FILE *msgout = (_stdlog ? _stdlog : stderr);
+    FILE *msgout = (stdlog ? stdlog : stderr);
 
     switch (rec->pri) {
     case RPMLOG_INFO:
     case RPMLOG_NOTICE:
-        msgout = (_stdlog ? _stdlog : stdout);
+        msgout = (stdlog ? stdlog : stdout);
         break;
     case RPMLOG_EMERG:
     case RPMLOG_ALERT:
@@ -128,10 +191,14 @@ static int rpmlogDefault(rpmlogRec rec)
         break;
     }
 
-    (void) fputs(rpmlogLevelPrefix(rec->pri), msgout);
+    if (fputs(rpmlogLevelPrefix(rec->pri), msgout) == EOF && errno != EPIPE)
+	perror("Error occurred during writing of a log message");
 
-    (void) fputs(rec->message, msgout);
-    (void) fflush(msgout);
+    if (fputs(rec->message, msgout) == EOF && errno != EPIPE)
+	perror("Error occurred during writing of a log message");
+
+    if (fflush(msgout) == EOF && errno != EPIPE)
+	perror("Error occurred during writing of a log message");
 
     return (rec->pri <= RPMLOG_CRIT ? RPMLOG_EXIT : 0);
 }
@@ -139,8 +206,15 @@ static int rpmlogDefault(rpmlogRec rec)
 
 FILE * rpmlogSetFile(FILE * fp)
 {
-    FILE * ofp = _stdlog;
-    _stdlog = fp;
+    rpmlogCtx ctx = rpmlogCtxAcquire(1);
+
+    FILE * ofp = NULL;
+    if (ctx) {
+	ofp = ctx->stdlog;
+	ctx->stdlog = fp;
+    }
+
+    rpmlogCtxRelease(ctx);
     return ofp;
 }
 
@@ -165,44 +239,65 @@ const char * rpmlogLevelPrefix(rpmlogLvl pri)
 
 /* FIX: rpmlogMsgPrefix[] dependent, not unqualified */
 /* FIX: rpmlogMsgPrefix[] may be NULL */
-static void dolog (struct rpmlogRec_s *rec)
+static void dolog(struct rpmlogRec_s *rec, int saverec)
 {
+    static pthread_mutex_t serialize = PTHREAD_MUTEX_INITIALIZER;
+
     int cbrc = RPMLOG_DEFAULT;
     int needexit = 0;
+    FILE *clog = NULL;
+    rpmlogCallbackData *cbdata = NULL;
+    rpmlogCallback cbfunc = NULL;
+    rpmlogCtx ctx = rpmlogCtxAcquire(saverec);
+
+    if (ctx == NULL)
+	return;
 
     /* Save copy of all messages at warning (or below == "more important"). */
-    if (rec->pri <= RPMLOG_WARNING) {
-	recs = xrealloc(recs, (nrecs+2) * sizeof(*recs));
-	recs[nrecs].code = rec->code;
-	recs[nrecs].pri = rec->pri;
-	recs[nrecs].message = xstrdup(rec->message);
-	recs[nrecs+1].code = 0;
-	recs[nrecs+1].message = NULL;
-	++nrecs;
+    if (saverec) {
+	ctx->recs = xrealloc(ctx->recs, (ctx->nrecs+2) * sizeof(*ctx->recs));
+	ctx->recs[ctx->nrecs].code = rec->code;
+	ctx->recs[ctx->nrecs].pri = rec->pri;
+	ctx->recs[ctx->nrecs].message = xstrdup(rec->message);
+	ctx->recs[ctx->nrecs+1].code = 0;
+	ctx->recs[ctx->nrecs+1].message = NULL;
+	ctx->nrecs++;
     }
+    cbfunc = ctx->cbfunc;
+    cbdata = ctx->cbdata;
+    clog = ctx->stdlog;
 
-    if (_rpmlogCallback) {
-	cbrc = _rpmlogCallback(rec, _rpmlogCallbackData);
-	needexit += cbrc & RPMLOG_EXIT;
-    }
+    /* Free the context for callback and actual log output */
+    ctx = rpmlogCtxRelease(ctx);
 
-    if (cbrc & RPMLOG_DEFAULT) {
-	cbrc = rpmlogDefault(rec);
-	needexit += cbrc & RPMLOG_EXIT;
+    /* Always serialize callback and output to avoid interleaved messages. */
+    if (pthread_mutex_lock(&serialize) == 0) {
+	if (cbfunc) {
+	    cbrc = cbfunc(rec, cbdata);
+	    needexit += cbrc & RPMLOG_EXIT;
+	}
+
+	if (cbrc & RPMLOG_DEFAULT) {
+	    cbrc = rpmlogDefault(clog, rec);
+	    needexit += cbrc & RPMLOG_EXIT;
+	}
+	pthread_mutex_unlock(&serialize);
     }
     
     if (needexit)
 	exit(EXIT_FAILURE);
+
 }
 
 void rpmlog (int code, const char *fmt, ...)
 {
     unsigned pri = RPMLOG_PRI(code);
     unsigned mask = RPMLOG_MASK(pri);
+    int saverec = (pri <= RPMLOG_WARNING);
     va_list ap;
     int n;
 
-    if ((mask & rpmlogMask) == 0)
+    if ((mask & rpmlogSetMask(0)) == 0)
 	return;
 
     va_start(ap, fmt);
@@ -222,7 +317,7 @@ void rpmlog (int code, const char *fmt, ...)
 	rec.pri = pri;
 	rec.message = msg;
 
-	dolog(&rec);
+	dolog(&rec, saverec);
 
 	free(msg);
     }

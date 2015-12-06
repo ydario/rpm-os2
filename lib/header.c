@@ -68,8 +68,13 @@ static const int typeSizes[16] =  {
     0
 };
 
+enum headerSorted_e {
+    HEADERSORT_NONE	= 0,	/* Not sorted */
+    HEADERSORT_OFFSET	= 1,	/* Sorted by offset (on-disk format) */
+    HEADERSORT_INDEX	= 2,	/* Sorted by index  */
+};
+
 enum headerFlags_e {
-    HEADERFLAG_SORTED    = (1 << 0), /*!< Are header entries sorted? */
     HEADERFLAG_ALLOCATED = (1 << 1), /*!< Is 1st header region allocated? */
     HEADERFLAG_LEGACY    = (1 << 2), /*!< Header came from legacy source? */
     HEADERFLAG_DEBUG     = (1 << 3), /*!< Debug this header? */
@@ -87,6 +92,7 @@ struct headerToken_s {
     int indexAlloced;		/*!< Allocated size of tag array. */
     unsigned int instance;	/*!< Rpmdb instance (offset) */
     headerFlags flags;
+    int sorted;			/*!< Current sort method */
     int nrefs;			/*!< Reference count. */
 };
 
@@ -105,10 +111,12 @@ static const size_t headerMaxbytes = (32*1024*1024);
 RPM_GNUC_CONST
 static uint64_t htonll(uint64_t n)
 {
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
     uint32_t *i = (uint32_t*)&n;
     uint32_t b = i[0];
     i[0] = htonl(i[1]);
     i[1] = htonl(b);
+#endif
     return n;
 }
 
@@ -167,7 +175,7 @@ static Header headerCreate(void *blob, unsigned int pvlen, int32_t indexLen)
 	h->indexUsed = 0;
     }
     h->instance = 0;
-    h->flags |= HEADERFLAG_SORTED;
+    h->sorted = HEADERSORT_NONE;
 
     h->index = (h->indexAlloced
 	? xcalloc(h->indexAlloced, sizeof(*h->index))
@@ -217,9 +225,9 @@ static int indexCmp(const void * avp, const void * bvp)
 
 void headerSort(Header h)
 {
-    if (!(h->flags & HEADERFLAG_SORTED)) {
+    if (h->sorted != HEADERSORT_INDEX) {
 	qsort(h->index, h->indexUsed, sizeof(*h->index), indexCmp);
-	h->flags |= HEADERFLAG_SORTED;
+	h->sorted = HEADERSORT_INDEX;
     }
 }
 
@@ -240,9 +248,9 @@ static int offsetCmp(const void * avp, const void * bvp)
 
 void headerUnsort(Header h)
 {
-    if (h->flags & HEADERFLAG_SORTED) {
+    if (h->sorted != HEADERSORT_OFFSET) {
 	qsort(h->index, h->indexUsed, sizeof(*h->index), offsetCmp);
-	h->flags &= ~HEADERFLAG_SORTED;
+	h->sorted = HEADERSORT_OFFSET;
     }
 }
 
@@ -719,7 +727,8 @@ indexEntry findEntry(Header h, rpmTagVal tag, rpm_tagtype_t type)
     struct indexEntry_s key;
 
     if (h == NULL) return NULL;
-    if (!(h->flags & HEADERFLAG_SORTED)) headerSort(h);
+    if (h->sorted != HEADERSORT_INDEX)
+	headerSort(h);
 
     key.info.tag = tag;
 
@@ -905,7 +914,8 @@ Header headerImport(void * blob, unsigned int bsize, headerImportFlags flags)
 	    goto errxit;
     }
 
-    h->flags &= ~HEADERFLAG_SORTED;
+    /* Force sorting, dribble lookups can cause early sort on partial header */
+    h->sorted = HEADERSORT_NONE;
     headerSort(h);
     h->flags |= HEADERFLAG_ALLOCATED;
 
@@ -1049,7 +1059,6 @@ int headerIsEntry(Header h, rpmTagVal tag)
  * @todo Permit retrieval of regions other than HEADER_IMUTABLE.
  * @param entry		header entry
  * @param td		tag data container
- * @param minMem	string pointers refer to header memory?
  * @param flags		flags to control memory allocation
  * @return		1 on success, otherwise error.
  */
@@ -1166,6 +1175,7 @@ static int copyTdEntry(const indexEntry entry, rpmtd td, headerGetFlags flags)
     }
     td->type = entry->info.type;
     td->count = count;
+    td->size = entry->length;
 
     if (td->data && entry->data != td->data) {
 	td->flags |= RPMTD_ALLOCED;
@@ -1437,7 +1447,7 @@ static int intAddEntry(Header h, rpmtd td)
     entry->length = length;
 
     if (h->indexUsed > 0 && td->tag < h->index[h->indexUsed-1].info.tag)
-	h->flags &= ~HEADERFLAG_SORTED;
+	h->sorted = HEADERSORT_NONE;
     h->indexUsed++;
 
     return 1;

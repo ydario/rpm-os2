@@ -35,14 +35,31 @@ static int doImport(rpmts ts, const char *fn, char *buf, ssize_t blen)
 
     do {
 	uint8_t *pkt = NULL;
+	uint8_t *pkti = NULL;
 	size_t pktlen = 0;
+	size_t certlen;
 	
 	/* Read pgp packet. */
 	if (pgpParsePkts(start, &pkt, &pktlen) == PGPARMOR_PUBKEY) {
-	    /* Import pubkey packet(s). */
-	    if (rpmtsImportPubkey(ts, pkt, pktlen) != RPMRC_OK) {
-		rpmlog(RPMLOG_ERR, _("%s: key %d import failed.\n"), fn, keyno);
-		res++;
+	    pkti = pkt;
+
+	    /* Iterate over certificates in pkt */
+	    while (pktlen > 0) {
+		if(pgpPubKeyCertLen(pkti, pktlen, &certlen)) {
+		    rpmlog(RPMLOG_ERR, _("%s: key %d import failed.\n"), fn,
+			    keyno);
+		    res++;
+		    break;
+		}
+
+		/* Import pubkey certificate. */
+		if (rpmtsImportPubkey(ts, pkti, certlen) != RPMRC_OK) {
+		    rpmlog(RPMLOG_ERR, _("%s: key %d import failed.\n"), fn,
+			    keyno);
+		    res++;
+		}
+		pkti += certlen;
+		pktlen -= certlen;
 	    }
 	} else {
 	    rpmlog(RPMLOG_ERR, _("%s: key %d not an armored public key.\n"),
@@ -149,32 +166,6 @@ exit:
     return rc;
 }
 
-/* 
- * Figure best available signature. 
- * XXX TODO: Similar detection in rpmReadPackageFile(), unify these.
- */
-static rpmTagVal bestSig(Header sigh, int nosignatures, int nodigests)
-{
-    rpmTagVal sigtag = 0;
-    if (sigtag == 0 && !nosignatures) {
-	if (headerIsEntry(sigh, RPMSIGTAG_DSA))
-	    sigtag = RPMSIGTAG_DSA;
-	else if (headerIsEntry(sigh, RPMSIGTAG_RSA))
-	    sigtag = RPMSIGTAG_RSA;
-	else if (headerIsEntry(sigh, RPMSIGTAG_GPG))
-	    sigtag = RPMSIGTAG_GPG;
-	else if (headerIsEntry(sigh, RPMSIGTAG_PGP))
-	    sigtag = RPMSIGTAG_PGP;
-    }
-    if (sigtag == 0 && !nodigests) {
-	if (headerIsEntry(sigh, RPMSIGTAG_MD5))
-	    sigtag = RPMSIGTAG_MD5;
-	else if (headerIsEntry(sigh, RPMSIGTAG_SHA1))
-	    sigtag = RPMSIGTAG_SHA1;	/* XXX never happens */
-    }
-    return sigtag;
-}
-
 static const char *sigtagname(rpmTagVal sigtag, int upper)
 {
     const char *n = NULL;
@@ -219,16 +210,16 @@ static const char *sigtagname(rpmTagVal sigtag, int upper)
  * and stash the key id as <SIGTYPE>#<keyid>. Pfft.
  */
 static void formatResult(rpmTagVal sigtag, rpmRC sigres, const char *result,
-			 int havekey, char **keyprob, char **buf)
+			 char **keyprob, char **buf)
 {
     char *msg = NULL;
     if (rpmIsVerbose()) {
-	rasprintf(&msg, "    %s", result);
+	rasprintf(&msg, "    %s\n", result);
     } else { 
 	/* Check for missing / untrusted keys in result. */
 	const char *signame = sigtagname(sigtag, (sigres != RPMRC_OK));
 	
-	if (havekey && (sigres == RPMRC_NOKEY || sigres == RPMRC_NOTTRUSTED)) {
+	if (sigres == RPMRC_NOKEY || sigres == RPMRC_NOTTRUSTED) {
 	    const char *tempKey = strstr(result, "ey ID");
 	    if (tempKey) {
 		char keyid[sizeof(pgpKeyID_t) + 1];
@@ -250,7 +241,6 @@ static int rpmpkgVerifySigs(rpmKeyring keyring, rpmQueryFlags flags,
     char *missingKeys = NULL; 
     char *untrustedKeys = NULL;
     struct rpmtd_s sigtd;
-    rpmTagVal sigtag;
     pgpDigParams sig = NULL;
     Header sigh = NULL;
     HeaderIterator hi = NULL;
@@ -260,62 +250,35 @@ static int rpmpkgVerifySigs(rpmKeyring keyring, rpmQueryFlags flags,
     int failed = 0;
     int nodigests = !(flags & VERIFY_DIGEST);
     int nosignatures = !(flags & VERIFY_SIGNATURE);
+    struct sigtInfo_s sinfo;
     rpmDigestBundle plbundle = rpmDigestBundleNew();
     rpmDigestBundle hdrbundle = rpmDigestBundleNew();
 
     if ((rc = rpmLeadRead(fd, NULL, NULL, &msg)) != RPMRC_OK) {
-	rpmlog(RPMLOG_ERR, "%s: %s\n", fn, msg);
-	free(msg);
 	goto exit;
     }
 
     rc = rpmReadSignature(fd, &sigh, RPMSIGTYPE_HEADERSIG, &msg);
-    switch (rc) {
-    default:
-	rpmlog(RPMLOG_ERR, _("%s: rpmReadSignature failed: %s"), fn,
-		    (msg && *msg ? msg : "\n"));
-	msg = _free(msg);
+
+    if (rc != RPMRC_OK) {
 	goto exit;
-	break;
-    case RPMRC_OK:
-	if (sigh == NULL) {
-	    rpmlog(RPMLOG_ERR, _("%s: No signature available\n"), fn);
-	    goto exit;
+    }
+
+    /* Initialize all digests we'll be needing */
+    hi = headerInitIterator(sigh);
+    for (; headerNext(hi, &sigtd) != 0; rpmtdFreeData(&sigtd)) {
+	rc = rpmSigInfoParse(&sigtd, "package", &sinfo, NULL, NULL);
+
+	if (nosignatures && sinfo.type == RPMSIG_SIGNATURE_TYPE)
+	    continue;
+	if (nodigests && sinfo.type == RPMSIG_DIGEST_TYPE)
+	    continue;
+	if (rc == RPMRC_OK && sinfo.hashalgo) {
+	    rpmDigestBundleAdd(sinfo.payload ? plbundle : hdrbundle,
+			       sinfo.hashalgo, RPMDIGEST_NONE);
 	}
-	break;
     }
-    msg = _free(msg);
-
-    /* Grab a hint of what needs doing to avoid duplication. */
-    sigtag = bestSig(sigh, nosignatures, nodigests);
-
-    /* XXX RSA needs the hash_algo, so decode early. */
-    if (sigtag == RPMSIGTAG_RSA || sigtag == RPMSIGTAG_PGP ||
-		sigtag == RPMSIGTAG_DSA || sigtag == RPMSIGTAG_GPG) {
-	unsigned int hashalgo;
-	if (headerGet(sigh, sigtag, &sigtd, HEADERGET_DEFAULT)) {
-	    parsePGPSig(&sigtd, "package", fn, &sig);
-	    rpmtdFreeData(&sigtd);
-	}
-	if (sig == NULL) goto exit;
-	    
-	/* XXX assume same hash_algo in header-only and header+payload */
-	hashalgo = pgpDigParamsAlgo(sig, PGPVAL_HASHALGO);
-	rpmDigestBundleAdd(plbundle, hashalgo, RPMDIGEST_NONE);
-	rpmDigestBundleAdd(hdrbundle, hashalgo, RPMDIGEST_NONE);
-    }
-
-    if (headerIsEntry(sigh, RPMSIGTAG_PGP) ||
-		      headerIsEntry(sigh, RPMSIGTAG_PGP5) ||
-		      headerIsEntry(sigh, RPMSIGTAG_MD5)) {
-	rpmDigestBundleAdd(plbundle, PGPHASHALGO_MD5, RPMDIGEST_NONE);
-    }
-    if (headerIsEntry(sigh, RPMSIGTAG_GPG)) {
-	rpmDigestBundleAdd(plbundle, PGPHASHALGO_SHA1, RPMDIGEST_NONE);
-    }
-
-    /* always do sha1 hash of header */
-    rpmDigestBundleAdd(hdrbundle, PGPHASHALGO_SHA1, RPMDIGEST_NONE);
+    hi = headerFreeIterator(hi);
 
     /* Read the file, generating digest(s) on the fly. */
     fdSetBundle(fd, plbundle);
@@ -328,7 +291,6 @@ static int rpmpkgVerifySigs(rpmKeyring keyring, rpmQueryFlags flags,
     hi = headerInitIterator(sigh);
     for (; headerNext(hi, &sigtd) != 0; rpmtdFreeData(&sigtd)) {
 	char *result = NULL;
-	int havekey = 0;
 	DIGEST_CTX ctx = NULL;
 	if (sigtd.data == NULL) /* XXX can't happen */
 	    continue;
@@ -336,42 +298,29 @@ static int rpmpkgVerifySigs(rpmKeyring keyring, rpmQueryFlags flags,
 	/* Clean up parameters from previous sigtag. */
 	sig = pgpDigParamsFree(sig);
 
-	switch (sigtd.tag) {
-	case RPMSIGTAG_GPG:
-	case RPMSIGTAG_PGP5:	/* XXX legacy */
-	case RPMSIGTAG_PGP:
-	    havekey = 1;
-	case RPMSIGTAG_RSA:
-	case RPMSIGTAG_DSA:
-	    if (nosignatures)
-		 continue;
-	    if (parsePGPSig(&sigtd, "package", fn, &sig))
-		goto exit;
-	    ctx = rpmDigestBundleDupCtx(havekey ? plbundle : hdrbundle,
-					pgpDigParamsAlgo(sig, PGPVAL_HASHALGO));
-	    break;
-	case RPMSIGTAG_SHA1:
-	    if (nodigests)
-		 continue;
-	    ctx = rpmDigestBundleDupCtx(hdrbundle, PGPHASHALGO_SHA1);
-	    break;
-	case RPMSIGTAG_MD5:
-	    if (nodigests)
-		 continue;
-	    ctx = rpmDigestBundleDupCtx(plbundle, PGPHASHALGO_MD5);
-	    break;
-	default:
+	/* Note: we permit failures to be ignored via disablers */
+	rc = rpmSigInfoParse(&sigtd, "package", &sinfo, &sig, &result);
+
+	if (nosignatures && sinfo.type == RPMSIG_SIGNATURE_TYPE)
 	    continue;
-	    break;
+	if (nodigests &&  sinfo.type == RPMSIG_DIGEST_TYPE)
+	    continue;
+	if (sinfo.type == RPMSIG_OTHER_TYPE)
+	    continue;
+
+	if (rc == RPMRC_OK) {
+	    ctx = rpmDigestBundleDupCtx(sinfo.payload ? plbundle : hdrbundle,
+					sinfo.hashalgo);
+	    rc = rpmVerifySignature(keyring, &sigtd, sig, ctx, &result);
+	    rpmDigestFinal(ctx, NULL, NULL, 0);
 	}
 
-	rc = rpmVerifySignature(keyring, &sigtd, sig, ctx, &result);
-	rpmDigestFinal(ctx, NULL, NULL, 0);
-
-	formatResult(sigtd.tag, rc, result, havekey, 
+	if (result) {
+	    formatResult(sigtd.tag, rc, result,
 		     (rc == RPMRC_NOKEY ? &missingKeys : &untrustedKeys),
 		     &buf);
-	free(result);
+	    free(result);
+	}
 
 	if (rc != RPMRC_OK) {
 	    failed = 1;
@@ -396,6 +345,9 @@ static int rpmpkgVerifySigs(rpmKeyring keyring, rpmQueryFlags flags,
     free(untrustedKeys);
 
 exit:
+    if (res && msg != NULL)
+	rpmlog(RPMLOG_ERR, "%s: %s\n", fn, msg);
+    free(msg);
     free(buf);
     rpmDigestBundleFree(hdrbundle);
     rpmDigestBundleFree(plbundle);

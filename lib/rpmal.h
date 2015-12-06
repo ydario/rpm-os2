@@ -73,22 +73,12 @@ rpmte * rpmalAllSatisfiesDepend(const rpmal al, const rpmds ds);
 /**
  * Lookup best provider for a dependency in the available list
  * @param al		available list
+ * @param te		transaction element
  * @param ds		dependency set
  * @return		best provider for the dependency, NULL if none
  */
 RPM_GNUC_INTERNAL
-rpmte rpmalSatisfiesDepend(const rpmal al, const rpmds ds);
-
-/**
- * Get a list of transaction elements that are memebers of a collection in the
- * available list
- * @param al		available list
- * @param collname	collection name to search for
- * @return		NULL-terminated list of transaction elements that are
- *			members of the specified collection
- */
-RPM_GNUC_INTERNAL
-rpmte * rpmalAllInCollection(const rpmal al, const char * collname);
+rpmte rpmalSatisfiesDepend(const rpmal al, const rpmte te, const rpmds ds);
 
 #ifdef __cplusplus
 }

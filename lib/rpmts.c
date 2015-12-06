@@ -28,6 +28,7 @@
 #include "lib/rpmts_internal.h"
 #include "lib/rpmte_internal.h"
 #include "lib/misc.h"
+#include "lib/rpmtriggers.h"
 
 #include "debug.h"
 
@@ -37,6 +38,12 @@
 struct rpmtsi_s {
     rpmts ts;		/*!< transaction set. */
     int oc;		/*!< iterator index. */
+};
+
+struct rpmtxn_s {
+    rpmlock lock;	/* transaction lock */
+    rpmtxnFlags flags;	/* transaction flags */
+    rpmts ts;		/* parent transaction set reference */
 };
 
 static void loadKeyring(rpmts ts);
@@ -97,11 +104,11 @@ int rpmtsOpenDB(rpmts ts, int dbmode)
 
 int rpmtsInitDB(rpmts ts, int dbmode)
 {
-    rpmlock lock = rpmtsAcquireLock(ts);
+    rpmtxn txn = rpmtxnBegin(ts, RPMTXN_WRITE);
     int rc = -1;
-    if (lock)
+    if (txn)
 	    rc = rpmdbInit(ts->rootDir, dbmode);
-    rpmlockFree(lock);
+    rpmtxnEnd(txn);
     return rc;
 }
 
@@ -126,19 +133,19 @@ int rpmtsSetDBMode(rpmts ts, int dbmode)
 int rpmtsRebuildDB(rpmts ts)
 {
     int rc = -1;
-    rpmlock lock = NULL;
+    rpmtxn txn = NULL;
 
     /* Cannot do this on a populated transaction set */
     if (rpmtsNElements(ts) > 0)
 	return -1;
 
-    lock = rpmtsAcquireLock(ts);
-    if (lock) {
+    txn = rpmtxnBegin(ts, RPMTXN_WRITE);
+    if (txn) {
 	if (!(ts->vsflags & RPMVSF_NOHDRCHK))
 	    rc = rpmdbRebuild(ts->rootDir, ts, headerCheck);
 	else
 	    rc = rpmdbRebuild(ts->rootDir, NULL, NULL);
-	rpmlockFree(lock);
+	rpmtxnEnd(txn);
     }
     return rc;
 }
@@ -146,10 +153,10 @@ int rpmtsRebuildDB(rpmts ts)
 int rpmtsVerifyDB(rpmts ts)
 {
     int rc = -1;
-    rpmlock lock = rpmtsAcquireLock(ts);
-    if (lock) {
+    rpmtxn txn = rpmtxnBegin(ts, RPMTXN_READ);
+    if (txn) {
 	rc = rpmdbVerify(ts->rootDir);
-	rpmlockFree(lock);
+	rpmtxnEnd(txn);
     }
     return rc;
 }
@@ -268,7 +275,10 @@ static int loadKeyringFromFiles(rpmts ts)
     }
 
     for (char **f = files; *f; f++) {
+	int subkeysCount, i;
+	rpmPubkey *subkeys;
 	rpmPubkey key = rpmPubkeyRead(*f);
+
 	if (!key) {
 	    rpmlog(RPMLOG_ERR, _("%s: reading of public key failed.\n"), *f);
 	    continue;
@@ -277,7 +287,22 @@ static int loadKeyringFromFiles(rpmts ts)
 	    nkeys++;
 	    rpmlog(RPMLOG_DEBUG, "added key %s to keyring\n", *f);
 	}
+	subkeys = rpmGetSubkeys(key, &subkeysCount);
 	rpmPubkeyFree(key);
+
+	for (i = 0; i < subkeysCount; i++) {
+	    rpmPubkey subkey = subkeys[i];
+
+	    if (rpmKeyringAddKey(ts->keyring, subkey) == 0) {
+		rpmlog(RPMLOG_DEBUG,
+		    "added subkey %d of main key %s to keyring\n",
+		    i, *f);
+
+		nkeys++;
+	    }
+	    rpmPubkeyFree(subkey);
+	}
+	free(subkeys);
     }
 exit:
     free(pkpath);
@@ -306,6 +331,9 @@ static int loadKeyringFromDB(rpmts ts)
 
 	    if (rpmBase64Decode(key, (void **) &pkt, &pktlen) == 0) {
 		rpmPubkey key = rpmPubkeyNew(pkt, pktlen);
+		int subkeysCount, i;
+		rpmPubkey *subkeys = rpmGetSubkeys(key, &subkeysCount);
+
 		if (rpmKeyringAddKey(ts->keyring, key) == 0) {
 		    char *nvr = headerGetAsString(h, RPMTAG_NVR);
 		    rpmlog(RPMLOG_DEBUG, "added key %s to keyring\n", nvr);
@@ -313,6 +341,22 @@ static int loadKeyringFromDB(rpmts ts)
 		    nkeys++;
 		}
 		rpmPubkeyFree(key);
+
+		for (i = 0; i < subkeysCount; i++) {
+		    rpmPubkey subkey = subkeys[i];
+
+		    if (rpmKeyringAddKey(ts->keyring, subkey) == 0) {
+			char *nvr = headerGetAsString(h, RPMTAG_NVR);
+			rpmlog(RPMLOG_DEBUG,
+			    "added subkey %d of main key %s to keyring\n",
+			    i, nvr);
+
+			free(nvr);
+			nkeys++;
+		    }
+		    rpmPubkeyFree(subkey);
+		}
+		free(subkeys);
 		free(pkt);
 	    }
 	}
@@ -338,7 +382,8 @@ static void loadKeyring(rpmts ts)
 }
 
 /* Build pubkey header. */
-static int makePubkeyHeader(rpmts ts, rpmPubkey key, Header * hdrp)
+static int makePubkeyHeader(rpmts ts, rpmPubkey key, rpmPubkey *subkeys,
+			    int subkeysCount, Header * hdrp)
 {
     Header h = headerNew();
     const char * afmt = "%{pubkeys:armor}";
@@ -359,6 +404,7 @@ static int makePubkeyHeader(rpmts ts, rpmPubkey key, Header * hdrp)
     char * r = NULL;
     char * evr = NULL;
     int rc = -1;
+    int i;
 
     if ((enc = rpmPubkeyBase64(key)) == NULL)
 	goto exit;
@@ -406,6 +452,27 @@ static int makePubkeyHeader(rpmts ts, rpmPubkey key, Header * hdrp)
     headerPutUint32(h, RPMTAG_BUILDTIME, &keytime, 1);
     headerPutString(h, RPMTAG_SOURCERPM, "(none)");
 
+    for (i = 0; i < subkeysCount; i++) {
+	char *v, *r, *n, *evr;
+	pgpDigParams pgpkey;
+
+	pgpkey = rpmPubkeyPgpDigParams(subkeys[i]);
+	v = pgpHexStr(pgpkey->signid, sizeof(pgpkey->signid));
+	r = pgpHexStr(pgpkey->time, sizeof(pgpkey->time));
+
+	rasprintf(&n, "gpg(%s)", v+8);
+	rasprintf(&evr, "%d:%s-%s", pubp->version, v, r);
+
+	headerPutString(h, RPMTAG_PROVIDENAME, n);
+	headerPutString(h, RPMTAG_PROVIDEVERSION, evr);
+	headerPutUint32(h, RPMTAG_PROVIDEFLAGS, &pflags, 1);
+
+	free(v);
+	free(r);
+	free(n);
+	free(evr);
+    }
+
     /* Reload the lot to immutable region and stomp sha1 digest on it */
     h = headerReload(h, RPMTAG_HEADERIMMUTABLE);
     if (h != NULL) {
@@ -441,14 +508,32 @@ exit:
     return rc;
 }
 
+rpmRC rpmtsImportHeader(rpmtxn txn, Header h, rpmFlags flags)
+{
+    rpmRC rc = RPMRC_FAIL;
+
+    if (txn && h && rpmtsOpenDB(txn->ts, (O_RDWR|O_CREAT)) == 0) {
+	if (rpmdbAdd(rpmtsGetRdb(txn->ts), h) == 0) {
+	    rc = RPMRC_OK;
+	}
+    }
+    return rc;
+}
+
 rpmRC rpmtsImportPubkey(const rpmts ts, const unsigned char * pkt, size_t pktlen)
 {
     Header h = NULL;
     rpmRC rc = RPMRC_FAIL;		/* assume failure */
     rpmPubkey pubkey = NULL;
+    rpmPubkey *subkeys = NULL;
+    int subkeysCount = 0;
     rpmVSFlags oflags = rpmtsVSFlags(ts);
     rpmKeyring keyring;
-    int krc;
+    rpmtxn txn = rpmtxnBegin(ts, RPMTXN_WRITE);
+    int krc, i;
+
+    if (txn == NULL)
+	return rc;
 
     /* XXX keyring wont load if sigcheck disabled, force it temporarily */
     rpmtsSetVSFlags(ts, (oflags & ~_RPMVSF_NOSIGNATURES));
@@ -457,6 +542,10 @@ rpmRC rpmtsImportPubkey(const rpmts ts, const unsigned char * pkt, size_t pktlen
 
     if ((pubkey = rpmPubkeyNew(pkt, pktlen)) == NULL)
 	goto exit;
+
+    if ((subkeys = rpmGetSubkeys(pubkey, &subkeysCount)) == NULL)
+	goto exit;
+
     krc = rpmKeyringAddKey(keyring, pubkey);
     if (krc < 0)
 	goto exit;
@@ -465,7 +554,7 @@ rpmRC rpmtsImportPubkey(const rpmts ts, const unsigned char * pkt, size_t pktlen
     if (krc == 0) {
 	rpm_tid_t tid = rpmtsGetTid(ts);
 
-	if (makePubkeyHeader(ts, pubkey, &h) != 0) 
+	if (makePubkeyHeader(ts, pubkey, subkeys, subkeysCount, &h) != 0)
 	    goto exit;
 
 	headerPutUint32(h, RPMTAG_INSTALLTIME, &tid, 1);
@@ -473,10 +562,7 @@ rpmRC rpmtsImportPubkey(const rpmts ts, const unsigned char * pkt, size_t pktlen
 
 	/* Add header to database. */
 	if (!(rpmtsFlags(ts) & RPMTRANS_FLAG_TEST)) {
-	    if (rpmtsOpenDB(ts, (O_RDWR|O_CREAT)))
-		goto exit;
-	    if (rpmdbAdd(rpmtsGetRdb(ts), h) != 0)
-		goto exit;
+	    rc = rpmtsImportHeader(txn, h, 0);
 	}
     }
     rc = RPMRC_OK;
@@ -485,7 +571,12 @@ exit:
     /* Clean up. */
     headerFree(h);
     rpmPubkeyFree(pubkey);
+    for (i = 0; i < subkeysCount; i++)
+	rpmPubkeyFree(subkeys[i]);
+    free(subkeys);
+
     rpmKeyringFree(keyring);
+    rpmtxnEnd(txn);
     return rc;
 }
 
@@ -588,7 +679,7 @@ void rpmtsEmpty(rpmts ts)
     tsmem->orderCount = 0;
     /* The pool cannot be emptied, there might be references to its contents */
     tsmem->pool = rpmstrPoolFree(tsmem->pool);
-    removedHashEmpty(tsmem->removedPackages);
+    packageHashEmpty(tsmem->removedPackages);
     return;
 }
 
@@ -637,7 +728,8 @@ rpmts rpmtsFree(rpmts ts)
 
     (void) rpmtsCloseDB(ts);
 
-    tsmem->removedPackages = removedHashFree(tsmem->removedPackages);
+    tsmem->removedPackages = packageHashFree(tsmem->removedPackages);
+    tsmem->installedPackages = packageHashFree(tsmem->installedPackages);
     tsmem->order = _free(tsmem->order);
     ts->members = _free(ts->members);
 
@@ -649,12 +741,15 @@ rpmts rpmtsFree(rpmts ts)
     }
     ts->rootDir = _free(ts->rootDir);
     ts->lockPath = _free(ts->lockPath);
+    ts->lock = rpmlockFree(ts->lock);
 
     ts->keyring = rpmKeyringFree(ts->keyring);
     ts->netsharedPaths = argvFree(ts->netsharedPaths);
     ts->installLangs = argvFree(ts->installLangs);
 
     ts->plugins = rpmpluginsFree(ts->plugins);
+
+    rpmtriggersFree(ts->trigs2run);
 
     if (_rpmts_stats)
 	rpmtsPrintStats(ts);
@@ -724,63 +819,6 @@ void rpmtsSetScriptFd(rpmts ts, FD_t scriptFd)
 	if (scriptFd != NULL)
 	    ts->scriptFd = fdLink(scriptFd);
     }
-}
-
-struct selabel_handle * rpmtsSELabelHandle(rpmts ts)
-{
-#if WITH_SELINUX
-    if (ts != NULL) {
-	return ts->selabelHandle;
-    }
-#endif
-    return NULL;
-}
-
-rpmRC rpmtsSELabelInit(rpmts ts, int open_status)
-{
-#if WITH_SELINUX
-    const char * path = selinux_file_context_path();
-
-    if (ts == NULL || path == NULL) {
-	return RPMRC_FAIL;
-    }
-
-    if (open_status) {
-	selinux_status_close();
-	if (selinux_status_open(0) < 0) {
-	    return RPMRC_FAIL;
-	}
-    } else if (!selinux_status_updated() && ts->selabelHandle) {
-	return RPMRC_OK;
-    }
-
-    struct selinux_opt opts[] = {
-	{ .type = SELABEL_OPT_PATH, .value = path}
-    };
-
-    if (ts->selabelHandle) {
-	rpmtsSELabelFini(ts, 0);
-    }
-    ts->selabelHandle = selabel_open(SELABEL_CTX_FILE, opts, 1);
-
-    if (!ts->selabelHandle) {
-	return RPMRC_FAIL;
-    }
-#endif
-    return RPMRC_OK;
-}
-
-void rpmtsSELabelFini(rpmts ts, int close_status)
-{
-#if WITH_SELINUX
-    if (ts && ts->selabelHandle) {
-	selabel_close(ts->selabelHandle);
-	ts->selabelHandle = NULL;
-    }
-    if (close_status) {
-	selinux_status_close();
-    }
-#endif
 }
 
 rpm_tid_t rpmtsGetTid(rpmts ts)
@@ -913,7 +951,14 @@ rpmop rpmtsOp(rpmts ts, rpmtsOpX opx)
 
 rpmPlugins rpmtsPlugins(rpmts ts)
 {
-    return (ts != NULL ? ts->plugins : NULL);
+    rpmPlugins plugins = NULL;
+
+    if (ts != NULL) {
+	if (ts->plugins == NULL)
+	    ts->plugins = rpmpluginsNew(ts);
+	plugins = ts->plugins;
+    }
+    return plugins;
 }
 
 int rpmtsSetNotifyCallback(rpmts ts,
@@ -994,7 +1039,8 @@ rpmts rpmtsCreate(void)
     tsmem->pool = NULL;
     tsmem->delta = 5;
     tsmem->addedPackages = NULL;
-    tsmem->removedPackages = removedHashCreate(128, uintId, uintCmp, NULL, NULL);
+    tsmem->removedPackages = packageHashCreate(128, uintId, uintCmp, NULL, NULL);
+    tsmem->installedPackages = packageHashCreate(128, uintId, uintCmp, NULL, NULL);
     tsmem->orderAlloced = 0;
     tsmem->orderCount = 0;
     tsmem->order = NULL;
@@ -1003,11 +1049,11 @@ rpmts rpmtsCreate(void)
     ts->rootDir = NULL;
     ts->keyring = NULL;
 
-    ts->selabelHandle = NULL;
-
     ts->nrefs = 0;
 
-    ts->plugins = rpmpluginsNew(ts);
+    ts->plugins = NULL;
+
+    ts->trigs2run = rpmtriggersCreate(10);
 
     return rpmtsLink(ts);
 }
@@ -1064,9 +1110,13 @@ rpmte rpmtsiNext(rpmtsi tsi, rpmElementTypes types)
 }
 
 #define RPMLOCK_PATH LOCALSTATEDIR "/rpm/.rpm.lock"
-rpmlock rpmtsAcquireLock(rpmts ts)
+rpmtxn rpmtxnBegin(rpmts ts, rpmtxnFlags flags)
 {
     static const char * const rpmlock_path_default = "%{?_rpmlock_path}";
+    rpmtxn txn = NULL;
+
+    if (ts == NULL)
+	return NULL;
 
     if (ts->lockPath == NULL) {
 	const char *rootDir = rpmtsRootDir(ts);
@@ -1084,6 +1134,26 @@ rpmlock rpmtsAcquireLock(rpmts ts)
 	(void) rpmioMkpath(dirname(t), 0755, getuid(), getgid());
 	free(t);
     }
-    return rpmlockAcquire(ts->lockPath, _("transaction"));
+
+    if (ts->lock == NULL)
+	ts->lock = rpmlockNew(ts->lockPath, _("transaction"));
+
+    if (rpmlockAcquire(ts->lock)) {
+	txn = xcalloc(1, sizeof(*txn));
+	txn->lock = ts->lock;
+	txn->flags = flags;
+	txn->ts = rpmtsLink(ts);
+    }
+    
+    return txn;
 }
 
+rpmtxn rpmtxnEnd(rpmtxn txn)
+{
+    if (txn) {
+	rpmlockRelease(txn->lock);
+	rpmtsFree(txn->ts);
+	free(txn);
+    }
+    return NULL;
+}

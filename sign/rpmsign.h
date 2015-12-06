@@ -11,6 +11,7 @@ extern "C" {
 struct rpmSignArgs {
     char *keyid;
     pgpHashAlgo hashalgo;
+    int signfiles;
     /* ... what else? */
 };
 
@@ -18,11 +19,9 @@ struct rpmSignArgs {
  * Sign a package
  * @param path		path to package
  * @param args		signing parameters (or NULL for defaults)
- * @param passPhrase	passphrase for the signing key
  * @return		0 on success
  */
-int rpmPkgSign(const char *path,
-	       const struct rpmSignArgs * args, const char *passPhrase);
+int rpmPkgSign(const char *path, const struct rpmSignArgs * args);
 
 /** \ingroup rpmsign
  * Delete signature(s) from a package

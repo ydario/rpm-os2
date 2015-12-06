@@ -41,13 +41,6 @@
 #ifndef __KLIBC__
 #   define __THROW
 #endif
-#ifdef  __cplusplus
-# define __BEGIN_DECLS  extern "C" {
-# define __END_DECLS    }
-#else
-# define __BEGIN_DECLS
-# define __END_DECLS
-#endif
 
 #if defined(hpux)
 # define _D_EXACT_NAMLEN(d) ((d)->d_namlen)
@@ -153,7 +146,9 @@ typedef struct _ftsent {
 	char fts_name[1];		/*!< file name */
 } FTSENT;
 
-__BEGIN_DECLS
+#ifdef  __cplusplus
+extern "C" {
+#endif
 
 /**
  * Return list of children of the current node.
@@ -206,6 +201,8 @@ RPM_GNUC_INTERNAL
 int	 Fts_set (FTS * sp, FTSENT * p, int instr) __THROW
 ;
 
-__END_DECLS
+#ifdef  __cplusplus
+}
+#endif
 
 #endif /* fts.h */

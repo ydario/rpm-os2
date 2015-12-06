@@ -34,7 +34,7 @@ enum rpmtransFlags_e {
     RPMTRANS_FLAG_NOTRIGGERS	= (1 <<  4),	/*!< from --notriggers */
     RPMTRANS_FLAG_NODOCS	= (1 <<  5),	/*!< from --excludedocs */
     RPMTRANS_FLAG_ALLFILES	= (1 <<  6),	/*!< from --allfiles */
-    /* bit 7 unused */
+    RPMTRANS_FLAG_NOPLUGINS	= (1 <<  7),	/*!< from --noplugins */
     RPMTRANS_FLAG_NOCONTEXTS	= (1 <<  8),	/*!< from --nocontexts */
     /* bits 9-15 unused */
     RPMTRANS_FLAG_NOTRIGGERPREIN= (1 << 16),	/*!< from --notriggerprein */
@@ -45,8 +45,9 @@ enum rpmtransFlags_e {
     RPMTRANS_FLAG_NOPREUN	= (1 << 21),	/*!< from --nopreun */
     RPMTRANS_FLAG_NOPOSTUN	= (1 << 22),	/*!< from --nopostun */
     RPMTRANS_FLAG_NOTRIGGERPOSTUN = (1 << 23),	/*!< from --notriggerpostun */
-    /* bits 24-25 unused */
-    RPMTRANS_FLAG_NOCOLLECTIONS	= (1 << 26),	/*!< from --nocollections */
+    RPMTRANS_FLAG_NOPRETRANS	= (1 << 24),	/*!< from --nopretrans */
+    RPMTRANS_FLAG_NOPOSTTRANS	= (1 << 25),	/*!< from --noposttrans */
+    /* bit 26 unused */
     RPMTRANS_FLAG_NOMD5		= (1 << 27),	/*!< from --nomd5 */
     RPMTRANS_FLAG_NOFILEDIGEST	= (1 << 27),	/*!< from --nofiledigest (alias to --nomd5) */
     /* bits 28-29 unused */
@@ -60,7 +61,9 @@ typedef rpmFlags rpmtransFlags;
   ( RPMTRANS_FLAG_NOPRE |	\
     RPMTRANS_FLAG_NOPOST |	\
     RPMTRANS_FLAG_NOPREUN |	\
-    RPMTRANS_FLAG_NOPOSTUN	\
+    RPMTRANS_FLAG_NOPOSTUN |	\
+    RPMTRANS_FLAG_NOPRETRANS |	\
+    RPMTRANS_FLAG_NOPOSTTRANS \
   )
 
 #define	_noTransTriggers	\
@@ -152,6 +155,12 @@ typedef	enum rpmtsOpX_e {
     RPMTS_OP_DBDEL		= 16,
     RPMTS_OP_MAX		= 17
 } rpmtsOpX;
+
+enum rpmtxnFlags_e {
+    RPMTXN_READ		= (1 << 0),
+    RPMTXN_WRITE	= (1 << 1),
+};
+typedef rpmFlags rpmtxnFlags;
 
 /** \ingroup rpmts
  * Perform dependency resolution on the transaction set.
@@ -273,6 +282,15 @@ int rpmtsVerifyDB(rpmts ts);
  */
 rpmdbMatchIterator rpmtsInitIterator(const rpmts ts, rpmDbiTagVal rpmtag,
 			const void * keyp, size_t keylen);
+
+/** \ingroup rpmts
+ * Import a header into the rpmdb
+ * @param txn		transaction handle
+ * @param h		header
+ * @param flags		(unused)
+ * @return              RPMRC_OK/RPMRC_FAIL
+ */
+rpmRC rpmtsImportHeader(rpmtxn txn, Header h, rpmFlags flags);
 
 /** \ingroup rpmts
  * Import public key packet(s).
@@ -544,6 +562,16 @@ int rpmtsAddInstallElement(rpmts ts, Header h,
 		rpmRelocation * relocs);
 
 /** \ingroup rpmts
+ * Add package to be reinstalled to transaction set.
+ *
+ * @param ts		transaction set
+ * @param h		header
+ * @param key		package retrieval key (e.g. file name)
+ * @return		0 on success
+ */
+int rpmtsAddReinstallElement(rpmts ts, Header h, const fnpyKey key);
+
+/** \ingroup rpmts
  * Add package to be erased to transaction set.
  * @param ts		transaction set
  * @param h		header
@@ -551,6 +579,21 @@ int rpmtsAddInstallElement(rpmts ts, Header h,
  * @return		0 on success, 1 on error (not installed)
  */
 int rpmtsAddEraseElement(rpmts ts, Header h, int dboffset);
+
+/** \ingroup rpmts
+ * Create a transaction (lock) handle
+ * @param ts		transaction set
+ * @param flags		flags
+ * @return		transaction handle
+ */
+rpmtxn rpmtxnBegin(rpmts ts, rpmtxnFlags flags);
+
+/** \ingroup rpmts
+ * Destroy transaction (lock) handle
+ * @param txn		transaction handle
+ * @return		NULL always
+ */
+rpmtxn rpmtxnEnd(rpmtxn txn);
 
 /** \ingroup rpmte
  * Destroy transaction element iterator.

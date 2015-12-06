@@ -1,5 +1,7 @@
 #include "system.h"
 
+#include <pthread.h>
+
 #include <rpm/rpmstring.h>
 #include <rpm/rpmpgp.h>
 #include <rpm/rpmfileutil.h>
@@ -17,16 +19,15 @@ struct rpmPubkey_s {
     pgpKeyID_t keyid;
     pgpDigParams pgpkey;
     int nrefs;
+    pthread_rwlock_t lock;
 };
 
 struct rpmKeyring_s {
     struct rpmPubkey_s **keys;
     size_t numkeys;
     int nrefs;
+    pthread_rwlock_t lock;
 };
-
-static rpmPubkey rpmPubkeyUnlink(rpmPubkey key);
-static rpmKeyring rpmKeyringUnlink(rpmKeyring keyring);
 
 static int keyidcmp(const void *k1, const void *k2)
 {
@@ -41,27 +42,30 @@ rpmKeyring rpmKeyringNew(void)
     rpmKeyring keyring = xcalloc(1, sizeof(*keyring));
     keyring->keys = NULL;
     keyring->numkeys = 0;
-    keyring->nrefs = 0;
-    return rpmKeyringLink(keyring);
+    keyring->nrefs = 1;
+    pthread_rwlock_init(&keyring->lock, NULL);
+    return keyring;
 }
 
 rpmKeyring rpmKeyringFree(rpmKeyring keyring)
 {
-    if (keyring == NULL) {
+    if (keyring == NULL)
 	return NULL;
-    }
 
-    if (keyring->nrefs > 1) {
-	return rpmKeyringUnlink(keyring);
-    }
-
-    if (keyring->keys) {
-	for (int i = 0; i < keyring->numkeys; i++) {
-	    keyring->keys[i] = rpmPubkeyFree(keyring->keys[i]);
+    pthread_rwlock_wrlock(&keyring->lock);
+    if (--keyring->nrefs == 0) {
+	if (keyring->keys) {
+	    for (int i = 0; i < keyring->numkeys; i++) {
+		keyring->keys[i] = rpmPubkeyFree(keyring->keys[i]);
+	    }
+	    free(keyring->keys);
 	}
-	free(keyring->keys);
+	pthread_rwlock_unlock(&keyring->lock);
+	pthread_rwlock_destroy(&keyring->lock);
+	free(keyring);
+    } else {
+	pthread_rwlock_unlock(&keyring->lock);
     }
-    free(keyring);
     return NULL;
 }
 
@@ -74,36 +78,34 @@ static rpmPubkey rpmKeyringFindKeyid(rpmKeyring keyring, rpmPubkey key)
 
 int rpmKeyringAddKey(rpmKeyring keyring, rpmPubkey key)
 {
+    int rc = 1; /* assume already seen key */
     if (keyring == NULL || key == NULL)
 	return -1;
 
-    /* check if we already have this key */
-    if (rpmKeyringFindKeyid(keyring, key)) {
-	return 1;
+    /* check if we already have this key, but always wrlock for simplicity */
+    pthread_rwlock_wrlock(&keyring->lock);
+    if (!rpmKeyringFindKeyid(keyring, key)) {
+	keyring->keys = xrealloc(keyring->keys,
+				 (keyring->numkeys + 1) * sizeof(rpmPubkey));
+	keyring->keys[keyring->numkeys] = rpmPubkeyLink(key);
+	keyring->numkeys++;
+	qsort(keyring->keys, keyring->numkeys, sizeof(*keyring->keys),
+		keyidcmp);
+	rc = 0;
     }
-    
-    keyring->keys = xrealloc(keyring->keys, (keyring->numkeys + 1) * sizeof(rpmPubkey));
-    keyring->keys[keyring->numkeys] = rpmPubkeyLink(key);
-    keyring->numkeys++;
-    qsort(keyring->keys, keyring->numkeys, sizeof(*keyring->keys), keyidcmp);
+    pthread_rwlock_unlock(&keyring->lock);
 
-    return 0;
+    return rc;
 }
 
 rpmKeyring rpmKeyringLink(rpmKeyring keyring)
 {
     if (keyring) {
+	pthread_rwlock_wrlock(&keyring->lock);
 	keyring->nrefs++;
+	pthread_rwlock_unlock(&keyring->lock);
     }
     return keyring;
-}
-
-static rpmKeyring rpmKeyringUnlink(rpmKeyring keyring)
-{
-    if (keyring) {
-	keyring->nrefs--;
-    }
-    return NULL;
 }
 
 rpmPubkey rpmPubkeyRead(const char *filename)
@@ -141,12 +143,45 @@ rpmPubkey rpmPubkeyNew(const uint8_t *pkt, size_t pktlen)
     key->pkt = xmalloc(pktlen);
     key->pktlen = pktlen;
     key->pgpkey = pgpkey;
-    key->nrefs = 0;
+    key->nrefs = 1;
     memcpy(key->pkt, pkt, pktlen);
     memcpy(key->keyid, keyid, sizeof(keyid));
+    pthread_rwlock_init(&key->lock, NULL);
 
 exit:
-    return rpmPubkeyLink(key);
+    return key;
+}
+
+rpmPubkey *rpmGetSubkeys(rpmPubkey mainkey, int *count)
+{
+    rpmPubkey *subkeys = NULL;
+    pgpDigParams *pgpsubkeys = NULL;
+    int pgpsubkeysCount = 0;
+    int i;
+
+    if (!pgpPrtParamsSubkeys(mainkey->pkt, mainkey->pktlen, mainkey->pgpkey,
+			    &pgpsubkeys, &pgpsubkeysCount)) {
+
+
+	subkeys = xmalloc(pgpsubkeysCount * sizeof(*subkeys));
+
+	for (i = 0; i < pgpsubkeysCount; i++) {
+	    rpmPubkey subkey = xcalloc(1, sizeof(*subkey));
+	    subkeys[i] = subkey;
+
+	    /* Packets with all subkeys already stored in main key */
+	    subkey->pkt = NULL;
+	    subkey->pktlen = 0;
+
+	    subkey->pgpkey = pgpsubkeys[i];
+	    memcpy(subkey->keyid, pgpsubkeys[i]->signid, sizeof(subkey->keyid));
+	    subkey->nrefs = 1;
+	    pthread_rwlock_init(&subkey->lock, NULL);
+	}
+    }
+    *count = pgpsubkeysCount;
+
+    return subkeys;
 }
 
 rpmPubkey rpmPubkeyFree(rpmPubkey key)
@@ -154,29 +189,27 @@ rpmPubkey rpmPubkeyFree(rpmPubkey key)
     if (key == NULL)
 	return NULL;
 
-    if (key->nrefs > 1)
-	return rpmPubkeyUnlink(key);
-
-    pgpDigParamsFree(key->pgpkey);
-    free(key->pkt);
-    free(key);
+    pthread_rwlock_wrlock(&key->lock);
+    if (--key->nrefs == 0) {
+	pgpDigParamsFree(key->pgpkey);
+	free(key->pkt);
+	pthread_rwlock_unlock(&key->lock);
+	pthread_rwlock_destroy(&key->lock);
+	free(key);
+    } else {
+	pthread_rwlock_unlock(&key->lock);
+    }
     return NULL;
 }
 
 rpmPubkey rpmPubkeyLink(rpmPubkey key)
 {
     if (key) {
+	pthread_rwlock_wrlock(&key->lock);
 	key->nrefs++;
+	pthread_rwlock_unlock(&key->lock);
     }
     return key;
-}
-
-static rpmPubkey rpmPubkeyUnlink(rpmPubkey key)
-{
-    if (key) {
-	key->nrefs--;
-    }
-    return NULL;
 }
 
 pgpDig rpmPubkeyDig(rpmPubkey key)
@@ -189,7 +222,11 @@ pgpDig rpmPubkeyDig(rpmPubkey key)
 	return NULL;
 
     dig = pgpNewDig();
+
+    pthread_rwlock_rdlock(&key->lock);
     rc = pgpPrtPkts(key->pkt, key->pktlen, dig, 0);
+    pthread_rwlock_unlock(&key->lock);
+
     if (rc == 0) {
 	pgpDigParams pubp = pgpDigGetParams(dig, PGPTAG_PUBLIC_KEY);
 	if (!pubp || !memcmp(pubp->signid, zeros, sizeof(pubp->signid)) ||
@@ -210,9 +247,21 @@ char * rpmPubkeyBase64(rpmPubkey key)
     char *enc = NULL;
 
     if (key) {
+	pthread_rwlock_rdlock(&key->lock);
 	enc = rpmBase64Encode(key->pkt, key->pktlen, -1);
+	pthread_rwlock_unlock(&key->lock);
     }
     return enc;
+}
+
+pgpDigParams rpmPubkeyPgpDigParams(rpmPubkey key)
+{
+    pgpDigParams params= NULL;
+
+    if (key) {
+	params = key->pgpkey;
+    }
+    return params;
 }
 
 static rpmPubkey findbySig(rpmKeyring keyring, pgpDigParams sig)
@@ -239,6 +288,8 @@ static rpmPubkey findbySig(rpmKeyring keyring, pgpDigParams sig)
 
 rpmRC rpmKeyringLookup(rpmKeyring keyring, pgpDig sig)
 {
+    pthread_rwlock_rdlock(&keyring->lock);
+
     rpmRC res = RPMRC_NOKEY;
     pgpDigParams sigp = pgpDigGetParams(sig, PGPTAG_SIGNATURE);
     rpmPubkey key = findbySig(keyring, sigp);
@@ -253,6 +304,7 @@ rpmRC rpmKeyringLookup(rpmKeyring keyring, pgpDig sig)
 	res = RPMRC_OK;
     }
 
+    pthread_rwlock_unlock(&keyring->lock);
     return res;
 }
 
@@ -261,6 +313,8 @@ rpmRC rpmKeyringVerifySig(rpmKeyring keyring, pgpDigParams sig, DIGEST_CTX ctx)
     rpmRC rc = RPMRC_FAIL;
 
     if (sig && ctx) {
+	pthread_rwlock_rdlock(&keyring->lock);
+
 	pgpDigParams pgpkey = NULL;
 	rpmPubkey key = findbySig(keyring, sig);
 
@@ -269,6 +323,8 @@ rpmRC rpmKeyringVerifySig(rpmKeyring keyring, pgpDigParams sig, DIGEST_CTX ctx)
 
 	/* We call verify even if key not found for a signature sanity check */
 	rc = pgpVerifySignature(pgpkey, sig, ctx);
+
+	pthread_rwlock_unlock(&keyring->lock);
     }
 
     return rc;

@@ -21,104 +21,38 @@
 #include <rpm/rpmstring.h>
 #include <rpm/argv.h>
 
-#include "lib/cpio.h"
 #include "lib/fsm.h"		/* XXX CPIO_FOO/FSM_FOO constants */
 #include "lib/rpmchroot.h"
 #include "lib/rpmfi_internal.h" /* XXX replaced/states... */
 #include "lib/rpmte_internal.h"	/* XXX internal apis */
 #include "lib/rpmdb_internal.h" /* rpmdbAdd/Remove */
+#include "lib/rpmts_internal.h" /* rpmtsPlugins() etc */
+#include "lib/rpmds_internal.h" /* rpmdsFilterTi() */
 #include "lib/rpmscript.h"
+#include "lib/misc.h"
+#include "lib/rpmtriggers.h"
+
+#include "lib/rpmplugins.h"
 
 #include "debug.h"
-
-typedef enum pkgStage_e {
-    PSM_UNKNOWN		=  0,
-    PSM_INIT		=  1,
-    PSM_PRE		=  2,
-    PSM_PROCESS		=  3,
-    PSM_POST		=  4,
-    PSM_UNDO		=  5,
-    PSM_FINI		=  6,
-
-    PSM_CREATE		= 17,
-    PSM_DESTROY		= 23,
-
-    PSM_SCRIPT		= 53,
-    PSM_TRIGGERS	= 54,
-    PSM_IMMED_TRIGGERS	= 55,
-
-    PSM_RPMDB_ADD	= 98,
-    PSM_RPMDB_REMOVE	= 99
-
-} pkgStage;
 
 struct rpmpsm_s {
     rpmts ts;			/*!< transaction set */
     rpmte te;			/*!< current transaction element */
-    rpmfi fi;			/*!< transaction element file info */
-    const char * goalName;
-    char * failedFile;
-    rpmTagVal scriptTag;	/*!< Scriptlet data tag. */
-    int npkgs_installed;	/*!< No. of installed instances. */
+    rpmfiles files;		/*!< transaction element file info */
     int scriptArg;		/*!< Scriptlet package arg. */
-    rpmsenseFlags sense;	/*!< One of RPMSENSE_TRIGGER{PREIN,IN,UN,POSTUN}. */
     int countCorrection;	/*!< 0 if installing, -1 if removing. */
     rpmCallbackType what;	/*!< Callback type. */
     rpm_loff_t amount;		/*!< Callback amount. */
     rpm_loff_t total;		/*!< Callback total. */
-    pkgGoal goal;
-    pkgStage stage;		/*!< Current psm stage. */
-    pkgStage nstage;		/*!< Next psm stage. */
 
     int nrefs;			/*!< Reference count. */
 };
 
-static rpmpsm rpmpsmNew(rpmts ts, rpmte te);
+static rpmpsm rpmpsmNew(rpmts ts, rpmte te, pkgGoal goal);
+static rpmRC rpmpsmUnpack(rpmpsm psm);
 static rpmpsm rpmpsmFree(rpmpsm psm);
-static rpmRC rpmpsmStage(rpmpsm psm, pkgStage stage);
-
-/**
- * Macros to be defined from per-header tag values.
- * @todo Should other macros be added from header when installing a package?
- */
-static struct tagMacro {
-    const char *macroname; 	/*!< Macro name to define. */
-    rpmTag tag;			/*!< Header tag to use for value. */
-} const tagMacros[] = {
-    { "name",		RPMTAG_NAME },
-    { "version",	RPMTAG_VERSION },
-    { "release",	RPMTAG_RELEASE },
-    { "epoch",		RPMTAG_EPOCH },
-    { NULL, 0 }
-};
-
-/**
- * Define per-header macros.
- * @param h		header
- * @return		0 always
- */
-static void rpmInstallLoadMacros(Header h)
-{
-    const struct tagMacro * tagm;
-
-    for (tagm = tagMacros; tagm->macroname != NULL; tagm++) {
-	struct rpmtd_s td;
-	char *body;
-	if (!headerGet(h, tagm->tag, &td, HEADERGET_DEFAULT))
-	    continue;
-
-	switch (rpmtdType(&td)) {
-	default:
-	    body = rpmtdFormat(&td, RPMTD_FORMAT_STRING, NULL);
-	    addMacro(NULL, tagm->macroname, NULL, body, -1);
-	    free(body);
-	    break;
-	case RPM_NULL_TYPE:
-	    break;
-	}
-	rpmtdFreeData(&td);
-    }
-}
+static const char * pkgGoalString(pkgGoal goal);
 
 /**
  * Adjust file states in database for files shared with this package:
@@ -134,9 +68,9 @@ static rpmRC markReplacedFiles(const rpmpsm psm)
     sharedFileInfo sfi;
     rpmdbMatchIterator mi;
     Header h;
-    int * offsets;
+    unsigned int * offsets;
     unsigned int prev;
-    int num;
+    unsigned int num;
 
     if (!replaced)
 	return RPMRC_OK;
@@ -228,17 +162,12 @@ static int rpmlibDeps(Header h)
 rpmRC rpmInstallSourcePackage(rpmts ts, FD_t fd,
 		char ** specFilePtr, char ** cookie)
 {
-    rpmfi fi = NULL;
-    char * specFile = NULL;
-    const char *rootdir = rpmtsRootDir(ts);
     Header h = NULL;
     rpmpsm psm = NULL;
     rpmte te = NULL;
     rpmRC rpmrc;
     int specix = -1;
-    struct rpmtd_s filenames;
 
-    rpmtdReset(&filenames);
     rpmrc = rpmReadPackageFile(ts, fd, NULL, &h);
     switch (rpmrc) {
     case RPMRC_NOTTRUSTED:
@@ -263,51 +192,9 @@ rpmRC rpmInstallSourcePackage(rpmts ts, FD_t fd,
     if (!rpmlibDeps(h))
 	goto exit;
 
-    if (headerGet(h, RPMTAG_BASENAMES, &filenames, HEADERGET_ALLOC)) {
-	struct rpmtd_s td;
-	const char *str;
-	const char *_cookie = headerGetString(h, RPMTAG_COOKIE);
-	if (cookie && _cookie) *cookie = xstrdup(_cookie);
-	
-	/* Try to find spec by file flags */
-	if (_cookie && headerGet(h, RPMTAG_FILEFLAGS, &td, HEADERGET_MINMEM)) {
-	    rpmfileAttrs *flags;
-	    while (specix < 0 && (flags = rpmtdNextUint32(&td))) {
-		if (*flags & RPMFILE_SPECFILE)
-		    specix = rpmtdGetIndex(&td);
-	    }
-	}
-	/* Still no spec? Look by filename. */
-	while (specix < 0 && (str = rpmtdNextString(&filenames))) {
-	    if (rpmFileHasSuffix(str, ".spec")) 
-		specix = rpmtdGetIndex(&filenames);
-	}
-    }
+    specix = headerFindSpec(h);
 
-    if (rootdir && rstreq(rootdir, "/"))
-	rootdir = NULL;
-
-    /* Macros need to be added before trying to create directories */
-    rpmInstallLoadMacros(h);
-
-    if (specix >= 0) {
-	const char *bn;
-
-	headerDel(h, RPMTAG_BASENAMES);
-	headerDel(h, RPMTAG_DIRNAMES);
-	headerDel(h, RPMTAG_DIRINDEXES);
-
-	rpmtdInit(&filenames);
-	for (int i = 0; (bn = rpmtdNextString(&filenames)); i++) {
-	    int spec = (i == specix);
-	    char *fn = rpmGenPath(rpmtsRootDir(ts),
-				  spec ? "%{_specdir}" : "%{_sourcedir}", bn);
-	    headerPutString(h, RPMTAG_OLDFILENAMES, fn);
-	    if (spec) specFile = xstrdup(fn);
-	    free(fn);
-	}
-	headerConvert(h, HEADERCONV_COMPRESSFILELIST);
-    } else {
+    if (specix < 0) {
 	rpmlog(RPMLOG_ERR, _("source package contains no .spec file\n"));
 	goto exit;
     };
@@ -323,144 +210,50 @@ rpmRC rpmInstallSourcePackage(rpmts ts, FD_t fd,
     rpmteSetFd(te, fd);
 
     rpmteSetHeader(te, h);
-    fi = rpmfiNew(ts, h, RPMTAG_BASENAMES, RPMFI_KEEPHEADER);
-    h = headerFree(h);
-
-    if (fi == NULL) {
-	goto exit;
-    }
-    fi->apath = filenames.data; /* Ick */
-    rpmteSetFI(te, fi);
-    fi = rpmfiFree(fi);
-
-    if (rpmMkdirs(rpmtsRootDir(ts), "%{_topdir}:%{_sourcedir}:%{_specdir}")) {
-	goto exit;
-    }
 
     {
 	/* set all files to be installed */
 	rpmfs fs = rpmteGetFileStates(te);
-	int i;
-	unsigned int fc = rpmfiFC(fi);
-	for (i=0; i<fc; i++) rpmfsSetAction(fs, i, FA_CREATE);
+	int fc = rpmfsFC(fs);
+	for (int i = 0; i < fc; i++)
+	    rpmfsSetAction(fs, i, FA_CREATE);
     }
 
-    psm = rpmpsmNew(ts, te);
-    psm->goal = PKG_INSTALL;
+    psm = rpmpsmNew(ts, te, PKG_INSTALL);
 
-   	/* FIX: psm->fi->dnl should be owned. */
-    if (rpmpsmStage(psm, PSM_PROCESS) == RPMRC_OK)
+    if (rpmpsmUnpack(psm) == RPMRC_OK)
 	rpmrc = RPMRC_OK;
 
-    (void) rpmpsmStage(psm, PSM_FINI);
     rpmpsmFree(psm);
 
 exit:
-    if (specFilePtr && specFile && rpmrc == RPMRC_OK)
-	*specFilePtr = specFile;
-    else
-	free(specFile);
-
-    headerFree(h);
-    rpmfiFree(fi);
+    if (rpmrc == RPMRC_OK && specix >= 0) {
+	if (cookie)
+	    *cookie = headerGetAsString(h, RPMTAG_COOKIE);
+	if (specFilePtr) {
+	    rpmfiles files = rpmteFiles(te);
+	    *specFilePtr = rpmfilesFN(files, specix);
+	    rpmfilesFree(files);
+	}
+    }
 
     /* XXX nuke the added package(s). */
-    rpmtsClean(ts);
+    headerFree(h);
+    rpmtsEmpty(ts);
 
     return rpmrc;
 }
 
-static rpmTagVal triggertag(rpmsenseFlags sense) 
-{
-    rpmTagVal tag = RPMTAG_NOT_FOUND;
-    switch (sense) {
-    case RPMSENSE_TRIGGERIN:
-	tag = RPMTAG_TRIGGERIN;
-	break;
-    case RPMSENSE_TRIGGERUN:
-	tag = RPMTAG_TRIGGERUN;
-	break;
-    case RPMSENSE_TRIGGERPOSTUN:
-	tag = RPMTAG_TRIGGERPOSTUN;
-	break;
-    case RPMSENSE_TRIGGERPREIN:
-	tag = RPMTAG_TRIGGERPREIN;
-	break;
-    default:
-	break;
-    }
-    return tag;
-}
-
-/**
- * Run a scriptlet with args.
- *
- * Run a script with an interpreter. If the interpreter is not specified,
- * /bin/sh will be used. If the interpreter is /bin/sh, then the args from
- * the header will be ignored, passing instead arg1 and arg2.
- *
- * @param psm		package state machine data
- * @param prefixes	install prefixes
- * @param script	scriptlet from header
- * @param arg1		no. instances of package installed after scriptlet exec
- *			(-1 is no arg)
- * @param arg2		ditto, but for the target package
- * @return		0 on success
- */
-static rpmRC runScript(rpmpsm psm, ARGV_const_t prefixes, 
-		       rpmScript script, int arg1, int arg2)
-{
-    rpmRC stoprc, rc = RPMRC_OK;
-    rpmTagVal stag = rpmScriptTag(script);
-    FD_t sfd = NULL;
-    int warn_only = (stag != RPMTAG_PREIN &&
-		     stag != RPMTAG_PREUN &&
-		     stag != RPMTAG_PRETRANS &&
-		     stag != RPMTAG_VERIFYSCRIPT);
-    int selinux = !(rpmtsFlags(psm->ts) & RPMTRANS_FLAG_NOCONTEXTS);
-#ifdef __KLIBC__
-	char* shell = "sh.exe";
-	char fn_native[_MAX_PATH];
-#endif
-
-    sfd = rpmtsNotify(psm->ts, psm->te, RPMCALLBACK_SCRIPT_START, stag, 0);
-    if (sfd == NULL)
-	sfd = rpmtsScriptFd(psm->ts);
-
-    rpmswEnter(rpmtsOp(psm->ts, RPMTS_OP_SCRIPTLETS), 0);
-    rc = rpmScriptRun(script, arg1, arg2, sfd,
-		      prefixes, warn_only, selinux);
-    rpmswExit(rpmtsOp(psm->ts, RPMTS_OP_SCRIPTLETS), 0);
-
-    /* Map warn-only errors to "notfound" for script stop callback */
-    stoprc = (rc != RPMRC_OK && warn_only) ? RPMRC_NOTFOUND : rc;
-    rpmtsNotify(psm->ts, psm->te, RPMCALLBACK_SCRIPT_STOP, stag, stoprc);
-
-    /* 
-     * Notify callback for all errors. "total" abused for warning/error,
-     * rc only reflects whether the condition prevented install/erase 
-     * (which is only happens with %prein and %preun scriptlets) or not.
-     */
-    if (rc != RPMRC_OK) {
-	if (warn_only) {
-	    rc = RPMRC_OK;
-	}
-	rpmtsNotify(psm->ts, psm->te, RPMCALLBACK_SCRIPT_ERROR, stag, rc);
-    }
-
-    return rc;
-}
-
-static rpmRC runInstScript(rpmpsm psm)
+static rpmRC runInstScript(rpmpsm psm, rpmTagVal scriptTag)
 {
     rpmRC rc = RPMRC_OK;
     struct rpmtd_s pfx;
     Header h = rpmteHeader(psm->te);
-    rpmScript script = rpmScriptFromTag(h, psm->scriptTag);
+    rpmScript script = rpmScriptFromTag(h, scriptTag);
 
     if (script) {
 	headerGet(h, RPMTAG_INSTPREFIXES, &pfx, HEADERGET_ALLOC|HEADERGET_ARGV);
-	rc = runScript(psm, pfx.data, script, psm->scriptArg, -1);
+	rc = runScript(psm->ts, psm->te, pfx.data, script, psm->scriptArg, -1);
 	rpmtdFreeData(&pfx);
     }
 
@@ -473,18 +266,19 @@ static rpmRC runInstScript(rpmpsm psm)
 /**
  * Execute triggers.
  * @todo Trigger on any provides, not just package NVR.
- * @param psm		package state machine data
+ * @param ts		transaction set
+ * @param te		transaction element
+ * @param sense		trigger type
  * @param sourceH	header of trigger source
  * @param trigH		header of triggered package
  * @param arg2
  * @param triggersAlreadyRun
  * @return
  */
-static rpmRC handleOneTrigger(const rpmpsm psm,
-			Header sourceH, Header trigH,
+static rpmRC handleOneTrigger(rpmts ts, rpmte te, rpmsenseFlags sense,
+			Header sourceH, Header trigH, int countCorrection,
 			int arg2, unsigned char * triggersAlreadyRun)
 {
-    const rpmts ts = psm->ts;
     rpmds trigger = rpmdsInit(rpmdsNew(trigH, RPMTAG_TRIGGERNAME, 0));
     struct rpmtd_s pfx;
     const char * sourceName = headerGetString(sourceH, RPMTAG_NAME);
@@ -499,10 +293,9 @@ static rpmRC handleOneTrigger(const rpmpsm psm,
     (void) rpmdsSetNoPromote(trigger, 1);
 
     while ((i = rpmdsNext(trigger)) >= 0) {
-	struct rpmtd_s tindexes;
 	uint32_t tix;
 
-	if (!(rpmdsFlags(trigger) & psm->sense))
+	if (!(rpmdsFlags(trigger) & sense))
 	    continue;
 
  	if (!rstreq(rpmdsN(trigger), sourceName))
@@ -512,15 +305,7 @@ static rpmRC handleOneTrigger(const rpmpsm psm,
 	if (!rpmdsAnyMatchesDep(sourceH, trigger, 1))
 	    continue;
 
-	if (!headerGet(trigH, RPMTAG_TRIGGERINDEX, &tindexes, HEADERGET_MINMEM))
-	    continue;
-
-	if (rpmtdSetIndex(&tindexes, i) < 0) {
-	    rpmtdFreeData(&tindexes);
-	    continue;
-	}
-
-	tix = rpmtdGetNumber(&tindexes);
+	tix = rpmdsTi(trigger);
 	if (triggersAlreadyRun == NULL || triggersAlreadyRun[tix] == 0) {
 	    int arg1 = rpmdbCountPackages(rpmtsGetRdb(ts), triggerName);
 
@@ -529,9 +314,9 @@ static rpmRC handleOneTrigger(const rpmpsm psm,
 		rc = RPMRC_FAIL;
 	    } else {
 		rpmScript script = rpmScriptFromTriggerTag(trigH,
-						 triggertag(psm->sense), tix);
-		arg1 += psm->countCorrection;
-		rc = runScript(psm, pfx.data, script, arg1, arg2);
+			     triggertag(sense), RPMSCRIPT_NORMALTRIGGER, tix);
+		arg1 += countCorrection;
+		rc = runScript(ts, te, pfx.data, script, arg1, arg2);
 
 		if (triggersAlreadyRun != NULL)
 		    triggersAlreadyRun[tix] = 1;
@@ -539,8 +324,6 @@ static rpmRC handleOneTrigger(const rpmpsm psm,
 		rpmScriptFree(script);
 	    }
 	}
-
-	rpmtdFreeData(&tindexes);
 
 	/*
 	 * Each target/source header pair can only result in a single
@@ -558,9 +341,10 @@ static rpmRC handleOneTrigger(const rpmpsm psm,
 /**
  * Run trigger scripts in the database that are fired by this header.
  * @param psm		package state machine data
+ * @param sense		trigger type
  * @return		0 on success
  */
-static rpmRC runTriggers(rpmpsm psm)
+static rpmRC runTriggers(rpmpsm psm, rpmsenseFlags sense)
 {
     const rpmts ts = psm->ts;
     int numPackage = -1;
@@ -578,14 +362,13 @@ static rpmRC runTriggers(rpmpsm psm)
     {	Header triggeredH;
 	Header h = rpmteHeader(psm->te);
 	rpmdbMatchIterator mi;
-	int countCorrection = psm->countCorrection;
 
-	psm->countCorrection = 0;
 	mi = rpmtsInitIterator(ts, RPMDBI_TRIGGERNAME, N, 0);
-	while((triggeredH = rpmdbNextIterator(mi)) != NULL)
-	    nerrors += handleOneTrigger(psm, h, triggeredH, numPackage, NULL);
+	while((triggeredH = rpmdbNextIterator(mi)) != NULL) {
+	    nerrors += handleOneTrigger(ts, psm->te, sense, h, triggeredH,
+					0, numPackage, NULL);
+	}
 	rpmdbFreeIterator(mi);
-	psm->countCorrection = countCorrection;
 	headerFree(h);
     }
 
@@ -595,9 +378,10 @@ static rpmRC runTriggers(rpmpsm psm)
 /**
  * Run triggers from this header that are fired by headers in the database.
  * @param psm		package state machine data
+ * @param sense		trigger type
  * @return		0 on success
  */
-static rpmRC runImmedTriggers(rpmpsm psm)
+static rpmRC runImmedTriggers(rpmpsm psm, rpmsenseFlags sense)
 {
     const rpmts ts = psm->ts;
     unsigned char * triggersRun;
@@ -624,7 +408,9 @@ static rpmRC runImmedTriggers(rpmpsm psm)
 	    mi = rpmtsInitIterator(ts, RPMDBI_NAME, trigName, 0);
 
 	    while((sourceH = rpmdbNextIterator(mi)) != NULL) {
-		nerrors += handleOneTrigger(psm, sourceH, h,
+		nerrors += handleOneTrigger(psm->ts, psm->te,
+				sense, sourceH, h,
+				psm->countCorrection,
 				rpmdbGetIteratorCount(mi),
 				triggersRun);
 	    }
@@ -644,7 +430,7 @@ exit:
 static rpmpsm rpmpsmFree(rpmpsm psm)
 {
     if (psm) {
-	rpmfiFree(psm->fi);
+	rpmfilesFree(psm->files);
 	rpmtsFree(psm->ts),
 	/* XXX rpmte not refcounted yet */
 	memset(psm, 0, sizeof(*psm)); /* XXX trash and burn */
@@ -653,12 +439,53 @@ static rpmpsm rpmpsmFree(rpmpsm psm)
     return NULL;
 }
 
-static rpmpsm rpmpsmNew(rpmts ts, rpmte te)
+static rpmpsm rpmpsmNew(rpmts ts, rpmte te, pkgGoal goal)
 {
     rpmpsm psm = xcalloc(1, sizeof(*psm));
     psm->ts = rpmtsLink(ts);
-    psm->fi = rpmfiLink(rpmteFI(te));
+    psm->files = rpmteFiles(te);
     psm->te = te; /* XXX rpmte not refcounted yet */
+    if (!rpmteIsSource(te)) {
+	/*
+	 * When we run scripts, we pass an argument which is the number of
+	 * versions of this package that will be installed when we are
+	 * finished.
+	 */
+	int npkgs_installed = rpmdbCountPackages(rpmtsGetRdb(ts), rpmteN(te));
+	switch (goal) {
+	case PKG_INSTALL:
+	case PKG_PRETRANS:
+	    psm->scriptArg = npkgs_installed + 1;
+	    psm->countCorrection = 0;
+	    break;
+	case PKG_ERASE:
+	    psm->scriptArg = npkgs_installed - 1;
+	    psm->countCorrection = -1;
+	    break;
+	case PKG_VERIFY:
+	case PKG_POSTTRANS:
+	    psm->scriptArg = npkgs_installed;
+	    psm->countCorrection = 0;
+	    break;
+	default:
+	    break;
+	}
+    }
+
+    if (goal == PKG_INSTALL) {
+	Header h = rpmteHeader(te);
+	psm->total = headerGetNumber(h, RPMTAG_LONGARCHIVESIZE);
+	headerFree(h);
+    } else if (goal == PKG_ERASE) {
+	psm->total = rpmfilesFC(psm->files);
+    }
+    /* Fake up something for packages with no files */
+    if (psm->total == 0)
+	psm->total = 100;
+
+    rpmlog(RPMLOG_DEBUG, "%s: %s has %d files\n", pkgGoalString(goal),
+	    rpmteNEVRA(psm->te), rpmfilesFC(psm->files));
+
     return psm;
 }
 
@@ -705,308 +532,275 @@ static void markReplacedInstance(rpmts ts, rpmte te)
     rpmdbFreeIterator(mi);
 }
 
-static rpmRC rpmpsmNext(rpmpsm psm, pkgStage nstage)
+static rpmRC dbAdd(rpmts ts, rpmte te)
 {
-    psm->nstage = nstage;
-    return rpmpsmStage(psm, psm->nstage);
+    Header h = rpmteHeader(te);
+    rpm_time_t installTime = (rpm_time_t) time(NULL);
+    rpmfs fs = rpmteGetFileStates(te);
+    rpm_count_t fc = rpmfsFC(fs);
+    rpm_fstate_t * fileStates = rpmfsGetStates(fs);
+    rpm_color_t tscolor = rpmtsColor(ts);
+    rpm_tid_t tid = rpmtsGetTid(ts);
+    rpmRC rc;
+
+    if (fileStates != NULL && fc > 0) {
+	headerPutChar(h, RPMTAG_FILESTATES, fileStates, fc);
+    }
+
+    headerPutUint32(h, RPMTAG_INSTALLTID, &tid, 1);
+    headerPutUint32(h, RPMTAG_INSTALLTIME, &installTime, 1);
+    headerPutUint32(h, RPMTAG_INSTALLCOLOR, &tscolor, 1);
+
+    (void) rpmswEnter(rpmtsOp(ts, RPMTS_OP_DBADD), 0);
+    rc = (rpmdbAdd(rpmtsGetRdb(ts), h) == 0) ? RPMRC_OK : RPMRC_FAIL;
+    (void) rpmswExit(rpmtsOp(ts, RPMTS_OP_DBADD), 0);
+
+    if (rc == RPMRC_OK) {
+	rpmteSetDBInstance(te, headerGetInstance(h));
+	packageHashAddEntry(ts->members->installedPackages,
+			    headerGetInstance(h), te);
+    }
+    headerFree(h);
+    return rc;
 }
 
-static rpmRC rpmpsmStage(rpmpsm psm, pkgStage stage)
+static rpmRC dbRemove(rpmts ts, rpmte te)
 {
-    const rpmts ts = psm->ts;
-    rpmfi fi = psm->fi;
+    rpmRC rc;
+
+    (void) rpmswEnter(rpmtsOp(ts, RPMTS_OP_DBREMOVE), 0);
+    rc = (rpmdbRemove(rpmtsGetRdb(ts), rpmteDBInstance(te)) == 0) ?
+						RPMRC_OK : RPMRC_FAIL;
+    (void) rpmswExit(rpmtsOp(ts, RPMTS_OP_DBREMOVE), 0);
+
+    if (rc == RPMRC_OK)
+	rpmteSetDBInstance(te, 0);
+    return rc;
+}
+
+static rpmRC rpmpsmUnpack(rpmpsm psm)
+{
+    char *failedFile = NULL;
+    int fsmrc = 0;
+    int saved_errno = 0;
     rpmRC rc = RPMRC_OK;
 
-    switch (stage) {
-    case PSM_UNKNOWN:
-	break;
-    case PSM_INIT:
-	rpmlog(RPMLOG_DEBUG, "%s: %s has %d files\n",
-		psm->goalName, rpmteNEVR(psm->te), rpmfiFC(fi));
+    rpmpsmNotify(psm, RPMCALLBACK_INST_START, 0);
+    /* make sure first progress call gets made */
+    rpmpsmNotify(psm, RPMCALLBACK_INST_PROGRESS, 0);
 
-	/*
-	 * When we run scripts, we pass an argument which is the number of
-	 * versions of this package that will be installed when we are
-	 * finished.
-	 */
-	psm->npkgs_installed = rpmdbCountPackages(rpmtsGetRdb(ts), rpmteN(psm->te));
-	if (psm->npkgs_installed < 0) {
-	    rc = RPMRC_FAIL;
-	    break;
+    if (!(rpmtsFlags(psm->ts) & RPMTRANS_FLAG_JUSTDB)) {
+	if (rpmfilesFC(psm->files) > 0) {
+	    fsmrc = rpmPackageFilesInstall(psm->ts, psm->te, psm->files,
+				   psm, &failedFile);
+	    saved_errno = errno;
 	}
+    }
 
-	if (psm->goal == PKG_INSTALL) {
-	    Header h = rpmteHeader(psm->te);
-	    psm->scriptArg = psm->npkgs_installed + 1;
+    /* XXX make sure progress reaches 100% */
+    rpmpsmNotify(psm, RPMCALLBACK_INST_PROGRESS, psm->total);
+    rpmpsmNotify(psm, RPMCALLBACK_INST_STOP, psm->total);
 
-	    psm->amount = 0;
-	    psm->total = headerGetNumber(h, RPMTAG_LONGARCHIVESIZE);
-	    /* fake up something for packages with no files */
-	    if (psm->total == 0)
-		psm->total = 100;
+    if (fsmrc) {
+	char *emsg;
+	errno = saved_errno;
+	emsg = rpmfileStrerror(fsmrc);
+	rpmlog(RPMLOG_ERR,
+		_("unpacking of archive failed%s%s: %s\n"),
+		(failedFile != NULL ? _(" on file ") : ""),
+		(failedFile != NULL ? failedFile : ""),
+		emsg);
+	free(emsg);
+	rc = RPMRC_FAIL;
 
-	    /* HACK: reinstall abuses te instance to remove old header */
-	    if (rpmtsFilterFlags(ts) & RPMPROB_FILTER_REPLACEPKG)
-		markReplacedInstance(ts, psm->te);
+	/* XXX notify callback on error. */
+	rpmtsNotify(psm->ts, psm->te, RPMCALLBACK_UNPACK_ERROR, 0, 0);
+    }
+    free(failedFile);
+    return rc;
+}
 
-	    if (rpmfiFC(fi) > 0) {
-		struct rpmtd_s filenames;
-		rpmTag ftag = RPMTAG_FILENAMES;
-	
-		if (headerIsEntry(h, RPMTAG_ORIGBASENAMES)) {
-		    ftag = RPMTAG_ORIGFILENAMES;
-		}
-		headerGet(h, ftag, &filenames, HEADERGET_EXT);
-		fi->apath = filenames.data; /* Ick.. */
-	    }
-	    headerFree(h);
+static rpmRC rpmpsmRemove(rpmpsm psm)
+{
+    char *failedFile = NULL;
+    int fsmrc = 0;
+
+    rpmpsmNotify(psm, RPMCALLBACK_UNINST_START, 0);
+    /* make sure first progress call gets made */
+    rpmpsmNotify(psm, RPMCALLBACK_UNINST_PROGRESS, 0);
+
+    /* XXX should't we log errors from here? */
+    if (!(rpmtsFlags(psm->ts) & RPMTRANS_FLAG_JUSTDB)) {
+	if (rpmfilesFC(psm->files) > 0) {
+	    fsmrc = rpmPackageFilesRemove(psm->ts, psm->te, psm->files,
+					  psm, &failedFile);
 	}
-	if (psm->goal == PKG_ERASE) {
-	    psm->scriptArg = psm->npkgs_installed - 1;
+    }
+    /* XXX make sure progress reaches 100% */
+    rpmpsmNotify(psm, RPMCALLBACK_UNINST_PROGRESS, psm->total);
+    rpmpsmNotify(psm, RPMCALLBACK_UNINST_STOP, psm->total);
 
-	    psm->amount = 0;
-	    psm->total = rpmfiFC(fi) ? rpmfiFC(fi) : 100;
-	}
-	break;
-    case PSM_PRE:
-	if (psm->goal == PKG_INSTALL) {
-	    psm->scriptTag = RPMTAG_PREIN;
-	    psm->sense = RPMSENSE_TRIGGERPREIN;
-	    psm->countCorrection = 0;   /* XXX is this correct?!? */
+    free(failedFile);
+    return (fsmrc == 0) ? RPMRC_OK : RPMRC_FAIL;
+}
 
-	    if (!(rpmtsFlags(ts) & RPMTRANS_FLAG_NOTRIGGERPREIN)) {
-		/* Run triggers in other package(s) this package sets off. */
-		rc = rpmpsmNext(psm, PSM_TRIGGERS);
-		if (rc) break;
+static rpmRC rpmPackageInstall(rpmts ts, rpmpsm psm)
+{
+    rpmRC rc = RPMRC_OK;
+    int once = 1;
 
-		/* Run triggers in this package other package(s) set off. */
-		rc = rpmpsmNext(psm, PSM_IMMED_TRIGGERS);
-		if (rc) break;
-	    }
+    rpmswEnter(rpmtsOp(psm->ts, RPMTS_OP_INSTALL), 0);
+    while (once--) {
+	/* HACK: replacepkgs abuses te instance to remove old header */
+	if (rpmtsFilterFlags(psm->ts) & RPMPROB_FILTER_REPLACEPKG)
+	    markReplacedInstance(ts, psm->te);
 
-	    if (!(rpmtsFlags(ts) & RPMTRANS_FLAG_NOPRE)) {
-		rc = rpmpsmNext(psm, PSM_SCRIPT);
-		if (rc) break;
-	    }
-	}
 
-	if (psm->goal == PKG_ERASE) {
-	    psm->scriptTag = RPMTAG_PREUN;
-	    psm->sense = RPMSENSE_TRIGGERUN;
-	    psm->countCorrection = -1;
-
-	    if (!(rpmtsFlags(ts) & RPMTRANS_FLAG_NOTRIGGERUN)) {
-		/* Run triggers in this package other package(s) set off. */
-		rc = rpmpsmNext(psm, PSM_IMMED_TRIGGERS);
-		if (rc) break;
-
-		/* Run triggers in other package(s) this package sets off. */
-		rc = rpmpsmNext(psm, PSM_TRIGGERS);
-		if (rc) break;
-	    }
-
-	    if (!(rpmtsFlags(ts) & RPMTRANS_FLAG_NOPREUN))
-		rc = rpmpsmNext(psm, PSM_SCRIPT);
-	}
-	break;
-    case PSM_PROCESS:
-	if (psm->goal == PKG_INSTALL) {
-	    int fsmrc = 0;
-
-	    rpmpsmNotify(psm, RPMCALLBACK_INST_START, 0);
-	    /* make sure first progress call gets made */
-	    rpmpsmNotify(psm, RPMCALLBACK_INST_PROGRESS, 0);
-
-	    if (rpmfiFC(fi) > 0 && !(rpmtsFlags(ts) & RPMTRANS_FLAG_JUSTDB)) {
-		FD_t payload = rpmtePayload(psm->te);
-		if (payload == NULL) {
-		    rc = RPMRC_FAIL;
-		    break;
-		}
-
-		fsmrc = rpmPackageFilesInstall(psm->ts, psm->te, psm->fi,
-				  payload, psm, &psm->failedFile);
-
-		rpmswAdd(rpmtsOp(psm->ts, RPMTS_OP_UNCOMPRESS),
-			 fdOp(payload, FDSTAT_READ));
-		rpmswAdd(rpmtsOp(psm->ts, RPMTS_OP_DIGEST),
-			 fdOp(payload, FDSTAT_DIGEST));
-
-		Fclose(payload);
-	    }
-
-	    /* XXX make sure progress reaches 100% */
-	    rpmpsmNotify(psm, 0, psm->total);
-	    rpmpsmNotify(psm, RPMCALLBACK_INST_STOP, psm->total);
-
-	    if (fsmrc) {
-		rpmlog(RPMLOG_ERR,
-			_("unpacking of archive failed%s%s: %s\n"),
-			(psm->failedFile != NULL ? _(" on file ") : ""),
-			(psm->failedFile != NULL ? psm->failedFile : ""),
-			rpmcpioStrerror(fsmrc));
-		rc = RPMRC_FAIL;
-
-		/* XXX notify callback on error. */
-		rpmtsNotify(ts, psm->te, RPMCALLBACK_UNPACK_ERROR, 0, 0);
-		break;
-	    }
-	}
-	if (psm->goal == PKG_ERASE) {
-	    if (rpmtsFlags(ts) & RPMTRANS_FLAG_JUSTDB)	break;
-
-	    rpmpsmNotify(psm, RPMCALLBACK_UNINST_START, 0);
-	    /* make sure first progress call gets made */
-	    rpmpsmNotify(psm, RPMCALLBACK_UNINST_PROGRESS, 0);
-
-	    /* XXX should't we log errors from here? */
-	    if (rpmfiFC(fi) > 0 && !(rpmtsFlags(ts) & RPMTRANS_FLAG_JUSTDB)) {
-		rc = rpmPackageFilesRemove(psm->ts, psm->te, psm->fi,
-				  psm, &psm->failedFile);
-	    }
-
-	    /* XXX make sure progress reaches 100% */
-	    rpmpsmNotify(psm, 0, psm->total);
-	    rpmpsmNotify(psm, RPMCALLBACK_UNINST_STOP, psm->total);
-	}
-	break;
-    case PSM_POST:
-	if (psm->goal == PKG_INSTALL) {
-	    rpm_time_t installTime = (rpm_time_t) time(NULL);
-	    rpmfs fs = rpmteGetFileStates(psm->te);
-	    rpm_count_t fc = rpmfsFC(fs);
-	    rpm_fstate_t * fileStates = rpmfsGetStates(fs);
-	    Header h = rpmteHeader(psm->te);
-	    rpm_color_t tscolor = rpmtsColor(ts);
-
-	    if (fileStates != NULL && fc > 0) {
-		headerPutChar(h, RPMTAG_FILESTATES, fileStates, fc);
-	    }
-
-	    headerPutUint32(h, RPMTAG_INSTALLTIME, &installTime, 1);
-	    headerPutUint32(h, RPMTAG_INSTALLCOLOR, &tscolor, 1);
-	    headerFree(h);
-
-	    /*
-	     * If this package has already been installed, remove it from
-	     * the database before adding the new one.
-	     */
-	    if (rpmteDBInstance(psm->te)) {
-		rc = rpmpsmNext(psm, PSM_RPMDB_REMOVE);
-		if (rc) break;
-	    }
-
-	    rc = rpmpsmNext(psm, PSM_RPMDB_ADD);
+	if (!(rpmtsFlags(ts) & RPMTRANS_FLAG_NOTRIGGERPREIN)) {
+	    /* Run triggers in other package(s) this package sets off. */
+	    rc = runTriggers(psm, RPMSENSE_TRIGGERPREIN);
 	    if (rc) break;
 
-	    psm->scriptTag = RPMTAG_POSTIN;
-	    psm->sense = RPMSENSE_TRIGGERIN;
-	    psm->countCorrection = 0;
-
-	    if (!(rpmtsFlags(ts) & RPMTRANS_FLAG_NOPOST)) {
-		rc = rpmpsmNext(psm, PSM_SCRIPT);
-		if (rc) break;
-	    }
-	    if (!(rpmtsFlags(ts) & RPMTRANS_FLAG_NOTRIGGERIN)) {
-		/* Run triggers in other package(s) this package sets off. */
-		rc = rpmpsmNext(psm, PSM_TRIGGERS);
-		if (rc) break;
-
-		/* Run triggers in this package other package(s) set off. */
-		rc = rpmpsmNext(psm, PSM_IMMED_TRIGGERS);
-		if (rc) break;
-	    }
-
-	    rc = markReplacedFiles(psm);
-
-	}
-	if (psm->goal == PKG_ERASE) {
-
-	    psm->scriptTag = RPMTAG_POSTUN;
-	    psm->sense = RPMSENSE_TRIGGERPOSTUN;
-	    psm->countCorrection = -1;
-
-	    if (!(rpmtsFlags(ts) & RPMTRANS_FLAG_NOPOSTUN)) {
-		rc = rpmpsmNext(psm, PSM_SCRIPT);
-		if (rc) break;
-	    }
-
-	    if (!(rpmtsFlags(ts) & RPMTRANS_FLAG_NOTRIGGERPOSTUN)) {
-		/* Run triggers in other package(s) this package sets off. */
-		rc = rpmpsmNext(psm, PSM_TRIGGERS);
-		if (rc) break;
-	    }
-
-	    rc = rpmpsmNext(psm, PSM_RPMDB_REMOVE);
-	}
-	break;
-    case PSM_UNDO:
-	break;
-    case PSM_FINI:
-	if (rc) {
-	    if (psm->failedFile)
-		rpmlog(RPMLOG_ERR,
-			_("%s failed on file %s: %s\n"),
-			psm->goalName, psm->failedFile, rpmcpioStrerror(rc));
-	    else
-		rpmlog(RPMLOG_ERR, _("%s failed: %s\n"),
-			psm->goalName, rpmcpioStrerror(rc));
-
-	    /* XXX notify callback on error. */
-	    rpmtsNotify(ts, psm->te, RPMCALLBACK_CPIO_ERROR, 0, 0);
+	    /* Run triggers in this package other package(s) set off. */
+	    rc = runImmedTriggers(psm, RPMSENSE_TRIGGERPREIN);
+	    if (rc) break;
 	}
 
-	psm->failedFile = _free(psm->failedFile);
-
-	fi->apath = _free(fi->apath);
-	break;
-
-    case PSM_CREATE:
-	break;
-    case PSM_DESTROY:
-	break;
-    case PSM_SCRIPT:	/* Run current package scriptlets. */
-	rc = runInstScript(psm);
-	break;
-    case PSM_TRIGGERS:
-	/* Run triggers in other package(s) this package sets off. */
-	rc = runTriggers(psm);
-	break;
-    case PSM_IMMED_TRIGGERS:
-	/* Run triggers in this package other package(s) set off. */
-	rc = runImmedTriggers(psm);
-	break;
-
-    case PSM_RPMDB_ADD: {
-	Header h = rpmteHeader(psm->te);
-
-	if (!headerIsEntry(h, RPMTAG_INSTALLTID)) {
-	    rpm_tid_t tid = rpmtsGetTid(ts);
-	    if (tid != 0 && tid != (rpm_tid_t)-1)
-		headerPutUint32(h, RPMTAG_INSTALLTID, &tid, 1);
+	if (!(rpmtsFlags(ts) & RPMTRANS_FLAG_NOPRE)) {
+	    rc = runInstScript(psm, RPMTAG_PREIN);
+	    if (rc) break;
 	}
-	
-	(void) rpmswEnter(rpmtsOp(ts, RPMTS_OP_DBADD), 0);
-	rc = (rpmdbAdd(rpmtsGetRdb(ts), h) == 0) ? RPMRC_OK : RPMRC_FAIL;
-	(void) rpmswExit(rpmtsOp(ts, RPMTS_OP_DBADD), 0);
 
-	if (rc == RPMRC_OK)
-	    rpmteSetDBInstance(psm->te, headerGetInstance(h));
-	headerFree(h);
-    }   break;
+	rc = rpmpsmUnpack(psm);
+	if (rc) break;
 
-    case PSM_RPMDB_REMOVE:
-	(void) rpmswEnter(rpmtsOp(ts, RPMTS_OP_DBREMOVE), 0);
-	rc = (rpmdbRemove(rpmtsGetRdb(ts), rpmteDBInstance(psm->te)) == 0) ?
-						    RPMRC_OK : RPMRC_FAIL;
-	(void) rpmswExit(rpmtsOp(ts, RPMTS_OP_DBREMOVE), 0);
-	if (rc == RPMRC_OK)
-	    rpmteSetDBInstance(psm->te, 0);
-	break;
+	/*
+	 * If this package has already been installed, remove it from
+	 * the database before adding the new one.
+	 */
+	if (rpmteDBInstance(psm->te)) {
+	    rc = dbRemove(ts, psm->te);
+	    if (rc) break;
+	}
 
-    default:
-	break;
-   }
+	rc = dbAdd(ts, psm->te);
+	if (rc) break;
+
+	/* Run upper file triggers i. e. with higher priorities */
+	/* Run file triggers in other package(s) this package sets off. */
+	rc = runFileTriggers(psm->ts, psm->te, RPMSENSE_TRIGGERIN,
+			    RPMSCRIPT_FILETRIGGER, 1);
+	if (rc) break;
+
+	/* Run file triggers in this package other package(s) set off. */
+	rc = runImmedFileTriggers(psm->ts, psm->te, RPMSENSE_TRIGGERIN,
+				RPMSCRIPT_FILETRIGGER, 1);
+	if (rc) break;
+
+	if (!(rpmtsFlags(ts) & RPMTRANS_FLAG_NOPOST)) {
+	    rc = runInstScript(psm, RPMTAG_POSTIN);
+	    if (rc) break;
+	}
+	if (!(rpmtsFlags(ts) & RPMTRANS_FLAG_NOTRIGGERIN)) {
+	    /* Run triggers in other package(s) this package sets off. */
+	    rc = runTriggers(psm, RPMSENSE_TRIGGERIN);
+	    if (rc) break;
+
+	    /* Run triggers in this package other package(s) set off. */
+	    rc = runImmedTriggers(psm, RPMSENSE_TRIGGERIN);
+	    if (rc) break;
+	}
+
+	/* Run lower file triggers i. e. with lower priorities */
+	/* Run file triggers in other package(s) this package sets off. */
+	rc = runFileTriggers(psm->ts, psm->te, RPMSENSE_TRIGGERIN,
+			    RPMSCRIPT_FILETRIGGER, 2);
+	if (rc) break;
+
+	/* Run file triggers in this package other package(s) set off. */
+	rc = runImmedFileTriggers(psm->ts, psm->te, RPMSENSE_TRIGGERIN,
+				RPMSCRIPT_FILETRIGGER, 2);
+	if (rc) break;
+
+	rc = markReplacedFiles(psm);
+    }
+
+    rpmswExit(rpmtsOp(psm->ts, RPMTS_OP_INSTALL), 0);
+
+    return rc;
+}
+
+static rpmRC rpmPackageErase(rpmts ts, rpmpsm psm)
+{
+    rpmRC rc = RPMRC_OK;
+    int once = 1;
+
+    rpmswEnter(rpmtsOp(psm->ts, RPMTS_OP_ERASE), 0);
+    while (once--) {
+
+	/* Run file triggers in this package other package(s) set off. */
+	rc = runImmedFileTriggers(psm->ts, psm->te, RPMSENSE_TRIGGERUN,
+				RPMSCRIPT_FILETRIGGER, 1);
+	if (rc) break;
+
+	/* Run file triggers in other package(s) this package sets off. */
+	rc = runFileTriggers(psm->ts, psm->te, RPMSENSE_TRIGGERUN,
+			    RPMSCRIPT_FILETRIGGER, 1);
+	if (rc) break;
+
+	if (!(rpmtsFlags(ts) & RPMTRANS_FLAG_NOTRIGGERUN)) {
+	    /* Run triggers in this package other package(s) set off. */
+	    rc = runImmedTriggers(psm, RPMSENSE_TRIGGERUN);
+	    if (rc) break;
+
+	    /* Run triggers in other package(s) this package sets off. */
+	    rc = runTriggers(psm, RPMSENSE_TRIGGERUN);
+	    if (rc) break;
+	}
+
+	if (!(rpmtsFlags(ts) & RPMTRANS_FLAG_NOPREUN))
+	    rc = runInstScript(psm, RPMTAG_PREUN);
+
+	/* Run file triggers in this package other package(s) set off. */
+	rc = runImmedFileTriggers(psm->ts, psm->te, RPMSENSE_TRIGGERUN,
+				RPMSCRIPT_FILETRIGGER, 2);
+	if (rc) break;
+
+	/* Run file triggers in other package(s) this package sets off. */
+	rc = runFileTriggers(psm->ts, psm->te, RPMSENSE_TRIGGERUN,
+			    RPMSCRIPT_FILETRIGGER, 2);
+	if (rc) break;
+
+	rc = rpmpsmRemove(psm);
+	if (rc) break;
+
+	/* Run file triggers in other package(s) this package sets off. */
+	rc = runFileTriggers(psm->ts, psm->te, RPMSENSE_TRIGGERPOSTUN,
+			    RPMSCRIPT_FILETRIGGER, 1);
+
+	if (!(rpmtsFlags(ts) & RPMTRANS_FLAG_NOPOSTUN)) {
+	    rc = runInstScript(psm, RPMTAG_POSTUN);
+	    if (rc) break;
+	}
+
+	if (!(rpmtsFlags(ts) & RPMTRANS_FLAG_NOTRIGGERPOSTUN)) {
+	    /* Run triggers in other package(s) this package sets off. */
+	    rc = runTriggers(psm, RPMSENSE_TRIGGERPOSTUN);
+	    if (rc) break;
+	}
+
+	/* Run file triggers in other package(s) this package sets off. */
+	rc = runFileTriggers(psm->ts, psm->te, RPMSENSE_TRIGGERPOSTUN,
+			    RPMSCRIPT_FILETRIGGER, 2);
+	if (rc) break;
+
+	/* Prepare post transaction uninstall triggers */
+	rpmtriggersPrepPostUnTransFileTrigs(psm->ts, psm->te);
+
+	rc = dbRemove(ts, psm->te);
+    }
+
+    rpmswExit(rpmtsOp(psm->ts, RPMTS_OP_ERASE), 0);
 
     return rc;
 }
@@ -1032,35 +826,39 @@ rpmRC rpmpsmRun(rpmts ts, rpmte te, pkgGoal goal)
     if (rpmtsFlags(ts) & RPMTRANS_FLAG_TEST)
 	return RPMRC_OK;
 
-    psm = rpmpsmNew(ts, te);
+    psm = rpmpsmNew(ts, te, goal);
     if (rpmChrootIn() == 0) {
-	rpmtsOpX op;
-	psm->goal = goal;
-	psm->goalName = pkgGoalString(goal);
+	/* Run pre transaction element hook for all plugins */
+	rc = rpmpluginsCallPsmPre(rpmtsPlugins(ts), te);
 
-	switch (goal) {
-	case PKG_INSTALL:
-	case PKG_ERASE:
-	    op = (goal == PKG_INSTALL) ? RPMTS_OP_INSTALL : RPMTS_OP_ERASE;
-	    rpmswEnter(rpmtsOp(psm->ts, op), 0);
-
-	    rc = rpmpsmNext(psm, PSM_INIT);
-	    if (!rc) rc = rpmpsmNext(psm, PSM_PRE);
-	    if (!rc) rc = rpmpsmNext(psm, PSM_PROCESS);
-	    if (!rc) rc = rpmpsmNext(psm, PSM_POST);
-	    (void) rpmpsmNext(psm, PSM_FINI);
-
-	    rpmswExit(rpmtsOp(psm->ts, op), 0);
-	    break;
-	case PKG_PRETRANS:
-	case PKG_POSTTRANS:
-	case PKG_VERIFY:
-	    psm->scriptTag = goal;
-	    rc = rpmpsmStage(psm, PSM_SCRIPT);
-	    break;
-	default:
-	    break;
+	if (!rc) {
+	    switch (goal) {
+	    case PKG_INSTALL:
+		rc = rpmPackageInstall(ts, psm);
+		break;
+	    case PKG_ERASE:
+		rc = rpmPackageErase(ts, psm);
+		break;
+	    case PKG_PRETRANS:
+	    case PKG_POSTTRANS:
+	    case PKG_VERIFY:
+		rc = runInstScript(psm, goal);
+		break;
+	    case PKG_TRANSFILETRIGGERIN:
+		rc = runImmedFileTriggers(ts, te, RPMSENSE_TRIGGERIN,
+					    RPMSCRIPT_TRANSFILETRIGGER, 0);
+		break;
+	    case PKG_TRANSFILETRIGGERUN:
+		rc = runImmedFileTriggers(ts, te, RPMSENSE_TRIGGERUN,
+					    RPMSCRIPT_TRANSFILETRIGGER, 0);
+		break;
+	    default:
+		break;
+	    }
 	}
+	/* Run post transaction element hook for all plugins */
+	rpmpluginsCallPsmPost(rpmtsPlugins(ts), te, rc);
+
 	/* XXX an error here would require a full abort */
 	(void) rpmChrootOut();
     }

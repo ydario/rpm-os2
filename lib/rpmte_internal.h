@@ -14,6 +14,8 @@ typedef enum pkgGoal_e {
     PKG_VERIFY		= RPMTAG_VERIFYSCRIPT,
     PKG_PRETRANS	= RPMTAG_PRETRANS,
     PKG_POSTTRANS	= RPMTAG_POSTTRANS,
+    PKG_TRANSFILETRIGGERIN	= RPMTAG_TRANSFILETRIGGERIN,
+    PKG_TRANSFILETRIGGERUN	= RPMTAG_TRANSFILETRIGGERUN,
 } pkgGoal;
 
 /** \ingroup rpmte
@@ -47,7 +49,7 @@ RPM_GNUC_INTERNAL
 rpmte rpmteFree(rpmte te);
 
 RPM_GNUC_INTERNAL
-rpmfi rpmteSetFI(rpmte te, rpmfi fi);
+void rpmteCleanFiles(rpmte te);
 
 RPM_GNUC_INTERNAL
 FD_t rpmteSetFd(rpmte te, FD_t fd);
@@ -84,18 +86,6 @@ int rpmteHaveTransScript(rpmte te, rpmTagVal tag);
 /* XXX should be internal too but build code needs for now... */
 rpmfs rpmteGetFileStates(rpmte te);
 
-/* XXX here for now... */
-/**
- * Relocate files in header.
- * @todo multilib file dispositions need to be checked.
- * @param relocations		relocations
- * @param numRelocations	number of relocations
- * @param fs			file state set
- * @param h			package header to relocate
- */
-RPM_GNUC_INTERNAL
-void rpmRelocateFileList(rpmRelocation *relocs, int numRelocations, rpmfs fs, Header h);
-
 /** \ingroup rpmte
  * Retrieve size in bytes of package header.
  * @param te		transaction element
@@ -113,44 +103,6 @@ unsigned int rpmteHeaderSize(rpmte te);
  */
 RPM_GNUC_INTERNAL
 rpmRC rpmpsmRun(rpmts ts, rpmte te, pkgGoal goal);
-
-/** \ingroup rpmte
- * Add a collection to the list of last collections for the installation
- * section of a transaction element
- * @param te		transaction element
- * @param collname		collection name
- * @return		0 on success, non-zero on error
- */
-RPM_GNUC_INTERNAL
-int rpmteAddToLastInCollectionAdd(rpmte te, const char * collname);
-
-/** \ingroup rpmte
- * Add a collection to the list of last collections for the installation
- * or removal section of a transaction element
- * @param te		transaction element
- * @param collname		collection name
- * @return		0 on success, non-zero on error
- */
-RPM_GNUC_INTERNAL
-int rpmteAddToLastInCollectionAny(rpmte te, const char * collname);
-
-/** \ingroup rpmte
- * Add a collection to the list of first collections for the removal
- * section of a transaction element
- * @param te		transaction element
- * @param collname		collection name
- * @return		0 on success, non-zero on error
- */
-RPM_GNUC_INTERNAL
-int rpmteAddToFirstInCollectionRemove(rpmte te, const char * collname);
-
-/** \ingroup rpmte
- * Sends the open te plugin hook for each plugins with the transaction element open
- * @param te		transaction element
- * @return		0 on success, non-zero on error
- */
-RPM_GNUC_INTERNAL
-rpmRC rpmteSetupCollectionPlugins(rpmte te);
 
 #ifdef __cplusplus
 }

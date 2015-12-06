@@ -198,66 +198,6 @@ int rpmDigestFinal(DIGEST_CTX ctx, void ** datap, size_t *lenp, int asAscii)
     return 0;
 }
 
-/**************************** helpers ************************************/
-
-static inline char * pgpHexCvt(char *t, const byte *s, int nbytes)
-{
-    static char hex[] = "0123456789abcdef";
-    while (nbytes-- > 0) { 
-        unsigned int i;
-        i = *s++;
-        *t++ = hex[ (i >> 4) & 0xf ];
-        *t++ = hex[ (i     ) & 0xf ];
-    }    
-    *t = '\0';
-    return t;
-}
-
-static const char * pgpMpiHex(const byte *p, const byte *pend)
-{
-    static char prbuf[2048];
-    char *t = prbuf;
-    int nbytes =  pgpMpiLen(p) - 2;
-    if (nbytes > 1024 || nbytes > pend - (p + 2))
-	return NULL;
-    t = pgpHexCvt(t, p+2, nbytes);
-    return prbuf;
-}
-
-static int pgpHexSet(int lbits, mpnumber * mpn, const byte * p, const byte * pend)
-{
-    unsigned int mbits = pgpMpiBits(p);
-    unsigned int nbits;
-    unsigned int nbytes;
-    char *t;
-    unsigned int ix;
-
-    nbits = (lbits > mbits ? lbits : mbits);
-    nbytes = ((nbits + 7) >> 3);
-    t = xmalloc(2*nbytes+1);
-    ix = 2 * ((nbits - mbits) >> 3);
-
-    if (ix > 0) memset(t, (int)'0', ix);
-    strcpy(t+ix, pgpMpiHex(p, pend));
-    (void) mpnsethex(mpn, t);
-    t = _free(t);
-    return 0;
-}
-
-static void pgpFreeSigRSADSA(pgpDigAlg sa)
-{
-    if (sa->data)
-	free(sa->data);
-    sa->data = 0;
-}
-
-static void pgpFreeKeyRSADSA(pgpDigAlg sa)
-{
-    if (sa->data)
-	free(sa->data);
-    sa->data = 0;
-}
-
 
 /****************************** RSA **************************************/
 
@@ -267,42 +207,70 @@ struct pgpDigSigRSA_s {
 
 struct pgpDigKeyRSA_s {
     rsapk rsa_pk;
+    int nbytes;
 };
 
-static int pgpSetSigMpiRSA(pgpDigAlg pgpsig, int num,
-                           const uint8_t *p, const uint8_t *pend)
+static int pgpSetSigMpiRSA(pgpDigAlg pgpsig, int num, const uint8_t *p)
 {
     struct pgpDigSigRSA_s *sig = pgpsig->data;
+    int mlen = pgpMpiLen(p) - 2;
     int rc = 1;
+
+    if (!sig)
+	sig = pgpsig->data = xcalloc(1, sizeof(*sig));
 
     switch (num) {
     case 0:
-	sig = pgpsig->data = xcalloc(1, sizeof(*sig));
-	(void) mpnsethex(&sig->c, pgpMpiHex(p, pend));
-	rc = 0;
+	if (!mpnsetbin(&sig->c, p + 2, mlen))
+	    rc = 0;
 	break;
     }
     return rc;
 }
 
-static int pgpSetKeyMpiRSA(pgpDigAlg pgpkey, int num,
-                           const uint8_t *p, const uint8_t *pend)
+static int pgpSetKeyMpiRSA(pgpDigAlg pgpkey, int num, const uint8_t *p)
 {
     struct pgpDigKeyRSA_s *key = pgpkey->data;
+    int mlen = pgpMpiLen(p) - 2;
     int rc = 1;
 
     if (!key)
 	key = pgpkey->data = xcalloc(1, sizeof(*key));
+
     switch (num) {
     case 0:
-	(void) mpbsethex(&key->rsa_pk.n, pgpMpiHex(p, pend));
-	rc = 0;
+	key->nbytes = mlen;
+	if (!mpbsetbin(&key->rsa_pk.n, p + 2, mlen))
+	    rc = 0;
 	break;
     case 1:
-	(void) mpnsethex(&key->rsa_pk.e, pgpMpiHex(p, pend));
-	rc = 0;
+	if (!mpnsetbin(&key->rsa_pk.e, p + 2, mlen))
+	    rc = 0;
 	break;
     }
+    return rc;
+}
+
+static int pkcs1pad(mpnumber *rsahm, int nbytes, const char *prefix, uint8_t *hash, size_t hashlen)
+{
+    int datalen = strlen(prefix) / 2 + hashlen;
+    byte *buf, *bp;
+    int rc = 1;
+
+    if (nbytes < 4 + datalen)
+	return 1;
+    buf = xmalloc(nbytes);
+    memset(buf, 0xff, nbytes);
+    buf[0] = 0x00;
+    buf[1] = 0x01;
+    bp = buf + nbytes - datalen;
+    bp[-1] = 0;
+    for (; *prefix; prefix += 2)
+	*bp++ = (rnibble(prefix[0]) << 4) | rnibble(prefix[1]);
+    memcpy(bp, hash, hashlen);
+    if (!mpnsetbin(rsahm, buf, nbytes))
+	rc = 0;
+    buf = _free(buf);
     return rc;
 }
 
@@ -340,28 +308,10 @@ static int pgpVerifySigRSA(pgpDigAlg pgpkey, pgpDigAlg pgpsig, uint8_t *hash, si
 	return 1;
     }
 
-    /* Generate RSA modulus parameter. */
-    {   unsigned int nbits = MP_WORDS_TO_BITS(sig->c.size);
-        unsigned int nb = (nbits + 7) >> 3;
-        byte *buf, *bp;
+    memset(&rsahm, 0, sizeof(rsahm));
+    if (pkcs1pad(&rsahm, key->nbytes, prefix, hash, hashlen) != 0)
+	return 1;
 
-	if (nb < 3)
-	    return 1;
-	buf = xmalloc(nb);
-	memset(buf, 0xff, nb);
-	buf[0] = 0x00;
-	buf[1] = 0x01;
-	bp = buf + nb - strlen(prefix)/2 - hashlen - 1;
-	if (bp < buf)
-	    return 1;
-	*bp++ = 0;
-	for (; *prefix; prefix += 2)
-	    *bp++ = (rnibble(prefix[0]) << 4) | rnibble(prefix[1]);
-        memcpy(bp, hash, hashlen);
-        mpnzero(&rsahm);
-        (void) mpnsetbin(&rsahm, buf, nb);
-        buf = _free(buf);
-    }
 #if HAVE_BEECRYPT_API_H
     rc = rsavrfy(&key->rsa_pk.n, &key->rsa_pk.e, &sig->c, &rsahm) == 1 ? 0 : 1;
 #else
@@ -369,6 +319,25 @@ static int pgpVerifySigRSA(pgpDigAlg pgpkey, pgpDigAlg pgpsig, uint8_t *hash, si
 #endif
     mpnfree(&rsahm);
     return rc;
+}
+
+static void pgpFreeSigRSA(pgpDigAlg pgpsig)
+{
+    struct pgpDigSigRSA_s *sig = pgpsig->data;
+    if (sig) {
+	mpnfree(&sig->c);
+	pgpsig->data = _free(sig);
+    }
+}
+
+static void pgpFreeKeyRSA(pgpDigAlg pgpkey)
+{
+    struct pgpDigKeyRSA_s *key = pgpkey->data;
+    if (key) {
+	mpbfree(&key->rsa_pk.n);
+	mpnfree(&key->rsa_pk.e);
+	pgpkey->data = _free(key);
+    }
 }
 
 
@@ -384,30 +353,35 @@ struct pgpDigKeyDSA_s {
     mpbarrett q;
     mpnumber g;
     mpnumber y;
+    int qbytes;
 };
 
-static int pgpSetSigMpiDSA(pgpDigAlg pgpsig, int num,
-                           const uint8_t *p, const uint8_t *pend)
+static int pgpSetSigMpiDSA(pgpDigAlg pgpsig, int num, const uint8_t *p)
 {
     struct pgpDigSigDSA_s *sig = pgpsig->data;
+    int mlen = pgpMpiLen(p) - 2;
     int rc = 1;
+
+    if (!sig)
+	sig = pgpsig->data = xcalloc(1, sizeof(*sig));
 
     switch (num) {
     case 0:
-	sig = pgpsig->data = xcalloc(1, sizeof(*sig));
-	rc = pgpHexSet(160, &sig->r, p, pend);
+	if (!mpnsetbin(&sig->r, p + 2, mlen))
+	    rc = 0;
 	break;
     case 1:
-	rc = pgpHexSet(160, &sig->s, p, pend);
+	if (!mpnsetbin(&sig->s, p + 2, mlen))
+	    rc = 0;
 	break;
     }
     return rc;
 }
 
-static int pgpSetKeyMpiDSA(pgpDigAlg pgpkey, int num,
-                           const uint8_t *p, const uint8_t *pend)
+static int pgpSetKeyMpiDSA(pgpDigAlg pgpkey, int num, const uint8_t *p)
 {
     struct pgpDigKeyDSA_s *key = pgpkey->data;
+    int mlen = pgpMpiLen(p) - 2;
     int rc = 1;
 
     if (!key)
@@ -415,20 +389,21 @@ static int pgpSetKeyMpiDSA(pgpDigAlg pgpkey, int num,
 
     switch (num) {
     case 0:
-	mpbsethex(&key->p, pgpMpiHex(p, pend));
-	rc = 0;
+	if (!mpbsetbin(&key->p, p + 2, mlen))
+	    rc = 0;
 	break;
     case 1:
-	mpbsethex(&key->q, pgpMpiHex(p, pend));
-	rc = 0;
+	key->qbytes = mlen;
+	if (!mpbsetbin(&key->q, p + 2, mlen))
+	    rc = 0;
 	break;
     case 2:
-	mpnsethex(&key->g, pgpMpiHex(p, pend));
-	rc = 0;
+	if (!mpnsetbin(&key->g, p + 2, mlen))
+	    rc = 0;
 	break;
     case 3:
-	mpnsethex(&key->y, pgpMpiHex(p, pend));
-	rc = 0;
+	if (!mpnsetbin(&key->y, p + 2, mlen))
+	    rc = 0;
 	break;
     }
     return rc;
@@ -441,17 +416,41 @@ static int pgpVerifySigDSA(pgpDigAlg pgpkey, pgpDigAlg pgpsig, uint8_t *hash, si
     mpnumber hm;
     int rc = 1;
 
-    if (sig && key) {
+    if (sig && key && hashlen >= key->qbytes) {
 	mpnzero(&hm);
-	mpnsetbin(&hm, hash, hashlen);
+	mpnsetbin(&hm, hash, key->qbytes);
 	rc = dsavrfy(&key->p, &key->q, &key->g, &hm, &key->y, &sig->r, &sig->s) == 1 ? 0 : 1;
 	mpnfree(&hm);
     }
     return rc;
 }
 
-static int pgpSetMpiNULL(pgpDigAlg pgpkey, int num,
-                         const uint8_t *p, const uint8_t *pend)
+static void pgpFreeSigDSA(pgpDigAlg pgpsig)
+{
+    struct pgpDigSigDSA_s *sig = pgpsig->data;
+    if (sig) {
+	mpnfree(&sig->r);
+	mpnfree(&sig->s);
+	pgpsig->data = _free(sig);
+    }
+}
+
+static void pgpFreeKeyDSA(pgpDigAlg pgpkey)
+{
+    struct pgpDigKeyDSA_s *key = pgpkey->data;
+    if (key) {
+	mpbfree(&key->p);
+	mpbfree(&key->q);
+	mpnfree(&key->g);
+	mpnfree(&key->y);
+	pgpkey->data = _free(key);
+    }
+}
+
+
+/****************************** NULL **************************************/
+
+static int pgpSetMpiNULL(pgpDigAlg pgpkey, int num, const uint8_t *p)
 {
     return 1;
 }
@@ -469,12 +468,12 @@ pgpDigAlg pgpPubkeyNew(int algo)
     switch (algo) {
     case PGPPUBKEYALGO_RSA:
         ka->setmpi = pgpSetKeyMpiRSA;
-        ka->free = pgpFreeKeyRSADSA;
+        ka->free = pgpFreeKeyRSA;
         ka->mpis = 2;
         break;
     case PGPPUBKEYALGO_DSA:
         ka->setmpi = pgpSetKeyMpiDSA;
-        ka->free = pgpFreeKeyRSADSA;
+        ka->free = pgpFreeKeyDSA;
         ka->mpis = 4;
         break;
     default:
@@ -495,13 +494,13 @@ pgpDigAlg pgpSignatureNew(int algo)
     switch (algo) {
     case PGPPUBKEYALGO_RSA:
         sa->setmpi = pgpSetSigMpiRSA;
-        sa->free = pgpFreeSigRSADSA;
+        sa->free = pgpFreeSigRSA;
         sa->verify = pgpVerifySigRSA;
         sa->mpis = 1;
         break;
     case PGPPUBKEYALGO_DSA:
         sa->setmpi = pgpSetSigMpiDSA;
-        sa->free = pgpFreeSigRSADSA;
+        sa->free = pgpFreeSigDSA;
         sa->verify = pgpVerifySigDSA;
         sa->mpis = 2;
         break;

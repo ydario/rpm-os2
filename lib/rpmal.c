@@ -27,7 +27,7 @@ struct availablePackage_s {
     rpmte p;                    /*!< transaction member */
     rpmds provides;		/*!< Provides: dependencies. */
     rpmds obsoletes;		/*!< Obsoletes: dependencies. */
-    rpmfi fi;			/*!< File info set. */
+    rpmfiles fi;		/*!< File info set. */
 };
 
 /** \ingroup rpmdep
@@ -38,11 +38,6 @@ typedef struct availableIndexEntry_s {
     unsigned int entryIx;	/*!< Dependency index. */
 } * availableIndexEntry;
 
-struct fileNameEntry_s {
-    rpmsid dirName;
-    rpmsid baseName;
-};
-
 #undef HASHTYPE
 #undef HTKEYTYPE
 #undef HTDATATYPE
@@ -52,12 +47,18 @@ struct fileNameEntry_s {
 #include "lib/rpmhash.H"
 #include "lib/rpmhash.C"
 
+typedef struct availableIndexFileEntry_s {
+    rpmsid dirName;
+    rpmalNum pkgNum;	        /*!< Containing package index. */
+    unsigned int entryIx;	/*!< Dependency index. */
+} * availableIndexFileEntry;
+
 #undef HASHTYPE
 #undef HTKEYTYPE
 #undef HTDATATYPE
 #define HASHTYPE rpmalFileHash
-#define HTKEYTYPE struct fileNameEntry_s
-#define HTDATATYPE struct availableIndexEntry_s
+#define HTKEYTYPE rpmsid
+#define HTDATATYPE struct availableIndexFileEntry_s
 #include "lib/rpmhash.H"
 #include "lib/rpmhash.C"
 
@@ -76,6 +77,7 @@ struct rpmal_s {
     rpmtransFlags tsflags;	/*!< Transaction control flags. */
     rpm_color_t tscolor;	/*!< Transaction color. */
     rpm_color_t prefcolor;	/*!< Transaction preferred color. */
+    fingerPrintCache fpc;
 };
 
 /**
@@ -87,6 +89,7 @@ static void rpmalFreeIndex(rpmal al)
     al->providesHash = rpmalDepHashFree(al->providesHash);
     al->obsoletesHash = rpmalDepHashFree(al->obsoletesHash);
     al->fileHash = rpmalFileHashFree(al->fileHash);
+    al->fpc = fpCacheFree(al->fpc);
 }
 
 rpmal rpmalCreate(rpmstrPool pool, int delta, rpmtransFlags tsflags,
@@ -125,7 +128,7 @@ rpmal rpmalFree(rpmal al)
     for (i = 0; i < al->size; i++, alp++) {
 	alp->obsoletes = rpmdsFree(alp->obsoletes);
 	alp->provides = rpmdsFree(alp->provides);
-	alp->fi = rpmfiFree(alp->fi);
+	alp->fi = rpmfilesFree(alp->fi);
     }
     al->pool = rpmstrPoolFree(al->pool);
     al->list = _free(al->list);
@@ -144,19 +147,6 @@ static unsigned int sidHash(rpmsid sid)
 static int sidCmp(rpmsid a, rpmsid b)
 {
     return (a != b);
-}
-
-static unsigned int fileHash(struct fileNameEntry_s file)
-{
-    return file.dirName ^ file.baseName;
-}
-
-static int fileCompare(struct fileNameEntry_s one, struct fileNameEntry_s two)
-{
-    int rc = (one.dirName != two.dirName);;
-    if (!rc)
-	rc = (one.baseName != two.baseName);
-    return rc;
 }
 
 void rpmalDel(rpmal al, rpmte p)
@@ -181,11 +171,10 @@ void rpmalDel(rpmal al, rpmte p)
     alp->p = NULL;
 }
 
-static void rpmalAddFiles(rpmal al, rpmalNum pkgNum, rpmfi fi)
+static void rpmalAddFiles(rpmal al, rpmalNum pkgNum, rpmfiles fi)
 {
-    struct fileNameEntry_s fileName;
-    struct availableIndexEntry_s fileEntry;
-    int fc = rpmfiFC(fi);
+    struct availableIndexFileEntry_s fileEntry;
+    int fc = rpmfilesFC(fi);
     rpm_color_t ficolor;
     int skipdoc = (al->tsflags & RPMTRANS_FLAG_NODOCS);
     int skipconf = (al->tsflags & RPMTRANS_FLAG_NOCONFIGS);
@@ -194,22 +183,20 @@ static void rpmalAddFiles(rpmal al, rpmalNum pkgNum, rpmfi fi)
 
     for (int i = 0; i < fc; i++) {
 	/* Ignore colored provides not in our rainbow. */
-        ficolor = rpmfiFColorIndex(fi, i);
+        ficolor = rpmfilesFColor(fi, i);
         if (al->tscolor && ficolor && !(al->tscolor & ficolor))
             continue;
 
 	/* Ignore files that wont be installed */
-	if (skipdoc && (rpmfiFFlagsIndex(fi, i) & RPMFILE_DOC))
+	if (skipdoc && (rpmfilesFFlags(fi, i) & RPMFILE_DOC))
 	    continue;
-	if (skipconf && (rpmfiFFlagsIndex(fi, i) & RPMFILE_CONFIG))
+	if (skipconf && (rpmfilesFFlags(fi, i) & RPMFILE_CONFIG))
 	    continue;
 
-	fileName.dirName = rpmfiDNIdIndex(fi, rpmfiDIIndex(fi, i));
-	fileName.baseName = rpmfiBNIdIndex(fi, i);
-
+	fileEntry.dirName = rpmfilesDNId(fi, rpmfilesDI(fi, i));
 	fileEntry.entryIx = i;
 
-	rpmalFileHashAddEntry(al->fileHash, fileName, fileEntry);
+	rpmalFileHashAddEntry(al->fileHash, rpmfilesBNId(fi, i), fileEntry);
     }
 }
 
@@ -275,7 +262,7 @@ void rpmalAdd(rpmal al, rpmte p)
 
     alp->provides = rpmdsLink(rpmteDS(p, RPMTAG_PROVIDENAME));
     alp->obsoletes = rpmdsLink(rpmteDS(p, RPMTAG_OBSOLETENAME));
-    alp->fi = rpmfiLink(rpmteFI(p));
+    alp->fi = rpmteFiles(p);
 
     /*
      * Transition-time safe-guard to catch private-pool uses.
@@ -286,7 +273,7 @@ void rpmalAdd(rpmal al, rpmte p)
      * NULL pool from NULL alp->provides in numerous cases?
      */
     {
-	rpmstrPool fipool = rpmfiPool(alp->fi);
+	rpmstrPool fipool = rpmfilesPool(alp->fi);
 	rpmstrPool dspool = rpmdsPool(alp->provides);
 	
 	assert(fipool == NULL || fipool == al->pool);
@@ -312,10 +299,10 @@ static void rpmalMakeFileIndex(rpmal al)
     for (i = 0; i < al->size; i++) {
 	alp = al->list + i;
 	if (alp->fi != NULL)
-	    fileCnt += rpmfiFC(alp->fi);
+	    fileCnt += rpmfilesFC(alp->fi);
     }
     al->fileHash = rpmalFileHashCreate(fileCnt/4+128,
-				       fileHash, fileCompare, NULL, NULL);
+				       sidHash, sidCmp, NULL, NULL);
     for (i = 0; i < al->size; i++) {
 	alp = al->list + i;
 	rpmalAddFiles(al, i, alp->fi);
@@ -403,7 +390,7 @@ rpmte * rpmalAllObsoletes(rpmal al, rpmds ds)
     return ret;
 }
 
-static rpmte * rpmalAllFileSatisfiesDepend(const rpmal al, const char *fileName)
+static rpmte * rpmalAllFileSatisfiesDepend(const rpmal al, const char *fileName, const rpmds filterds)
 {
     const char *slash; 
     rpmte * ret = NULL;
@@ -413,31 +400,45 @@ static rpmte * rpmalAllFileSatisfiesDepend(const rpmal al, const char *fileName)
 
     /* Split path into dirname and basename components for lookup */
     if ((slash = strrchr(fileName, '/')) != NULL) {
-	availableIndexEntry result;
+	availableIndexFileEntry result;
 	int resultCnt = 0;
 	size_t bnStart = (slash - fileName) + 1;
-	struct fileNameEntry_s fne;
-
-	fne.baseName = rpmstrPoolId(al->pool, fileName + bnStart, 0);
-	fne.dirName = rpmstrPoolIdn(al->pool, fileName, bnStart, 0);
+	rpmsid baseName;
 
 	if (al->fileHash == NULL)
 	    rpmalMakeFileIndex(al);
 
-	rpmalFileHashGetEntry(al->fileHash, fne, &result, &resultCnt, NULL);
+	baseName = rpmstrPoolId(al->pool, fileName + bnStart, 0);
+	if (!baseName)
+	    return NULL;	/* no match possible */
+
+	rpmalFileHashGetEntry(al->fileHash, baseName, &result, &resultCnt, NULL);
 
 	if (resultCnt > 0) {
 	    int i, found;
 	    ret = xmalloc((resultCnt+1) * sizeof(*ret));
+	    fingerPrint * fp = NULL;
+	    rpmsid dirName = rpmstrPoolIdn(al->pool, fileName, bnStart, 1);
+
+	    if (!al->fpc)
+		al->fpc = fpCacheCreate(1001, NULL);
+	    fpLookup(al->fpc, rpmstrPoolStr(al->pool, dirName), fileName + bnStart, &fp);
 
 	    for (found = i = 0; i < resultCnt; i++) {
 		availablePackage alp = al->list + result[i].pkgNum;
-		if (alp->p == NULL) // deleted
+		if (alp->p == NULL) /* deleted */
+		    continue;
+		/* ignore self-conflicts/obsoletes */
+		if (filterds && rpmteDS(alp->p, rpmdsTagN(filterds)) == filterds)
+		    continue;
+		if (result[i].dirName != dirName &&
+		    !fpLookupEquals(al->fpc, fp, rpmstrPoolStr(al->pool, result[i].dirName), fileName + bnStart))
 		    continue;
 
 		ret[found] = alp->p;
 		found++;
 	    }
+	    _free(fp);
 	    ret[found] = NULL;
 	}
     }
@@ -454,6 +455,8 @@ rpmte * rpmalAllSatisfiesDepend(const rpmal al, const rpmds ds)
     availableIndexEntry result;
     int resultCnt;
     int obsolete;
+    rpmTagVal dtag;
+    rpmds filterds = NULL;
 
     availablePackage alp;
     int rc;
@@ -461,11 +464,14 @@ rpmte * rpmalAllSatisfiesDepend(const rpmal al, const rpmds ds)
     if (al == NULL || ds == NULL || (nameId = rpmdsNId(ds)) == 0)
 	return ret;
 
-    obsolete = (rpmdsTagN(ds) == RPMTAG_OBSOLETENAME);
+    dtag = rpmdsTagN(ds);
+    obsolete = (dtag == RPMTAG_OBSOLETENAME);
+    if (dtag == RPMTAG_OBSOLETENAME || dtag == RPMTAG_CONFLICTNAME)
+	filterds = ds;
     name = rpmstrPoolStr(al->pool, nameId);
     if (!obsolete && *name == '/') {
 	/* First, look for files "contained" in package ... */
-	ret = rpmalAllFileSatisfiesDepend(al, name);
+	ret = rpmalAllFileSatisfiesDepend(al, name, filterds);
 	if (ret != NULL && *ret != NULL) {
 	    rpmdsNotify(ds, "(added files)", 0);
 	    return ret;
@@ -486,52 +492,70 @@ rpmte * rpmalAllSatisfiesDepend(const rpmal al, const rpmds ds)
 
     for (found=i=0; i<resultCnt; i++) {
 	alp = al->list + result[i].pkgNum;
-	if (alp->p == NULL) // deleted
+	if (alp->p == NULL) /* deleted */
+	    continue;
+	/* ignore self-conflicts/obsoletes */
+	if (filterds && rpmteDS(alp->p, rpmdsTagN(filterds)) == filterds)
 	    continue;
 	ix = result[i].entryIx;
 
-	/* Obsoletes are on package name, filter out other provide matches */
-	if (obsolete && !rstreq(rpmdsNIndex(alp->provides, ix), rpmteN(alp->p)))
-	    continue;
-
-	rc = rpmdsCompareIndex(alp->provides, ix, ds, rpmdsIx(ds));
-
-	if (rc) {
-	    rpmdsNotify(ds, "(added provide)", 0);
-	    ret[found] = alp->p;
-	    found++;
+	if (obsolete) {
+	    /* Obsoletes are on package NEVR only */
+	    rpmds thisds;
+	    if (!rstreq(rpmdsNIndex(alp->provides, ix), rpmteN(alp->p)))
+		continue;
+	    thisds = rpmteDS(alp->p, RPMTAG_NAME);
+	    rc = rpmdsCompareIndex(thisds, rpmdsIx(thisds), ds, rpmdsIx(ds));
+	} else {
+	    rc = rpmdsCompareIndex(alp->provides, ix, ds, rpmdsIx(ds));
 	}
+
+	if (rc)
+	    ret[found++] = alp->p;
     }
 
-    if (found)
+    if (found) {
+	rpmdsNotify(ds, "(added provide)", 0);
 	ret[found] = NULL;
-    else
+    } else {
 	ret = _free(ret);
+    }
 
     return ret;
 }
 
 rpmte
-rpmalSatisfiesDepend(const rpmal al, const rpmds ds)
+rpmalSatisfiesDepend(const rpmal al, const rpmte te, const rpmds ds)
 {
     rpmte *providers = rpmalAllSatisfiesDepend(al, ds);
     rpmte best = NULL;
+    int bestscore = 0;
 
     if (providers) {
-	if (al->tscolor) {
+	rpm_color_t dscolor = rpmdsColor(ds);
+	for (rpmte *p = providers; *p; p++) {
+	    int score = 0;
+
 	    /*
-	     * For colored dependencies, try to find a matching provider.
+	     * For colored dependencies, prefer a matching colored provider.
 	     * Otherwise prefer provider of ts preferred color.
 	     */
-	    rpm_color_t dscolor = rpmdsColor(ds);
-	    for (rpmte *p = providers; *p; p++) {
+	    if (al->tscolor) {
 		rpm_color_t tecolor = rpmteColor(*p);
 		if (dscolor) {
-		    if (dscolor == tecolor) best = *p;
+		    if (dscolor == tecolor) score += 2;
 		} else if (al->prefcolor) {
-		    if (al->prefcolor == tecolor) best = *p;
+		    if (al->prefcolor == tecolor) score += 2;
 		}
-		if (best) break;
+	    }
+
+	    /* Being self-provided is a bonus */
+	    if (*p == te)
+		score += 1;
+
+	    if (score > bestscore) {
+		bestscore = score;
+		best = *p;
 	    }
 	}
 	/* if not decided by now, just pick first match */
@@ -539,29 +563,4 @@ rpmalSatisfiesDepend(const rpmal al, const rpmds ds)
 	free(providers);
     }
     return best;
-}
-
-rpmte *
-rpmalAllInCollection(const rpmal al, const char *collname)
-{
-    rpmte *ret = NULL;
-    int found = 0;
-    rpmalNum pkgNum;
-
-    if (!al || !al->list || !collname)
-	return NULL;
-
-    for (pkgNum = 0; pkgNum < al->size; pkgNum++) {
-	rpmte p = al->list[pkgNum].p;
-	if (rpmteHasCollection(p, collname)) {
-	    ret = xrealloc(ret, sizeof(*ret) * (found + 1 + 1));
-	    ret[found] = p;
-	    found++;
-	}
-    }
-    if (ret) {
-	ret[found] = NULL;
-    }
-
-    return ret;
 }

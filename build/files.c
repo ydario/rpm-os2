@@ -23,7 +23,6 @@
 
 #include "rpmio/rpmio_internal.h"	/* XXX rpmioSlurp */
 #include "misc/fts.h"
-#include "lib/cpio.h"
 #include "lib/rpmfi_internal.h"	/* XXX fi->apath */
 #include "lib/rpmug.h"
 #include "build/rpmbuild_internal.h"
@@ -81,8 +80,8 @@ typedef struct FileListRec_s {
 
     char *diskPath;		/* get file from here       */
     char *cpioPath;		/* filename in cpio archive */
-    const char *uname;
-    const char *gname;
+    rpmsid uname;
+    rpmsid gname;
     unsigned	flags;
     specfFlags	specdFlags;	/* which attributes have been explicitly specified. */
     rpmVerifyFlags verifyFlags;
@@ -93,15 +92,13 @@ typedef struct FileListRec_s {
 /**
  */
 typedef struct AttrRec_s {
-    char *ar_fmodestr;
-    char *ar_dmodestr;
-    char *ar_user;
-    char *ar_group;
+    rpmsid	ar_fmodestr;
+    rpmsid	ar_dmodestr;
+    rpmsid	ar_user;
+    rpmsid	ar_group;
     mode_t	ar_fmode;
     mode_t	ar_dmode;
 } * AttrRec;
-
-static struct AttrRec_s root_ar = { NULL, NULL, "root", "root", 0, 0 };
 
 /* list of files */
 static StringBuf check_fileList = NULL;
@@ -148,6 +145,7 @@ typedef struct FileList_s {
     int largeFiles;
     ARGV_t docDirs;
     rpmBuildPkgFlags pkgFlags;
+    rpmstrPool pool;
 
     /* actual file records */
     struct FileRecords_s files;
@@ -159,63 +157,20 @@ typedef struct FileList_s {
     struct FileEntry_s cur;
 } * FileList;
 
-/**
- */
 static void nullAttrRec(AttrRec ar)
 {
-    ar->ar_fmodestr = NULL;
-    ar->ar_dmodestr = NULL;
-    ar->ar_user = NULL;
-    ar->ar_group = NULL;
-    ar->ar_fmode = 0;
-    ar->ar_dmode = 0;
+    memset(ar, 0, sizeof(*ar));
 }
 
-/**
- */
-static void freeAttrRec(AttrRec ar)
-{
-    ar->ar_fmodestr = _free(ar->ar_fmodestr);
-    ar->ar_dmodestr = _free(ar->ar_dmodestr);
-    ar->ar_user = _free(ar->ar_user);
-    ar->ar_group = _free(ar->ar_group);
-    /* XXX doesn't free ar (yet) */
-    return;
-}
-
-/**
- */
 static void dupAttrRec(const AttrRec oar, AttrRec nar)
 {
     if (oar == nar)
 	return;
-    freeAttrRec(nar);
-    nar->ar_fmodestr = (oar->ar_fmodestr ? xstrdup(oar->ar_fmodestr) : NULL);
-    nar->ar_dmodestr = (oar->ar_dmodestr ? xstrdup(oar->ar_dmodestr) : NULL);
-    nar->ar_user = (oar->ar_user ? xstrdup(oar->ar_user) : NULL);
-    nar->ar_group = (oar->ar_group ? xstrdup(oar->ar_group) : NULL);
-    nar->ar_fmode = oar->ar_fmode;
-    nar->ar_dmode = oar->ar_dmode;
+    *nar = *oar; /* struct assignment */
 }
-
-#if 0
-/**
- */
-static void dumpAttrRec(const char * msg, AttrRec ar)
-{
-    if (msg)
-	fprintf(stderr, "%s:\t", msg);
-    fprintf(stderr, "(%s, %s, %s, %s)\n",
-	ar->ar_fmodestr,
-	ar->ar_user,
-	ar->ar_group,
-	ar->ar_dmodestr);
-}
-#endif
 
 static void FileEntryFree(FileEntry entry)
 {
-    freeAttrRec(&(entry->ar));
     argvFree(entry->langs);
     memset(entry, 0, sizeof(*entry));
 }
@@ -374,7 +329,11 @@ exit:
     return rc;
 }
 
-#define	isAttrDefault(_ars)	((_ars)[0] == '-' && (_ars)[1] == '\0')
+static int isAttrDefault(rpmstrPool pool, rpmsid arsid)
+{
+    const char *ars = rpmstrPoolStr(pool, arsid);
+    return (ars && ars[0] == '-' && ars[1] == '\0');
+}
 
 /**
  * Parse %dev from file manifest.
@@ -470,12 +429,13 @@ exit:
 
 /**
  * Parse %attr and %defattr from file manifest.
+ * @param pool		string pool
  * @param buf		current spec file line
  * @param def		parse for %defattr or %attr?
  * @param entry		file entry data (current / default)
  * @return		0 on success
  */
-static rpmRC parseForAttr(char * buf, int def, FileEntry entry)
+static rpmRC parseForAttr(rpmstrPool pool, char * buf, int def, FileEntry entry)
 {
     const char *name = def ? "%defattr" : "%attr";
     char *p, *pe, *q = NULL;
@@ -524,22 +484,22 @@ static rpmRC parseForAttr(char * buf, int def, FileEntry entry)
     p = q; SKIPWHITE(p);
     if (*p != '\0') {
 	pe = p; SKIPNONWHITE(pe); if (*pe != '\0') *pe++ = '\0';
-	ar->ar_fmodestr = p;
+	ar->ar_fmodestr = rpmstrPoolId(pool, p, 1);
 	p = pe; SKIPWHITE(p);
     }
     if (*p != '\0') {
 	pe = p; SKIPNONWHITE(pe); if (*pe != '\0') *pe++ = '\0';
-	ar->ar_user = p;
+	ar->ar_user = rpmstrPoolId(pool, p, 1);
 	p = pe; SKIPWHITE(p);
     }
     if (*p != '\0') {
 	pe = p; SKIPNONWHITE(pe); if (*pe != '\0') *pe++ = '\0';
-	ar->ar_group = p;
+	ar->ar_group = rpmstrPoolId(pool, p, 1);
 	p = pe; SKIPWHITE(p);
     }
     if (*p != '\0' && def) {	/* %defattr */
 	pe = p; SKIPNONWHITE(pe); if (*pe != '\0') *pe++ = '\0';
-	ar->ar_dmodestr = p;
+	ar->ar_dmodestr = rpmstrPoolId(pool, p, 1);
 	p = pe; SKIPWHITE(p);
     }
 
@@ -549,36 +509,36 @@ static rpmRC parseForAttr(char * buf, int def, FileEntry entry)
     }
 
     /* Do a quick test on the mode argument and adjust for "-" */
-    if (ar->ar_fmodestr && !isAttrDefault(ar->ar_fmodestr)) {
+    if (ar->ar_fmodestr && !isAttrDefault(pool, ar->ar_fmodestr)) {
 	unsigned int ui;
-	x = sscanf(ar->ar_fmodestr, "%o", &ui);
+	x = sscanf(rpmstrPoolStr(pool, ar->ar_fmodestr), "%o", &ui);
 	if ((x == 0) || (ar->ar_fmode & ~MYALLPERMS)) {
 	    rpmlog(RPMLOG_ERR, _("Bad mode spec: %s(%s)\n"), name, q);
 	    goto exit;
 	}
 	ar->ar_fmode = ui;
     } else {
-	ar->ar_fmodestr = NULL;
+	ar->ar_fmodestr = 0;
     }
 
-    if (ar->ar_dmodestr && !isAttrDefault(ar->ar_dmodestr)) {
+    if (ar->ar_dmodestr && !isAttrDefault(pool, ar->ar_dmodestr)) {
 	unsigned int ui;
-	x = sscanf(ar->ar_dmodestr, "%o", &ui);
+	x = sscanf(rpmstrPoolStr(pool, ar->ar_dmodestr), "%o", &ui);
 	if ((x == 0) || (ar->ar_dmode & ~MYALLPERMS)) {
 	    rpmlog(RPMLOG_ERR, _("Bad dirmode spec: %s(%s)\n"), name, q);
 	    goto exit;
 	}
 	ar->ar_dmode = ui;
     } else {
-	ar->ar_dmodestr = NULL;
+	ar->ar_dmodestr = 0;
     }
 
-    if (!(ar->ar_user && !isAttrDefault(ar->ar_user))) {
-	ar->ar_user = NULL;
+    if (!(ar->ar_user && !isAttrDefault(pool, ar->ar_user))) {
+	ar->ar_user = 0;
     }
 
-    if (!(ar->ar_group && !isAttrDefault(ar->ar_group))) {
-	ar->ar_group = NULL;
+    if (!(ar->ar_group && !isAttrDefault(pool, ar->ar_group))) {
+	ar->ar_group = 0;
     }
 
     dupAttrRec(ar, &(entry->ar));
@@ -903,7 +863,7 @@ static int isHardLink(FileListRec flp, FileListRec tlp)
 /**
  * Verify that file attributes scope over hardlinks correctly.
  * If partial hardlink sets are possible, then add tracking dependency.
- * @param fl		package file records
+ * @param files		package file records
  * @return		1 if partial hardlink sets can exist, 0 otherwise.
  */
 static int checkHardLinks(FileRecords files)
@@ -942,19 +902,14 @@ static int seenHardLink(FileRecords files, FileListRec flp, rpm_ino_t *fileid)
  * @todo Should directories have %doc/%config attributes? (#14531)
  * @todo Remove RPMTAG_OLDFILENAMES, add dirname/basename instead.
  * @param fl		package file tree walk data
- * @retval *fip		file info for package
- * @param h
- * @param isSrc
+ * @param pkg		(sub) package
+ * @param isSrc		pass 1 for source packages 0 otherwise
  */
 static void genCpioListAndHeader(FileList fl, Package pkg, int isSrc)
 {
-    int _addDotSlash = !(isSrc || rpmExpandNumeric("%{_noPayloadPrefix}"));
-    size_t apathlen = 0;
-    size_t dpathlen = 0;
-    size_t skipLen = 0;
     FileListRec flp;
     char buf[BUFSIZ];
-    int i;
+    int i, npaths = 0;
     uint32_t defaultalgo = PGPHASHALGO_MD5, digestalgo;
     rpm_loff_t totalFileSize = 0;
     Header h = pkg->header; /* just a shortcut */
@@ -976,15 +931,37 @@ static void genCpioListAndHeader(FileList fl, Package pkg, int isSrc)
 	digestalgo = defaultalgo;
     }
     
+    /* Adjust paths if needed */
+    for (i = 0, flp = fl->files.recs; i < fl->files.used; i++, flp++) {
+	int changed = 0;
+	char * cpiopath = flp->cpioPath;
+
+	if (!isSrc && pkg->removePostfixes)
+	for (ARGV_const_t postfix_p = pkg->removePostfixes; *postfix_p; postfix_p++) {
+	    int len = strlen(*postfix_p);
+	    int plen = strlen(cpiopath);
+	    if (len <= plen && !strncmp(cpiopath+plen-len, *postfix_p, len)) {
+		cpiopath[plen-len] = '\0';
+		changed = 1;
+		if (plen-len > 0 && cpiopath[plen-len-1] == '/') {
+		    cpiopath[plen-len-1] = '\0';
+		}
+	    }
+	}
+	if (changed) {
+	    char * tmp = xstrdup(cpiopath);
+	    _free(flp->cpioPath);
+	    flp->cpioPath = tmp;
+	}
+    }
+
     /* Sort the big list */
     qsort(fl->files.recs, fl->files.used,
 	  sizeof(*(fl->files.recs)), compareFileListRecs);
     
-    /* Generate the header. */
-    if (! isSrc) {
-	skipLen = 1;
-    }
+    pkg->dpaths = xmalloc((fl->files.used + 1) * sizeof(*pkg->dpaths));
 
+    /* Generate the header. */
     for (i = 0, flp = fl->files.recs; i < fl->files.used; i++, flp++) {
 	rpm_ino_t fileid = flp - fl->files.recs;
 
@@ -1042,27 +1019,20 @@ static void genCpioListAndHeader(FileList fl, Package pkg, int isSrc)
 	/* Skip files that were marked with %exclude. */
 	if (flp->flags & RPMFILE_EXCLUDE) continue;
 
-	/* Omit '/' and/or URL prefix, leave room for "./" prefix */
-	apathlen += (strlen(flp->cpioPath) - skipLen + (_addDotSlash ? 3 : 1));
+	/* Collect on-disk paths for archive creation */
+	pkg->dpaths[npaths++] = xstrdup(flp->diskPath);
 
-	/* Leave room for both dirname and basename NUL's */
-	dpathlen += (strlen(flp->diskPath) + 2);
-
-	/*
-	 * Make the header. Store the on-disk path to OLDFILENAMES for
-	 * cpio list generation purposes for now, final path temporarily
-	 * to ORIGFILENAMES, to be swapped later into OLDFILENAMES.
-	 */
-	headerPutString(h, RPMTAG_OLDFILENAMES, flp->diskPath);
-	headerPutString(h, RPMTAG_ORIGFILENAMES, flp->cpioPath);
-	headerPutString(h, RPMTAG_FILEUSERNAME, flp->uname);
-	headerPutString(h, RPMTAG_FILEGROUPNAME, flp->gname);
+	headerPutString(h, RPMTAG_OLDFILENAMES, flp->cpioPath);
+	headerPutString(h, RPMTAG_FILEUSERNAME,
+			rpmstrPoolStr(fl->pool, flp->uname));
+	headerPutString(h, RPMTAG_FILEGROUPNAME,
+			rpmstrPoolStr(fl->pool, flp->gname));
 
 	/* Only use 64bit filesizes tag if required. */
 	if (fl->largeFiles) {
 	    rpm_loff_t rsize64 = (rpm_loff_t)flp->fl_size;
 	    headerPutUint64(h, RPMTAG_LONGFILESIZES, &rsize64, 1);
-	    /* XXX TODO: add rpmlib() dependency for large files */
+            (void) rpmlibNeedsFeature(pkg, "LargeFiles", "4.12.0-1");
 	} else {
 	    rpm_off_t rsize32 = (rpm_off_t)flp->fl_size;
 	    headerPutUint32(h, RPMTAG_FILESIZES, &rsize32, 1);
@@ -1153,6 +1123,7 @@ static void genCpioListAndHeader(FileList fl, Package pkg, int isSrc)
 
 	headerPutUint32(h, RPMTAG_FILEFLAGS, &(flp->flags) ,1);
     }
+    pkg->dpaths[npaths] = NULL;
 
     if (totalFileSize < UINT32_MAX) {
 	rpm_off_t totalsize = totalFileSize;
@@ -1171,60 +1142,22 @@ static void genCpioListAndHeader(FileList fl, Package pkg, int isSrc)
 	rpmlibNeedsFeature(pkg, "FileCaps", "4.6.1-1");
     }
 
-    if (_addDotSlash)
+    if (!isSrc)
 	(void) rpmlibNeedsFeature(pkg, "PayloadFilesHavePrefix", "4.0-1");
-
-  {
-    struct rpmtd_s filenames;
-    rpmfiFlags flags = RPMFI_NOHEADER|RPMFI_NOFILEUSER|RPMFI_NOFILEGROUP;
-    rpmfi fi;
-    int fc;
-    const char *fn;
-    char *a, **apath;
 
     /* rpmfiNew() only groks compressed filelists */
     headerConvert(h, HEADERCONV_COMPRESSFILELIST);
-    fi = rpmfiNew(NULL, h, RPMTAG_BASENAMES, flags);
+    pkg->cpioList = rpmfilesNew(NULL, h, RPMTAG_BASENAMES,
+			    (RPMFI_NOFILEUSER|RPMFI_NOFILEGROUP));
 
-    if (fi == NULL) {
+    if (pkg->cpioList == NULL || rpmfilesFC(pkg->cpioList) != npaths) {
 	fl->processingFailed = 1;
-	return;
     }
 
-    /* 
-     * Grab the real filenames from ORIGFILENAMES and put into OLDFILENAMES,
-     * remove temporary cruft and side-effects from filelist compression 
-     * for rpmfiNew().
-     */
-    headerGet(h, RPMTAG_ORIGFILENAMES, &filenames, HEADERGET_ALLOC);
-    headerDel(h, RPMTAG_ORIGFILENAMES);
-    headerDel(h, RPMTAG_BASENAMES);
-    headerDel(h, RPMTAG_DIRNAMES);
-    headerDel(h, RPMTAG_DIRINDEXES);
-    rpmtdSetTag(&filenames, RPMTAG_OLDFILENAMES);
-    headerPut(h, &filenames, HEADERPUT_DEFAULT);
-
-    /* Create hge-style archive path array, normally adding "./" */
-    fc = rpmtdCount(&filenames);
-    apath = xmalloc(fc * sizeof(*apath) + apathlen + 1);
-    a = (char *)(apath + fc);
-    *a = '\0';
-    rpmtdInit(&filenames);
-    for (int i = 0; (fn = rpmtdNextString(&filenames)); i++) {
-	apath[i] = a;
-	if (_addDotSlash)
-	    a = stpcpy(a, "./");
-	a = stpcpy(a, (fn + skipLen));
-	a++;		/* skip apath NUL */
-    }
-    fi->apath = apath;
-    pkg->cpioList = fi;
-    rpmtdFreeData(&filenames);
-  }
-
-    /* Compress filelist unless legacy format requested */
-    if (!(fl->pkgFlags & RPMBUILD_PKG_NODIRTOKENS)) {
-	headerConvert(h, HEADERCONV_COMPRESSFILELIST);
+    if (fl->pkgFlags & RPMBUILD_PKG_NODIRTOKENS) {
+	/* Uncompress filelist if legacy format requested */
+	headerConvert(h, HEADERCONV_EXPANDFILELIST);
+    } else {
 	/* Binary packages with dirNames cannot be installed by legacy rpm. */
 	(void) rpmlibNeedsFeature(pkg, "CompressedFileNames", "3.0.4-1");
     }
@@ -1249,6 +1182,7 @@ static void FileListFree(FileList fl)
     FileRecordsFree(&(fl->files));
     free(fl->buildRoot);
     argvFree(fl->docDirs);
+    rpmstrPoolFree(fl->pool);
 }
 
 /* forward ref */
@@ -1374,7 +1308,7 @@ static rpmRC addFile(FileList fl, const char * diskPath,
     fileGid = statp->st_gid;
 
     /* Explicit %attr() always wins */
-    if (fl->cur.ar.ar_fmodestr != NULL) {
+    if (fl->cur.ar.ar_fmodestr) {
 	if (S_ISLNK(fileMode)) {
 	    rpmlog(RPMLOG_WARNING,
 		   "Explicit %%attr() mode not applicaple to symlink: %s\n",
@@ -1396,16 +1330,16 @@ static rpmRC addFile(FileList fl, const char * diskPath,
 	}
     }
     if (fl->cur.ar.ar_user) {
-	fileUname = fl->cur.ar.ar_user;
+	fileUname = rpmstrPoolStr(fl->pool, fl->cur.ar.ar_user);
     } else if (fl->def.ar.ar_user) {
-	fileUname = fl->def.ar.ar_user;
+	fileUname = rpmstrPoolStr(fl->pool, fl->def.ar.ar_user);
     } else {
 	fileUname = rpmugUname(fileUid);
     }
     if (fl->cur.ar.ar_group) {
-	fileGname = fl->cur.ar.ar_group;
+	fileGname = rpmstrPoolStr(fl->pool, fl->cur.ar.ar_group);
     } else if (fl->def.ar.ar_group) {
-	fileGname = fl->def.ar.ar_group;
+	fileGname = rpmstrPoolStr(fl->pool, fl->def.ar.ar_group);
     } else {
 	fileGname = rpmugGname(fileGid);
     }
@@ -1438,8 +1372,8 @@ static rpmRC addFile(FileList fl, const char * diskPath,
 
 	flp->cpioPath = xstrdup(cpioPath);
 	flp->diskPath = xstrdup(diskPath);
-	flp->uname = rpmugStashStr(fileUname);
-	flp->gname = rpmugStashStr(fileGname);
+	flp->uname = rpmstrPoolId(fl->pool, fileUname, 1);
+	flp->gname = rpmstrPoolId(fl->pool, fileGname, 1);
 
 	if (fl->cur.langs) {
 	    flp->langs = argvJoin(fl->cur.langs, "|");
@@ -1448,7 +1382,7 @@ static rpmRC addFile(FileList fl, const char * diskPath,
 	}
 
 	if (fl->cur.caps) {
-	    flp->caps = fl->cur.caps;
+	    flp->caps = xstrdup(fl->cur.caps);
 	} else {
 	    flp->caps = xstrdup("");
 	}
@@ -1650,16 +1584,13 @@ static rpmRC processBinaryFile(Package pkg, FileList fl, const char * fileName)
 	    }
 	    argvFree(argv);
 	} else {
-	    int lvl = RPMLOG_WARNING;
 	    const char *msg = (fl->cur.isDir) ?
-				_("Directory not found by glob: %s\n") :
-				_("File not found by glob: %s\n");
-	    if (!(fl->cur.attrFlags & RPMFILE_EXCLUDE)) {
-		lvl = RPMLOG_ERR;
-		rc = RPMRC_FAIL;
-	    }
-	    rpmlog(lvl, msg, diskPath);
-	    goto exit;
+				_("Directory not found by glob: %s. "
+				"Trying without globbing.\n") :
+				_("File not found by glob: %s. "
+				"Trying without globbing.\n");
+	    rpmlog(RPMLOG_DEBUG, msg, diskPath);
+	    rc = addFile(fl, diskPath, NULL);
 	}
     } else {
 	rc = addFile(fl, diskPath, NULL);
@@ -1679,6 +1610,7 @@ static rpmRC readFilesManifest(rpmSpec spec, Package pkg, const char *path)
     char *fn, buf[BUFSIZ];
     FILE *fd = NULL;
     rpmRC rc = RPMRC_FAIL;
+    unsigned int nlines = 0;
 
     if (*path == '/') {
 	fn = rpmGetPath(path, NULL);
@@ -1693,13 +1625,27 @@ static rpmRC readFilesManifest(rpmSpec spec, Package pkg, const char *path)
 	goto exit;
     }
 
+    /* XXX unmask %license while parsing files manifest*/
+    addMacro(spec->macros, "license", NULL, "%%license", RMIL_SPEC);
+
     while (fgets(buf, sizeof(buf), fd)) {
-	handleComments(buf);
+	if (handleComments(buf))
+	    continue;
 	if (expandMacros(spec, spec->macros, buf, sizeof(buf))) {
 	    rpmlog(RPMLOG_ERR, _("line: %s\n"), buf);
 	    goto exit;
 	}
 	argvAdd(&(pkg->fileList), buf);
+	nlines++;
+    }
+
+    if (nlines == 0) {
+	int terminate =
+		rpmExpandNumeric("%{?_empty_manifest_terminate_build}");
+	rpmlog(terminate ? RPMLOG_ERR : RPMLOG_WARNING,
+	       _("Empty %%files file %s\n"), fn);
+	if (terminate)
+		goto exit;
     }
 
     if (ferror(fd))
@@ -1708,6 +1654,7 @@ static rpmRC readFilesManifest(rpmSpec spec, Package pkg, const char *path)
 	rc = RPMRC_OK;
 
 exit:
+    delMacro(NULL, "license");
     if (fd) fclose(fd);
     free(fn);
     return rc;
@@ -1755,8 +1702,6 @@ static specialDir specialDirFree(specialDir sd)
 {
     if (sd) {
 	argvFree(sd->files);
-	freeAttrRec(&(sd->ar));
-	freeAttrRec(&(sd->def_ar));
 	free(sd->dirname);
 	free(sd);
     }
@@ -1770,6 +1715,7 @@ static void processSpecialDir(rpmSpec spec, Package pkg, FileList fl,
     const char *sdname = (sd->sdtype == RPMFILE_DOC) ? "%doc" : "%license";
     char *mkdocdir = rpmExpand("%{__mkdir_p} $", sdenv, NULL);
     StringBuf docScript = newStringBuf();
+    char *basepath, **files;
 
     appendStringBuf(docScript, sdenv);
     appendStringBuf(docScript, "=$RPM_BUILD_ROOT");
@@ -1804,6 +1750,33 @@ static void processSpecialDir(rpmSpec spec, Package pkg, FileList fl,
     dupAttrRec(&(sd->ar), &(fl->cur.ar));
     dupAttrRec(&(sd->def_ar), &(fl->def.ar));
 
+    basepath = rpmGenPath(spec->rootDir, "%{_builddir}", spec->buildSubdir);
+    files = sd->files;
+    while (*files != NULL) {
+	char *origfile = rpmGenPath(basepath, *files, NULL);
+	char *eorigfile = rpmEscapeSpaces(origfile);
+	ARGV_t globFiles;
+	int globFilesCount, i;
+	char *newfile;
+
+	if (rpmGlob(eorigfile, &globFilesCount, &globFiles) == 0) {
+	    for (i = 0; i < globFilesCount; i++) {
+		rasprintf(&newfile, "%s/%s", sd->dirname, basename(globFiles[i]));
+		processBinaryFile(pkg, fl, newfile);
+		free(newfile);
+	    }
+	    argvFree(globFiles);
+	} else {
+	    rpmlog(RPMLOG_ERR, _("File not found by glob: %s\n"), eorigfile);
+	    fl->processingFailed = 1;
+	}
+	free(eorigfile);
+	free(origfile);
+	files++;
+    }
+    free(basepath);
+
+    fl->cur.isDir = 1;
     (void) processBinaryFile(pkg, fl, sd->dirname);
 
     freeStringBuf(docScript);
@@ -1814,6 +1787,7 @@ static void processSpecialDir(rpmSpec spec, Package pkg, FileList fl,
 static rpmRC processPackageFiles(rpmSpec spec, rpmBuildPkgFlags pkgFlags,
 				 Package pkg, int installSpecialDoc, int test)
 {
+    struct AttrRec_s root_ar = { 0, 0, 0, 0, 0, 0 };
     struct FileList_s fl;
     ARGV_t fileNames = NULL;
     specialDir specialDoc = NULL;
@@ -1828,11 +1802,15 @@ static rpmRC processPackageFiles(rpmSpec spec, rpmBuildPkgFlags pkgFlags,
     /* Init the file list structure */
     memset(&fl, 0, sizeof(fl));
 
+    fl.pool = rpmstrPoolLink(spec->pool);
     /* XXX spec->buildRoot == NULL, then xstrdup("") is returned */
     fl.buildRoot = rpmGenPath(spec->rootDir, spec->buildRoot, NULL);
     fl.buildRootLen = strlen(fl.buildRoot);
 
+    root_ar.ar_user = rpmstrPoolId(fl.pool, "root", 1);
+    root_ar.ar_group = rpmstrPoolId(fl.pool, "root", 1);
     dupAttrRec(&root_ar, &fl.def.ar);	/* XXX assume %defattr(-,root,root) */
+
     fl.def.verifyFlags = RPMVERIFY_ALL;
 
     fl.pkgFlags = pkgFlags;
@@ -1860,8 +1838,8 @@ static rpmRC processPackageFiles(rpmSpec spec, rpmBuildPkgFlags pkgFlags,
 
 	if (parseForVerify(buf, 0, &fl.cur) ||
 	    parseForVerify(buf, 1, &fl.def) ||
-	    parseForAttr(buf, 0, &fl.cur) ||
-	    parseForAttr(buf, 1, &fl.def) ||
+	    parseForAttr(fl.pool, buf, 0, &fl.cur) ||
+	    parseForAttr(fl.pool, buf, 1, &fl.def) ||
 	    parseForDev(buf, &fl.cur) ||
 	    parseForConfig(buf, &fl.cur) ||
 	    parseForLang(buf, &fl.cur) ||
@@ -1937,6 +1915,7 @@ static rpmRC processPackageFiles(rpmSpec spec, rpmBuildPkgFlags pkgFlags,
     genCpioListAndHeader(&fl, pkg, 0);
 
 exit:
+    argvFree(fileNames);
     FileListFree(&fl);
     specialDirFree(specialDoc);
     specialDirFree(specialLic);
@@ -1994,9 +1973,10 @@ rpmRC processSourceFiles(rpmSpec spec, rpmBuildPkgFlags pkgFlags)
 
     /* Init the file list structure */
     memset(&fl, 0, sizeof(fl));
+    fl.pool = rpmstrPoolLink(spec->pool);
     if (_srcdefattr) {
 	char *a = rstrscat(NULL, "%defattr ", _srcdefattr, NULL);
-	parseForAttr(a, 1, &fl.def);
+	parseForAttr(fl.pool, a, 1, &fl.def);
 	free(a);
     }
     fl.files.alloced = spec->numSources + 1;
@@ -2041,25 +2021,32 @@ rpmRC processSourceFiles(rpmSpec spec, rpmBuildPkgFlags pkgFlags)
 	    flp->fl_mode &= S_IFMT;
 	    flp->fl_mode |= fl.def.ar.ar_fmode;
 	}
-	if (fl.def.ar.ar_user) {
-	    flp->uname = rpmugStashStr(fl.def.ar.ar_user);
-	} else {
-	    flp->uname = rpmugStashStr(rpmugUname(flp->fl_uid));
-	}
-	if (fl.def.ar.ar_group) {
-	    flp->gname = rpmugStashStr(fl.def.ar.ar_group);
-	} else {
-	    flp->gname = rpmugStashStr(rpmugGname(flp->fl_gid));
-	}
-	flp->langs = xstrdup("");
-	
-#ifndef __EMX__
-	if (! (flp->uname && flp->gname)) {
-	    rpmlog(RPMLOG_ERR, _("Bad owner/group: %s\n"), diskPath);
-	    fl.processingFailed = 1;
-	}
-#endif
 
+	if (fl.def.ar.ar_user) {
+	    flp->uname = fl.def.ar.ar_user;
+	} else {
+	    flp->uname = rpmstrPoolId(fl.pool, rpmugUname(flp->fl_uid), 1);
+	}
+	if (! flp->uname) {
+	    flp->uname = rpmstrPoolId(fl.pool, rpmugUname(getuid()), 1);
+	}
+	if (! flp->uname) {
+	    flp->uname = rpmstrPoolId(fl.pool, "root", 1);
+	}
+
+	if (fl.def.ar.ar_group) {
+	    flp->gname = fl.def.ar.ar_group;
+	} else {
+	    flp->gname = rpmstrPoolId(fl.pool, rpmugGname(flp->fl_gid), 1);
+	}
+	if (! flp->gname) {
+	    flp->gname = rpmstrPoolId(fl.pool, rpmugGname(getgid()), 1);
+	}
+	if (! flp->gname) {
+	    flp->gname = rpmstrPoolId(fl.pool, "root", 1);
+	}
+
+	flp->langs = xstrdup("");
 	fl.files.used++;
     }
     argvFree(files);
@@ -2076,6 +2063,7 @@ rpmRC processSourceFiles(rpmSpec spec, rpmBuildPkgFlags pkgFlags)
 
 /**
  * Check packaged file list against what's in the build root.
+ * @param buildRoot	path of build root
  * @param fileList	packaged file list
  * @return		-1 if skipped, 0 on OK, 1 on error
  */

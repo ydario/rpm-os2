@@ -8,6 +8,8 @@ static int _debug = 1;	/* XXX if < 0 debugging, > 0 unusual error returns */
 
 #include <errno.h>
 #include <sys/wait.h>
+#include <popt.h>
+#include <db.h>
 
 #include <rpm/rpmtypes.h>
 #include <rpm/rpmmacro.h>
@@ -22,19 +24,80 @@ static const char * _errpfx = "rpmdb";
 
 struct dbiCursor_s {
     dbiIndex dbi;
+    const void *key;
+    unsigned int keylen;
+    int flags;
     DBC *cursor;
 };
+
+static struct dbiConfig_s staticdbicfg;
+static struct dbConfig_s staticcfg;
+
+/** \ingroup dbi
+ */
+static const struct poptOption rdbOptions[] = {
+ /* Environment options */
+   
+ { "cdb",	0,POPT_BIT_SET,	&staticcfg.db_eflags, DB_INIT_CDB,
+	NULL, NULL },
+ { "lock",	0,POPT_BIT_SET,	&staticcfg.db_eflags, DB_INIT_LOCK,
+	NULL, NULL },
+ { "log",	0,POPT_BIT_SET,	&staticcfg.db_eflags, DB_INIT_LOG,
+	NULL, NULL },
+ { "txn",	0,POPT_BIT_SET,	&staticcfg.db_eflags, DB_INIT_TXN,
+	NULL, NULL },
+ { "recover",	0,POPT_BIT_SET,	&staticcfg.db_eflags, DB_RECOVER,
+	NULL, NULL },
+ { "recover_fatal", 0,POPT_BIT_SET,	&staticcfg.db_eflags, DB_RECOVER_FATAL,
+	NULL, NULL },
+ { "lockdown",	0,POPT_BIT_SET,	&staticcfg.db_eflags, DB_LOCKDOWN,
+	NULL, NULL },
+ { "private",	0,POPT_BIT_SET,	&staticcfg.db_eflags, DB_PRIVATE,
+	NULL, NULL },
+
+ { "deadlock",	0,POPT_BIT_SET,	&staticcfg.db_verbose, DB_VERB_DEADLOCK,
+	NULL, NULL },
+ { "recovery",	0,POPT_BIT_SET,	&staticcfg.db_verbose, DB_VERB_RECOVERY,
+	NULL, NULL },
+ { "waitsfor",	0,POPT_BIT_SET,	&staticcfg.db_verbose, DB_VERB_WAITSFOR,
+	NULL, NULL },
+ { "verbose",	0,POPT_ARG_VAL,		&staticcfg.db_verbose, -1,
+	NULL, NULL },
+
+ { "cachesize",	0,POPT_ARG_INT,		&staticcfg.db_cachesize, 0,
+	NULL, NULL },
+ { "mmapsize", 0,POPT_ARG_INT,		&staticcfg.db_mmapsize, 0,
+	NULL, NULL },
+ { "mp_mmapsize", 0,POPT_ARG_INT,	&staticcfg.db_mmapsize, 0,
+	NULL, NULL },
+ { "mp_size",	0,POPT_ARG_INT,		&staticcfg.db_cachesize, 0,
+	NULL, NULL },
+
+ { "nofsync",	0,POPT_ARG_NONE,	&staticcfg.db_no_fsync, 0,
+	NULL, NULL },
+
+ /* Per-dbi options */
+ { "nommap",	0,POPT_BIT_SET,		&staticdbicfg.dbi_oflags, DB_NOMMAP,
+	NULL, NULL },
+
+ { "nodbsync",	0,POPT_ARG_NONE,	&staticdbicfg.dbi_no_dbsync, 0,
+	NULL, NULL },
+ { "lockdbfd",	0,POPT_ARG_NONE,	&staticdbicfg.dbi_lockdbfd, 0,
+	NULL, NULL },
+
+    POPT_TABLEEND
+};
+
 
 static int dbapi_err(rpmdb rdb, const char * msg, int error, int printit)
 {
     if (printit && error) {
-	int db_api = rdb->db_ver;
 	if (msg)
-	    rpmlog(RPMLOG_ERR, _("db%d error(%d) from %s: %s\n"),
-		db_api, error, msg, db_strerror(error));
+	    rpmlog(RPMLOG_ERR, _("%s error(%d) from %s: %s\n"),
+		rdb->db_descr, error, msg, db_strerror(error));
 	else
-	    rpmlog(RPMLOG_ERR, _("db%d error(%d): %s\n"),
-		db_api, error, db_strerror(error));
+	    rpmlog(RPMLOG_ERR, _("%s error(%d): %s\n"),
+		rdb->db_descr, error, db_strerror(error));
     }
     return error;
 }
@@ -156,6 +219,182 @@ static int isalive(DB_ENV *dbenv, pid_t pid, db_threadid_t tid, uint32_t flags)
     return alive;
 }
 
+
+static void dbConfigure(rpmDbiTagVal rpmtag, struct dbConfig_s *cfg, struct dbiConfig_s  *dbicfg)
+{
+    char *dbOpts;
+
+    dbOpts = rpmExpand("%{_dbi_config_", rpmTagGetName(rpmtag), "}", NULL);
+    
+    if (!(dbOpts && *dbOpts && *dbOpts != '%')) {
+	dbOpts = _free(dbOpts);
+	dbOpts = rpmExpand("%{_dbi_config}", NULL);
+	if (!(dbOpts && *dbOpts && *dbOpts != '%')) {
+	    dbOpts = _free(dbOpts);
+	}
+    }
+
+    /* Parse the options for the database element(s). */
+    if (dbOpts && *dbOpts && *dbOpts != '%') {
+	char *o, *oe;
+	char *p, *pe;
+
+	memset(&staticdbicfg, 0, sizeof(staticdbicfg));
+/*=========*/
+	for (o = dbOpts; o && *o; o = oe) {
+	    const struct poptOption *opt;
+	    const char * tok;
+	    unsigned int argInfo;
+
+	    /* Skip leading white space. */
+	    while (*o && risspace(*o))
+		o++;
+
+	    /* Find and terminate next key=value pair. Save next start point. */
+	    for (oe = o; oe && *oe; oe++) {
+		if (risspace(*oe))
+		    break;
+		if (oe[0] == ':' && !(oe[1] == '/' && oe[2] == '/'))
+		    break;
+	    }
+	    if (oe && *oe)
+		*oe++ = '\0';
+	    if (*o == '\0')
+		continue;
+
+	    /* Separate key from value, save value start (if any). */
+	    for (pe = o; pe && *pe && *pe != '='; pe++)
+		{};
+	    p = (pe ? *pe++ = '\0', pe : NULL);
+
+	    /* Skip over negation at start of token. */
+	    for (tok = o; *tok == '!'; tok++)
+		{};
+
+	    /* Find key in option table. */
+	    for (opt = rdbOptions; opt->longName != NULL; opt++) {
+		if (!rstreq(tok, opt->longName))
+		    continue;
+		break;
+	    }
+	    if (opt->longName == NULL) {
+		rpmlog(RPMLOG_ERR,
+			_("unrecognized db option: \"%s\" ignored.\n"), o);
+		continue;
+	    }
+
+	    /* Toggle the flags for negated tokens, if necessary. */
+	    argInfo = opt->argInfo;
+	    if (argInfo == POPT_BIT_SET && *o == '!' && ((tok - o) % 2))
+		argInfo = POPT_BIT_CLR;
+
+	    /* Save value in template as appropriate. */
+	    switch (argInfo & POPT_ARG_MASK) {
+
+	    case POPT_ARG_NONE:
+		(void) poptSaveInt((int *)opt->arg, argInfo, 1L);
+		break;
+	    case POPT_ARG_VAL:
+		(void) poptSaveInt((int *)opt->arg, argInfo, (long)opt->val);
+	    	break;
+	    case POPT_ARG_STRING:
+	    {	char ** t = opt->arg;
+		if (t) {
+/* FIX: opt->arg annotation in popt.h */
+		    *t = _free(*t);
+		    *t = xstrdup( (p ? p : "") );
+		}
+	    }	break;
+
+	    case POPT_ARG_INT:
+	    case POPT_ARG_LONG:
+	      {	long aLong = strtol(p, &pe, 0);
+		if (pe) {
+		    if (!rstrncasecmp(pe, "Mb", 2))
+			aLong *= 1024 * 1024;
+		    else if (!rstrncasecmp(pe, "Kb", 2))
+			aLong *= 1024;
+		    else if (*pe != '\0') {
+			rpmlog(RPMLOG_ERR,
+				_("%s has invalid numeric value, skipped\n"),
+				opt->longName);
+			continue;
+		    }
+		}
+
+		if ((argInfo & POPT_ARG_MASK) == POPT_ARG_LONG) {
+		    if (aLong == LONG_MIN || aLong == LONG_MAX) {
+			rpmlog(RPMLOG_ERR,
+				_("%s has too large or too small long value, skipped\n"),
+				opt->longName);
+			continue;
+		    }
+		    (void) poptSaveLong((long *)opt->arg, argInfo, aLong);
+		    break;
+		} else {
+		    if (aLong > INT_MAX || aLong < INT_MIN) {
+			rpmlog(RPMLOG_ERR,
+				_("%s has too large or too small integer value, skipped\n"),
+				opt->longName);
+			continue;
+		    }
+		    (void) poptSaveInt((int *)opt->arg, argInfo, aLong);
+		}
+	      }	break;
+	    default:
+		break;
+	    }
+	}
+/*=========*/
+    }
+
+    dbOpts = _free(dbOpts);
+    if (cfg) {
+	*cfg = staticcfg;	/* structure assignment */
+	/* Throw in some defaults if configuration didn't set any */
+	if (!cfg->db_mmapsize)
+	    cfg->db_mmapsize = 16 * 1024 * 1024;
+	if (!cfg->db_cachesize)
+	    cfg->db_cachesize = 8 * 1024 * 1024;
+    }
+    if (dbicfg) {
+	*dbicfg = staticdbicfg;
+    }
+}
+
+static char * prDbiOpenFlags(int dbflags, int print_dbenv_flags)
+{
+    ARGV_t flags = NULL;
+    const struct poptOption *opt;
+    char *buf;
+
+    for (opt = rdbOptions; opt->longName != NULL; opt++) {
+        if (opt->argInfo != POPT_BIT_SET)
+            continue;
+        if (print_dbenv_flags) {
+            if (!(opt->arg == &staticcfg.db_eflags))
+                continue;
+        } else {
+            if (!(opt->arg == &staticdbicfg.dbi_oflags))
+                continue;
+        }
+        if ((dbflags & opt->val) != opt->val)
+            continue;
+        argvAdd(&flags, opt->longName);
+        dbflags &= ~opt->val;
+    }   
+    if (dbflags) {
+        char *df = NULL;
+        rasprintf(&df, "0x%x", (unsigned)dbflags);
+        argvAdd(&flags, df);
+        free(df);
+    }   
+    buf = argvJoin(flags, ":");
+    argvFree(flags);
+            
+    return buf ? buf : xstrdup("(none)");
+}
+
 static int db_init(rpmdb rdb, const char * dbhome)
 {
     DB_ENV *dbenv = NULL;
@@ -173,6 +412,10 @@ static int db_init(rpmdb rdb, const char * dbhome)
     if (rdb->db_dbenv != NULL) {
 	rdb->db_opens++;
 	return 0;
+    } else {
+	/* On first call, set backend description to something... */
+	free(rdb->db_descr);
+	rasprintf(&rdb->db_descr, "db%u", DB_VERSION_MAJOR);
     }
 
     /*
@@ -248,7 +491,7 @@ static int db_init(rpmdb rdb, const char * dbhome)
 	free(fstr);
 
 	rc = (dbenv->open)(dbenv, dbhome, eflags, rdb->db_perms);
-	if ((rc == EACCES || rc == EROFS || rc == EINVAL) && errno == rc) {
+	if ((rc == EACCES || rc == EROFS) || (rc == EINVAL && errno == rc)) {
 	    eflags |= DB_PRIVATE;
 	    retry_open--;
 	} else {
@@ -285,7 +528,7 @@ errxit:
     return rc;
 }
 
-void dbSetFSync(void *dbenv, int enable)
+static void db3_dbSetFSync(rpmdb rdb, int enable)
 {
 #ifdef HAVE_FDATASYNC
     db_env_set_func_fsync(enable ? fdatasync : fsync_disable);
@@ -294,19 +537,24 @@ void dbSetFSync(void *dbenv, int enable)
 #endif
 }
 
-int dbiSync(dbiIndex dbi, unsigned int flags)
+static int db3_Ctrl(rpmdb rdb, dbCtrlOp ctrl)
+{
+    return 0;
+}
+
+static int dbiSync(dbiIndex dbi, unsigned int flags)
 {
     DB * db = dbi->dbi_db;
     int rc = 0;
 
-    if (db != NULL && !dbi->dbi_no_dbsync) {
+    if (db != NULL && !dbi->cfg.dbi_no_dbsync) {
 	rc = db->sync(db, flags);
 	rc = cvtdberr(dbi, "db->sync", rc, _debug);
     }
     return rc;
 }
 
-dbiCursor dbiCursorInit(dbiIndex dbi, unsigned int flags)
+static dbiCursor db3_dbiCursorInit(dbiIndex dbi, unsigned int flags)
 {
     dbiCursor dbc = NULL;
     
@@ -318,8 +566,8 @@ dbiCursor dbiCursorInit(dbiIndex dbi, unsigned int flags)
 	uint32_t eflags = db_envflags(db);
 	
        /* DB_WRITECURSOR requires CDB and writable db */
-	if ((flags & DB_WRITECURSOR) &&
-	    (eflags & DB_INIT_CDB) && !(dbi->dbi_oflags & DB_RDONLY))
+	if ((flags & DBC_WRITE) &&
+	    (eflags & DB_INIT_CDB) && !(dbi->dbi_flags & DBI_RDONLY))
 	{
 	    cflags = DB_WRITECURSOR;
 	} else
@@ -347,15 +595,19 @@ dbiCursor dbiCursorInit(dbiIndex dbi, unsigned int flags)
 	    dbc = xcalloc(1, sizeof(*dbc));
 	    dbc->cursor = cursor;
 	    dbc->dbi = dbi;
+	    dbc->flags = flags;
 	}
     }
 
     return dbc;
 }
 
-dbiCursor dbiCursorFree(dbiCursor dbc)
+static dbiCursor db3_dbiCursorFree(dbiIndex dbi, dbiCursor dbc)
 {
     if (dbc) {
+	/* Automatically sync on write-cursor close */
+	if (dbc->flags & DBC_WRITE)
+	    dbiSync(dbc->dbi, 0);
 	DBC * cursor = dbc->cursor;
 	int rc = cursor->c_close(cursor);
 	cvtdberr(dbc->dbi, "dbcursor->c_close", rc, _debug);
@@ -364,7 +616,7 @@ dbiCursor dbiCursorFree(dbiCursor dbc)
     return NULL;
 }
 
-int dbiCursorPut(dbiCursor dbc, DBT * key, DBT * data, unsigned int flags)
+static int dbiCursorPut(dbiCursor dbc, DBT * key, DBT * data, unsigned int flags)
 {
     int rc = EINVAL;
     int sane = (key->data != NULL && key->size > 0 &&
@@ -383,7 +635,7 @@ int dbiCursorPut(dbiCursor dbc, DBT * key, DBT * data, unsigned int flags)
     return rc;
 }
 
-int dbiCursorGet(dbiCursor dbc, DBT * key, DBT * data, unsigned int flags)
+static int dbiCursorGet(dbiCursor dbc, DBT * key, DBT * data, unsigned int flags)
 {
     int rc = EINVAL;
     int sane = ((flags == DB_NEXT) || (key->data != NULL && key->size > 0));
@@ -400,12 +652,21 @@ int dbiCursorGet(dbiCursor dbc, DBT * key, DBT * data, unsigned int flags)
 	_printit = (rc == DB_NOTFOUND ? 0 : _debug);
 	rc = cvtdberr(dbc->dbi, "dbcursor->c_get", rc, _printit);
 
+	/* Remember the last key fetched */
+	if (rc == 0) {
+	    dbc->key = key->data;
+	    dbc->keylen = key->size;
+	} else {
+	    dbc->key = NULL;
+	    dbc->keylen = 0;
+	}
+
 	rpmswExit(&rdb->db_getops, data->size);
     }
     return rc;
 }
 
-int dbiCursorDel(dbiCursor dbc, DBT * key, DBT * data, unsigned int flags)
+static int dbiCursorDel(dbiCursor dbc, DBT * key, DBT * data, unsigned int flags)
 {
     int rc = EINVAL;
     int sane = (key->data != NULL && key->size > 0);
@@ -431,23 +692,7 @@ int dbiCursorDel(dbiCursor dbc, DBT * key, DBT * data, unsigned int flags)
     return rc;
 }
 
-unsigned int dbiCursorCount(dbiCursor dbc)
-{
-    db_recno_t count = 0;
-    if (dbc) {
-	DBC * cursor = dbc->cursor;
-	int rc = cursor->c_count(cursor, &count, 0);
-	cvtdberr(dbc->dbi, "dbcursor->c_count", rc, _debug);
-    }
-    return count;
-}
-
-dbiIndex dbiCursorIndex(dbiCursor dbc)
-{
-    return (dbc != NULL) ? dbc->dbi : NULL;
-}
-
-int dbiByteSwapped(dbiIndex dbi)
+static int dbiByteSwapped(dbiIndex dbi)
 {
     DB * db = dbi->dbi_db;
     int rc = 0;
@@ -464,32 +709,7 @@ int dbiByteSwapped(dbiIndex dbi)
     return rc;
 }
 
-dbiIndexType dbiType(dbiIndex dbi)
-{
-    return dbi->dbi_type;
-}
-
-int dbiFlags(dbiIndex dbi)
-{
-    DB *db = dbi->dbi_db;
-    int flags = DBI_NONE;
-    uint32_t oflags = 0;
-
-    if (db && db->get_open_flags(db, &oflags) == 0) {
-	if (oflags & DB_CREATE)
-	    flags |= DBI_CREATED;
-	if (oflags & DB_RDONLY)
-	    flags |= DBI_RDONLY;
-    }
-    return flags;
-}
-
-const char * dbiName(dbiIndex dbi)
-{
-    return dbi->dbi_file;
-}
-
-int dbiVerify(dbiIndex dbi, unsigned int flags)
+static int db3_dbiVerify(dbiIndex dbi, unsigned int flags)
 {
     int rc = 0;
 
@@ -507,7 +727,7 @@ int dbiVerify(dbiIndex dbi, unsigned int flags)
     return rc;
 }
 
-int dbiClose(dbiIndex dbi, unsigned int flags)
+static int db3_dbiClose(dbiIndex dbi, unsigned int flags)
 {
     rpmdb rdb = dbi->dbi_rpmdb;
     const char * dbhome = rpmdbHome(rdb);
@@ -591,7 +811,7 @@ static int dbiFlock(dbiIndex dbi, int mode)
     return rc;
 }
 
-int dbiOpen(rpmdb rdb, rpmDbiTagVal rpmtag, dbiIndex * dbip, int flags)
+static int db3_dbiOpen(rpmdb rdb, rpmDbiTagVal rpmtag, dbiIndex * dbip, int flags)
 {
     const char *dbhome = rpmdbHome(rdb);
     dbiIndex dbi = NULL;
@@ -607,24 +827,26 @@ int dbiOpen(rpmdb rdb, rpmDbiTagVal rpmtag, dbiIndex * dbip, int flags)
     if (dbip)
 	*dbip = NULL;
 
-    /*
-     * Parse db configuration parameters.
-     */
     if ((dbi = dbiNew(rdb, rpmtag)) == NULL)
 	return 1;
 
-    oflags = dbi->dbi_oflags;
-
-#ifdef __KLIBC__
-    // need to set this flag to avoid db48 mmap issues...
-    oflags |= DB_PRIVATE;
-    dbi->dbi_oflags |= DB_PRIVATE;
-#endif
+    /*
+     * Parse db configuration parameters.
+     */
+    dbConfigure(rpmtag, rdb->db_dbenv == NULL ? &rdb->cfg : NULL, &dbi->cfg);
 
     /*
      * Map open mode flags onto configured database/environment flags.
      */
-    if ((rdb->db_mode & O_ACCMODE) == O_RDONLY) oflags |= DB_RDONLY;
+    oflags = dbi->cfg.dbi_oflags;
+    if ((rdb->db_mode & O_ACCMODE) == O_RDONLY)
+	oflags |= DB_RDONLY;
+
+#ifdef __KLIBC__
+    // need to set this flag to avoid db48 mmap issues...
+    oflags |= DB_PRIVATE;
+    dbi->dbi_flags |= DB_PRIVATE;
+#endif
 
     rc = db_init(rdb, dbhome);
 
@@ -652,7 +874,7 @@ int dbiOpen(rpmdb rdb, rpmDbiTagVal rpmtag, dbiIndex * dbip, int flags)
 	    if (rc == ENOENT) {
 		oflags |= DB_CREATE;
 		oflags &= ~DB_RDONLY;
-		dbtype = (dbiType(dbi) == DBI_PRIMARY) ?  DB_HASH : DB_BTREE;
+		dbtype = (rpmtag == RPMDBI_PACKAGES) ?  DB_HASH : DB_BTREE;
 		retry_open--;
 	    } else {
 		retry_open = 0;
@@ -680,9 +902,14 @@ int dbiOpen(rpmdb rdb, rpmDbiTagVal rpmtag, dbiIndex * dbip, int flags)
     }
 
     dbi->dbi_db = db;
-    dbi->dbi_oflags = oflags;
 
-    if (!verifyonly && rc == 0 && dbi->dbi_lockdbfd && _lockdbfd++ == 0) {
+    dbi->dbi_flags = 0;
+    if (oflags & DB_CREATE)
+	dbi->dbi_flags |= DBI_CREATED;
+    if (oflags & DB_RDONLY)
+	dbi->dbi_flags |= DBI_RDONLY;
+
+    if (!verifyonly && rc == 0 && dbi->cfg.dbi_lockdbfd && _lockdbfd++ == 0) {
 	rc = dbiFlock(dbi, rdb->db_mode);
     }
 
@@ -694,3 +921,471 @@ int dbiOpen(rpmdb rdb, rpmDbiTagVal rpmtag, dbiIndex * dbip, int flags)
 
     return rc;
 }
+
+union _dbswap {
+    unsigned int ui;
+    unsigned char uc[4];
+};
+
+#define	_DBSWAP(_a) \
+\
+  { unsigned char _b, *_c = (_a).uc; \
+    _b = _c[3]; _c[3] = _c[0]; _c[0] = _b; \
+    _b = _c[2]; _c[2] = _c[1]; _c[1] = _b; \
+\
+  }
+
+/**
+ * Convert retrieved data to index set.
+ * @param dbi		index database handle
+ * @param data		retrieved data
+ * @retval setp		(malloc'ed) index set
+ * @return		0 on success
+ */
+static int dbt2set(dbiIndex dbi, DBT * data, dbiIndexSet * setp)
+{
+    int _dbbyteswapped = dbiByteSwapped(dbi);
+    const char * sdbir;
+    dbiIndexSet set;
+    unsigned int i;
+
+    if (dbi == NULL || data == NULL || setp == NULL)
+	return -1;
+
+    if ((sdbir = data->data) == NULL) {
+	*setp = NULL;
+	return 0;
+    }
+
+    set = dbiIndexSetNew(data->size / (2 * sizeof(int32_t)));
+    set->count = data->size / (2 * sizeof(int32_t));
+
+    for (i = 0; i < set->count; i++) {
+	union _dbswap hdrNum, tagNum;
+
+	memcpy(&hdrNum.ui, sdbir, sizeof(hdrNum.ui));
+	sdbir += sizeof(hdrNum.ui);
+	memcpy(&tagNum.ui, sdbir, sizeof(tagNum.ui));
+	sdbir += sizeof(tagNum.ui);
+	if (_dbbyteswapped) {
+	    _DBSWAP(hdrNum);
+	    _DBSWAP(tagNum);
+	}
+	set->recs[i].hdrNum = hdrNum.ui;
+	set->recs[i].tagNum = tagNum.ui;
+    }
+    *setp = set;
+    return 0;
+}
+
+/**
+ * Convert index set to database representation.
+ * @param dbi		index database handle
+ * @param data		retrieved data
+ * @param set		index set
+ * @return		0 on success
+ */
+static int set2dbt(dbiIndex dbi, DBT * data, dbiIndexSet set)
+{
+    int _dbbyteswapped = dbiByteSwapped(dbi);
+    char * tdbir;
+    unsigned int i;
+
+    if (dbi == NULL || data == NULL || set == NULL)
+	return -1;
+
+    data->size = set->count * (2 * sizeof(int32_t));
+    if (data->size == 0) {
+	data->data = NULL;
+	return 0;
+    }
+    tdbir = data->data = xmalloc(data->size);
+
+    for (i = 0; i < set->count; i++) {
+	union _dbswap hdrNum, tagNum;
+
+	memset(&hdrNum, 0, sizeof(hdrNum));
+	memset(&tagNum, 0, sizeof(tagNum));
+	hdrNum.ui = set->recs[i].hdrNum;
+	tagNum.ui = set->recs[i].tagNum;
+	if (_dbbyteswapped) {
+	    _DBSWAP(hdrNum);
+	    _DBSWAP(tagNum);
+	}
+	memcpy(tdbir, &hdrNum.ui, sizeof(hdrNum.ui));
+	tdbir += sizeof(hdrNum.ui);
+	memcpy(tdbir, &tagNum.ui, sizeof(tagNum.ui));
+	tdbir += sizeof(tagNum.ui);
+    }
+    return 0;
+}
+
+static rpmRC db3_idxdbGet(dbiIndex dbi, dbiCursor dbc, const char *keyp, size_t keylen,
+			  dbiIndexSet *set, int searchType)
+{
+    rpmRC rc = RPMRC_FAIL; /* assume failure */
+    if (dbi != NULL && dbc != NULL && set != NULL) {
+	int cflags = DB_NEXT;
+	int dbrc;
+	DBT data, key;
+	memset(&data, 0, sizeof(data));
+	memset(&key, 0, sizeof(key));
+
+	if (keyp) {
+	    if (keylen == 0) {		/* XXX "/" fixup */ 
+		keyp = "";
+		keylen = 1;
+	    }
+	    key.data = (void *) keyp; /* discards const */
+	    key.size = keylen;
+	    cflags = searchType == DBC_PREFIX_SEARCH ? DB_SET_RANGE : DB_SET;
+	}
+
+	for (;;) {
+	    dbiIndexSet newset = NULL;
+	    dbrc = dbiCursorGet(dbc, &key, &data, cflags);
+	    if (dbrc != 0)
+		break;
+	    if (searchType == DBC_PREFIX_SEARCH &&
+		    (key.size < keylen || memcmp(key.data, keyp, keylen) != 0))
+		break;
+	    dbt2set(dbi, &data, &newset);
+	    if (*set == NULL) {
+		*set = newset;
+	    } else {
+		dbiIndexSetAppendSet(*set, newset, 0);
+		dbiIndexSetFree(newset);
+	    }
+	    if (searchType != DBC_PREFIX_SEARCH)
+		break;
+	    key.data = NULL;
+	    key.size = 0;
+	    cflags = DB_NEXT;
+	}
+
+	/* fixup result status for prefix search */
+	if (searchType == DBC_PREFIX_SEARCH) {
+	    if (dbrc == DB_NOTFOUND && *set != NULL && (*set)->count > 0)
+		dbrc = 0;
+	    else if (dbrc == 0 && (*set == NULL || (*set)->count == 0))
+		dbrc = DB_NOTFOUND;
+	}
+
+	if (dbrc == 0) {
+	    rc = RPMRC_OK;
+	} else if (dbrc == DB_NOTFOUND) {
+	    rc = RPMRC_NOTFOUND;
+	} else {
+	    rpmlog(RPMLOG_ERR,
+		   _("error(%d) getting \"%s\" records from %s index: %s\n"),
+		   dbrc, keyp ? keyp : "???", dbiName(dbi), db_strerror(dbrc));
+	}
+    }
+    return rc;
+}
+
+/* Update secondary index. NULL set deletes the key */
+static rpmRC updateIndex(dbiCursor dbc, const char *keyp, unsigned int keylen,
+			 dbiIndexSet set)
+{
+    rpmRC rc = RPMRC_FAIL;
+
+    if (dbc && keyp) {
+	dbiIndex dbi = dbc->dbi;
+	int dbrc;
+	DBT data, key;
+	memset(&key, 0, sizeof(data));
+	memset(&data, 0, sizeof(data));
+
+	key.data = (void *) keyp; /* discards const */
+	key.size = keylen;
+
+	if (set)
+	    set2dbt(dbi, &data, set);
+
+	if (dbiIndexSetCount(set) > 0) {
+	    dbrc = dbiCursorPut(dbc, &key, &data, DB_KEYLAST);
+	    if (dbrc) {
+		rpmlog(RPMLOG_ERR,
+		       _("error(%d) storing record \"%s\" into %s\n"),
+		       dbrc, (char*)key.data, dbiName(dbi));
+	    }
+	    free(data.data);
+	} else {
+	    dbrc = dbiCursorDel(dbc, &key, &data, 0);
+	    if (dbrc) {
+		rpmlog(RPMLOG_ERR,
+		       _("error(%d) removing record \"%s\" from %s\n"),
+		       dbrc, (char*)key.data, dbiName(dbi));
+	    }
+	}
+
+	if (dbrc == 0)
+	    rc = RPMRC_OK;
+    }
+
+    return rc;
+}
+
+static rpmRC db3_idxdbPut(dbiIndex dbi, dbiCursor dbc, const char *keyp, size_t keylen,
+	       dbiIndexItem rec)
+{
+    dbiIndexSet set = NULL;
+    rpmRC rc;
+
+    if (keyp && keylen == 0) {		/* XXX "/" fixup */
+	keyp = "";
+	keylen++;
+    }
+    rc = idxdbGet(dbi, dbc, keyp, keylen, &set, DBC_NORMAL_SEARCH);
+
+    /* Not found means a new key and is not an error. */
+    if (rc && rc != RPMRC_NOTFOUND)
+	return rc;
+
+    if (set == NULL)
+	set = dbiIndexSetNew(1);
+    dbiIndexSetAppend(set, rec, 1, 0);
+
+    rc = updateIndex(dbc, keyp, keylen, set);
+
+    dbiIndexSetFree(set);
+    return rc;
+}
+
+static rpmRC db3_idxdbDel(dbiIndex dbi, dbiCursor dbc, const char *keyp, size_t keylen,
+	       dbiIndexItem rec)
+{
+    dbiIndexSet set = NULL;
+    rpmRC rc;
+
+    if (keyp && keylen == 0) {		/* XXX "/" fixup */
+	keyp = "";
+	keylen++;
+    }
+    rc = idxdbGet(dbi, dbc, keyp, keylen, &set, DBC_NORMAL_SEARCH);
+    if (rc)
+	return rc;
+
+    if (dbiIndexSetPrune(set, rec, 1, 1)) {
+	/* Nothing was pruned. XXX: Can this actually happen? */
+	rc = RPMRC_OK;
+    } else {
+	/* If there's data left, update data. Otherwise delete the key. */
+	if (dbiIndexSetCount(set) > 0) {
+	    rc = updateIndex(dbc, keyp, keylen, set);
+	} else {
+	    rc = updateIndex(dbc, keyp, keylen, NULL);
+	}
+    };
+    dbiIndexSetFree(set);
+
+    return rc;
+}
+
+static const void * db3_idxdbKey(dbiIndex dbi, dbiCursor dbc, unsigned int *keylen)
+{
+    const void *key = NULL;
+    if (dbc) {
+	key = dbc->key;
+	if (key && keylen)
+	    *keylen = dbc->keylen;
+    }
+    return key;
+}
+
+
+/* Update primary Packages index. NULL hdr means remove */
+static rpmRC updatePackages(dbiCursor dbc, unsigned int hdrNum, DBT *hdr)
+{
+    union _dbswap mi_offset;
+    int rc = 0;
+    DBT key;
+
+    if (dbc == NULL || hdrNum == 0)
+	return RPMRC_FAIL;
+
+    memset(&key, 0, sizeof(key));
+
+    mi_offset.ui = hdrNum;
+    if (dbiByteSwapped(dbc->dbi) == 1)
+	_DBSWAP(mi_offset);
+    key.data = (void *) &mi_offset;
+    key.size = sizeof(mi_offset.ui);
+
+    if (hdr) {
+	rc = dbiCursorPut(dbc, &key, hdr, DB_KEYLAST);
+	if (rc) {
+	    rpmlog(RPMLOG_ERR,
+		   _("error(%d) adding header #%d record\n"), rc, hdrNum);
+	}
+    } else {
+	DBT data;
+
+	memset(&data, 0, sizeof(data));
+	rc = dbiCursorGet(dbc, &key, &data, DB_SET);
+	if (rc) {
+	    rpmlog(RPMLOG_ERR,
+		   _("error(%d) removing header #%d record\n"), rc, hdrNum);
+	} else
+	    rc = dbiCursorDel(dbc, &key, &data, 0);
+    }
+
+    return rc == 0 ? RPMRC_OK : RPMRC_FAIL;
+}
+
+/* Get current header instance number or try to allocate a new one */
+static unsigned int pkgInstance(dbiIndex dbi, int alloc)
+{
+    unsigned int hdrNum = 0;
+
+    if (dbi != NULL && dbi->dbi_type == DBI_PRIMARY) {
+	dbiCursor dbc;
+	DBT key, data;
+	unsigned int firstkey = 0;
+	union _dbswap mi_offset;
+	int ret;
+
+	memset(&key, 0, sizeof(key));
+	memset(&data, 0, sizeof(data));
+
+	dbc = dbiCursorInit(dbi, alloc ? DBC_WRITE : 0);
+
+	/* Key 0 holds the current largest instance, fetch it */
+	key.data = &firstkey;
+	key.size = sizeof(firstkey);
+	ret = dbiCursorGet(dbc, &key, &data, DB_SET);
+
+	if (ret == 0 && data.data) {
+	    memcpy(&mi_offset, data.data, sizeof(mi_offset.ui));
+	    if (dbiByteSwapped(dbi) == 1)
+		_DBSWAP(mi_offset);
+	    hdrNum = mi_offset.ui;
+	}
+
+	if (alloc) {
+	    /* Rather complicated "increment by one", bswapping as needed */
+	    ++hdrNum;
+	    mi_offset.ui = hdrNum;
+	    if (dbiByteSwapped(dbi) == 1)
+		_DBSWAP(mi_offset);
+	    if (ret == 0 && data.data) {
+		memcpy(data.data, &mi_offset, sizeof(mi_offset.ui));
+	    } else {
+		data.data = &mi_offset;
+		data.size = sizeof(mi_offset.ui);
+	    }
+
+	    /* Unless we manage to insert the new instance number, we failed */
+	    ret = dbiCursorPut(dbc, &key, &data, DB_KEYLAST);
+	    if (ret) {
+		hdrNum = 0;
+		rpmlog(RPMLOG_ERR,
+		    _("error(%d) allocating new package instance\n"), ret);
+	    }
+	}
+	dbiCursorFree(dbi, dbc);
+    }
+    
+    return hdrNum;
+}
+
+static rpmRC db3_pkgdbPut(dbiIndex dbi, dbiCursor dbc,  unsigned int hdrNum,
+               unsigned char *hdrBlob, unsigned int hdrLen)
+{
+    DBT hdr;
+    memset(&hdr, 0, sizeof(hdr));
+    hdr.data = hdrBlob;
+    hdr.size = hdrLen;
+    return updatePackages(dbc, hdrNum, &hdr);
+}
+
+static rpmRC db3_pkgdbDel(dbiIndex dbi, dbiCursor dbc,  unsigned int hdrNum)
+{
+    return updatePackages(dbc, hdrNum, NULL);
+}
+
+static rpmRC db3_pkgdbGet(dbiIndex dbi, dbiCursor dbc, unsigned int hdrNum,
+	     unsigned char **hdrBlob, unsigned int *hdrLen)
+{
+    DBT key, data;
+    union _dbswap mi_offset;
+    int rc;
+
+    if (dbc == NULL)
+	return RPMRC_FAIL;
+
+    memset(&key, 0, sizeof(key));
+    memset(&data, 0, sizeof(data));
+
+    if (hdrNum) {
+	mi_offset.ui = hdrNum;
+	if (dbiByteSwapped(dbc->dbi) == 1)
+	    _DBSWAP(mi_offset);
+	key.data = (void *) &mi_offset;
+	key.size = sizeof(mi_offset.ui);
+    }
+
+#if !defined(_USE_COPY_LOAD)
+    data.flags |= DB_DBT_MALLOC;
+#endif
+    rc = dbiCursorGet(dbc, &key, &data, hdrNum ? DB_SET : DB_NEXT);
+    if (rc == 0) {
+	if (hdrBlob)
+	    *hdrBlob = data.data;
+	if (hdrLen)
+	    *hdrLen = data.size;
+	return RPMRC_OK;
+    } else if (rc == DB_NOTFOUND)
+	return RPMRC_NOTFOUND;
+    else
+	return RPMRC_FAIL;
+}
+
+static unsigned int db3_pkgdbKey(dbiIndex dbi, dbiCursor dbc)
+{
+    union _dbswap mi_offset;
+
+    if (dbc == NULL || dbc->key == NULL)
+	return 0;
+    memcpy(&mi_offset, dbc->key, sizeof(mi_offset.ui));
+    if (dbiByteSwapped(dbc->dbi) == 1)
+	_DBSWAP(mi_offset);
+    return mi_offset.ui;
+}
+
+static rpmRC db3_pkgdbNew(dbiIndex dbi, dbiCursor dbc, unsigned int *hdrNum)
+{
+    unsigned int num;
+    if (dbc == NULL)
+	return RPMRC_FAIL;
+    num = pkgInstance(dbc->dbi, 1);
+    if (!num)
+	return RPMRC_FAIL;
+    *hdrNum = num;
+    return RPMRC_OK;
+}
+
+struct rpmdbOps_s db3_dbops = {
+    .open   = db3_dbiOpen,
+    .close  = db3_dbiClose,
+    .verify = db3_dbiVerify,
+
+    .setFSync = db3_dbSetFSync,
+    .ctrl = db3_Ctrl,
+
+    .cursorInit = db3_dbiCursorInit,
+    .cursorFree = db3_dbiCursorFree,
+
+    .pkgdbGet = db3_pkgdbGet,
+    .pkgdbPut = db3_pkgdbPut,
+    .pkgdbDel = db3_pkgdbDel,
+    .pkgdbNew = db3_pkgdbNew,
+    .pkgdbKey = db3_pkgdbKey,
+
+    .idxdbGet = db3_idxdbGet,
+    .idxdbPut = db3_idxdbPut,
+    .idxdbDel = db3_idxdbDel,
+    .idxdbKey = db3_idxdbKey
+};
+

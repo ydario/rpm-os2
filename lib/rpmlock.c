@@ -12,18 +12,15 @@
 
 /* Internal interface */
 
-enum {
-    RPMLOCK_READ   = 1 << 0,
-    RPMLOCK_WRITE  = 1 << 1,
-    RPMLOCK_WAIT   = 1 << 2,
-};
-
 struct rpmlock_s {
     int fd;
     int openmode;
+    char *path;
+    char *descr;
+    int fdrefs;
 };
 
-static rpmlock rpmlock_new(const char *lock_path)
+static rpmlock rpmlock_new(const char *lock_path, const char *descr)
 {
     rpmlock lock = (rpmlock) malloc(sizeof(*lock));
 
@@ -43,13 +40,20 @@ static rpmlock rpmlock_new(const char *lock_path)
 	} else {
 	    lock->openmode = RPMLOCK_WRITE | RPMLOCK_READ;
 	}
+	if (lock) {
+	    lock->path = xstrdup(lock_path);
+	    lock->descr = xstrdup(descr);
+	    lock->fdrefs = 1;
+	}
     }
     return lock;
 }
 
 static void rpmlock_free(rpmlock lock)
 {
-    if (lock) {
+    if (--lock->fdrefs == 0) {
+	free(lock->path);
+	free(lock->descr);
 	(void) close(lock->fd);
 	free(lock);
     }
@@ -58,7 +62,13 @@ static void rpmlock_free(rpmlock lock)
 static int rpmlock_acquire(rpmlock lock, int mode)
 {
     int res = 0;
-    if (lock && (mode & lock->openmode)) {
+
+    if (!(mode & lock->openmode))
+	return res;
+
+    if (lock->fdrefs > 1) {
+	res = 1;
+    } else {
 	struct flock info;
 	int cmd;
 	if (mode & RPMLOCK_WAIT)
@@ -76,12 +86,19 @@ static int rpmlock_acquire(rpmlock lock, int mode)
 	if (fcntl(lock->fd, cmd, &info) != -1)
 	    res = 1;
     }
+
+    lock->fdrefs += res;
+
     return res;
 }
 
 static void rpmlock_release(rpmlock lock)
 {
-    if (lock) {
+    /* if not locked then we must not release */
+    if (lock->fdrefs <= 1)
+	return;
+
+    if (--lock->fdrefs == 1) {
 	struct flock info;
 	info.l_type = F_UNLCK;
 	info.l_whence = SEEK_SET;
@@ -94,31 +111,56 @@ static void rpmlock_release(rpmlock lock)
 
 
 /* External interface */
-
-rpmlock rpmlockAcquire(const char *lock_path, const char *descr)
+rpmlock rpmlockNew(const char *lock_path, const char *descr)
 {
-    rpmlock lock = rpmlock_new(lock_path);
+    rpmlock lock = rpmlock_new(lock_path, descr);
     if (!lock) {
 	rpmlog(RPMLOG_ERR, _("can't create %s lock on %s (%s)\n"), 
 		descr, lock_path, strerror(errno));
-    } else if (!rpmlock_acquire(lock, RPMLOCK_WRITE)) {
-	if (lock->openmode & RPMLOCK_WRITE)
+    }
+    return lock;
+}
+
+int rpmlockAcquire(rpmlock lock)
+{
+    int locked = 0; /* assume failure */
+    int maywait = isatty(STDIN_FILENO); /* dont wait within scriptlets */
+
+    if (lock) {
+	locked = rpmlock_acquire(lock, RPMLOCK_WRITE);
+	if (!locked && (lock->openmode & RPMLOCK_WRITE) && maywait) {
 	    rpmlog(RPMLOG_WARNING, _("waiting for %s lock on %s\n"),
-		    descr, lock_path);
-	if (!rpmlock_acquire(lock, RPMLOCK_WRITE|RPMLOCK_WAIT)) {
+		    lock->descr, lock->path);
+	    locked = rpmlock_acquire(lock, (RPMLOCK_WRITE|RPMLOCK_WAIT));
+	}
+	if (!locked) {
 	    rpmlog(RPMLOG_ERR, _("can't create %s lock on %s (%s)\n"), 
-		   descr, lock_path, strerror(errno));
-	    rpmlock_free(lock);
-	    lock = NULL;
+		   lock->descr, lock->path, strerror(errno));
 	}
     }
+    return locked;
+}
+
+void rpmlockRelease(rpmlock lock)
+{
+    if (lock)
+	rpmlock_release(lock);
+}
+
+rpmlock rpmlockNewAcquire(const char *lock_path, const char *descr)
+{
+    rpmlock lock = rpmlockNew(lock_path, descr);
+    if (!rpmlockAcquire(lock))
+	lock = rpmlockFree(lock);
     return lock;
 }
 
 rpmlock rpmlockFree(rpmlock lock)
 {
-    rpmlock_release(lock); /* Not really needed here. */
-    rpmlock_free(lock);
+    if (lock) {
+	rpmlock_release(lock);
+	rpmlock_free(lock);
+    }
     return NULL;
 }
 

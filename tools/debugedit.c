@@ -240,7 +240,7 @@ static struct
     { ".debug_ranges", NULL, NULL, 0, 0, 0 },
     { ".debug_types", NULL, NULL, 0, 0, 0 },
     { ".debug_macro", NULL, NULL, 0, 0, 0 },
-    { ".debug_gdb_script", NULL, NULL, 0, 0, 0 },
+    { ".debug_gdb_scripts", NULL, NULL, 0, 0, 0 },
     { NULL, NULL, NULL, 0, 0, 0 }
   };
 
@@ -480,7 +480,7 @@ edit_dwarf2_line (DSO *dso, uint32_t off, char *comp_dir, int phase)
   unsigned char *endcu, *endprol;
   unsigned char opcode_base;
   uint32_t value, dirt_cnt;
-  size_t comp_dir_len = strlen (comp_dir);
+  size_t comp_dir_len = !comp_dir ? 0 : strlen (comp_dir);
   size_t abs_file_cnt = 0, abs_dir_cnt = 0;
 
   if (phase != 0)
@@ -950,7 +950,7 @@ edit_attributes (DSO *dso, unsigned char *ptr, struct abbrev_tag *t, int phase)
 	}
     }
 
-  if (found_list_offs && comp_dir)
+  if (found_list_offs)
     edit_dwarf2_line (dso, list_offs, comp_dir, phase);
 
   free (comp_dir);
@@ -1166,6 +1166,10 @@ edit_dwarf2 (DSO *dso)
 		    goto fail;
 		  break;
 #endif
+		case EM_68K:
+		  if (rtype != R_68K_32)
+		    goto fail;
+		  break;
 		default:
 		fail:
 		  error (1, 0, "%s: Unhandled relocation %d in .debug_info section",
@@ -1536,6 +1540,12 @@ main (int argc, char *argv[])
 	  exit (1);
 	}
     }
+
+  /* Ensure clean paths, users can muck with these */
+  if (base_dir)
+    canonicalize_path(base_dir, base_dir);
+  if (dest_dir)
+    canonicalize_path(dest_dir, dest_dir);
 
   /* Make sure there are trailing slashes in dirs */
   if (base_dir != NULL && base_dir[strlen (base_dir)-1] != '/')

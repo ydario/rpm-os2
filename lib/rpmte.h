@@ -233,27 +233,19 @@ int rpmteFailed(rpmte te);
 rpmds rpmteDS(rpmte te, rpmTagVal tag);
 
 /** \ingroup rpmte
- * Retrieve file info tag set from transaction element.
+ * Retrieve file info set from transaction element.
+ * @param te		transaction element
+ * @return		file info set (refcounted)
+ */
+rpmfiles rpmteFiles(rpmte te);
+
+/** \ingroup rpmte
+ * Retrieve file info iterator from transaction element.
+ * @deprecated		use rpmteFiles() instead
  * @param te		transaction element
  * @return		file info tag set
  */
 rpmfi rpmteFI(rpmte te);
-
-/** \ingroup rpmte
- * Retrieve list of collections
- * @param te		transaction element
- * @return		list of collections
- */
-ARGV_const_t rpmteCollections(rpmte te);
-
-/** \ingroup rpmte
- * Determine a transaction element is part of a collection
- * @param te		transaction element
- * @param collname	collection name
- * @return		1 if collname is part of a collection, 0 if not
- */
-int rpmteHasCollection(rpmte te, const char * collname);
-
 
 #ifdef __cplusplus
 }

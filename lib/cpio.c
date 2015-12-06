@@ -16,7 +16,6 @@
 #else
 #include <sys/types.h> /* already included from system.h */
 #endif
-#include <errno.h>
 #include <string.h>
 
 #include <rpm/rpmio.h>
@@ -24,6 +23,7 @@
 #include <rpm/rpmstring.h>
 
 #include "lib/cpio.h"
+#include "lib/rpmarchive.h"
 
 #include "debug.h"
 
@@ -34,6 +34,47 @@ struct rpmcpio_s {
     off_t offset;
     off_t fileend;
 };
+
+/*
+ * Size limit for individual files in "new ascii format" cpio archives.
+ * The max size of the entire archive is unlimited from cpio POV,
+ * but subject to filesystem limitations.
+ */
+#define CPIO_FILESIZE_MAX UINT32_MAX
+
+#define CPIO_NEWC_MAGIC	"070701"
+#define CPIO_CRC_MAGIC	"070702"
+#define CPIO_STRIPPED_MAGIC "07070X"
+#define CPIO_TRAILER	"TRAILER!!!"
+
+/** \ingroup payload
+ * Cpio archive header information.
+ */
+struct cpioCrcPhysicalHeader {
+    /* char magic[6]; handled separately */
+    char inode[8];
+    char mode[8];
+    char uid[8];
+    char gid[8];
+    char nlink[8];
+    char mtime[8];
+    char filesize[8];
+    char devMajor[8];
+    char devMinor[8];
+    char rdevMajor[8];
+    char rdevMinor[8];
+    char namesize[8];
+    char checksum[8];			/* ignored !! */
+};
+
+#define	PHYS_HDR_SIZE	104		/* Don't depend on sizeof(struct) */
+
+struct cpioStrippedPhysicalHeader {
+    /* char magic[6]; handled separately */
+    char fx[8];
+};
+
+#define STRIPPED_PHYS_HDR_SIZE 8       /* Don't depend on sizeof(struct) */
 
 rpmcpio_t rpmcpioOpen(FD_t fd, char mode)
 {
@@ -83,16 +124,16 @@ static unsigned long strntoul(const char *str,char **endptr, int base, size_t nu
 static int rpmcpioWritePad(rpmcpio_t cpio, ssize_t modulo)
 {
     char buf[modulo];
-    ssize_t left, writen;
+    ssize_t left, written;
     memset(buf, 0, modulo);
     left = (modulo - ((cpio->offset) % modulo)) % modulo;
     if (left <= 0)
         return 0;
-    writen = Fwrite(&buf, left, 1, cpio->fd);
-    if (writen != left) {
-        return CPIOERR_WRITE_FAILED;
+    written = Fwrite(&buf, left, 1, cpio->fd);
+    if (written != left) {
+        return RPMERR_WRITE_FAILED;
     }
-    cpio->offset += writen;
+    cpio->offset += written;
     return 0;
 }
 
@@ -107,7 +148,7 @@ static int rpmcpioReadPad(rpmcpio_t cpio)
     read = Fread(&buf, left, 1, cpio->fd);
     cpio->offset += read;
     if (read != left) {
-        return CPIOERR_READ_FAILED;
+        return RPMERR_READ_FAILED;
     }
     return 0;
 }
@@ -116,7 +157,7 @@ static int rpmcpioReadPad(rpmcpio_t cpio)
 	\
 	log = strntoul(phys, &end, 16, sizeof(phys)); \
 	\
-	if ( (end - phys) != sizeof(phys) ) return CPIOERR_BAD_HEADER;
+	if ( (end - phys) != sizeof(phys) ) return RPMERR_BAD_HEADER;
 #define SET_NUM_FIELD(phys, val, space) \
 	sprintf(space, "%8.8lx", (unsigned long) (val)); \
 	\
@@ -126,10 +167,10 @@ static int rpmcpioTrailerWrite(rpmcpio_t cpio)
 {
     struct cpioCrcPhysicalHeader hdr;
     int rc;
-    size_t writen;
+    size_t written;
 
     if (cpio->fileend != cpio->offset) {
-        return CPIOERR_WRITE_FAILED;
+        return RPMERR_WRITE_FAILED;
     }
 
     rc = rpmcpioWritePad(cpio, 4);
@@ -137,18 +178,24 @@ static int rpmcpioTrailerWrite(rpmcpio_t cpio)
         return rc;
 
     memset(&hdr, '0', PHYS_HDR_SIZE);
-    memcpy(&hdr.magic, CPIO_NEWC_MAGIC, sizeof(hdr.magic));
     memcpy(&hdr.nlink, "00000001", 8);
     memcpy(&hdr.namesize, "0000000b", 8);
-    writen = Fwrite(&hdr, PHYS_HDR_SIZE, 1, cpio->fd);
-    cpio->offset += writen;
-    if (writen != PHYS_HDR_SIZE) {
-        return CPIOERR_WRITE_FAILED;
+
+    written = Fwrite(CPIO_NEWC_MAGIC, 6, 1, cpio->fd);
+    cpio->offset += written;
+    if (written != 6) {
+        return RPMERR_WRITE_FAILED;
     }
-    writen = Fwrite(&CPIO_TRAILER, sizeof(CPIO_TRAILER), 1, cpio->fd);
-    cpio->offset += writen;
-    if (writen != sizeof(CPIO_TRAILER)) {
-        return CPIOERR_WRITE_FAILED;
+
+    written = Fwrite(&hdr, PHYS_HDR_SIZE, 1, cpio->fd);
+    cpio->offset += written;
+    if (written != PHYS_HDR_SIZE) {
+        return RPMERR_WRITE_FAILED;
+    }
+    written = Fwrite(&CPIO_TRAILER, sizeof(CPIO_TRAILER), 1, cpio->fd);
+    cpio->offset += written;
+    if (written != sizeof(CPIO_TRAILER)) {
+        return RPMERR_WRITE_FAILED;
     }
 
     /*
@@ -166,20 +213,20 @@ int rpmcpioHeaderWrite(rpmcpio_t cpio, char * path, struct stat * st)
     struct cpioCrcPhysicalHeader hdr_s;
     struct cpioCrcPhysicalHeader * hdr = &hdr_s;
     char field[64];
-    size_t len, writen;
+    size_t len, written;
     dev_t dev;
     int rc = 0;
 
     if ((cpio->mode & O_ACCMODE) != O_WRONLY) {
-        return CPIOERR_WRITE_FAILED;
+        return RPMERR_WRITE_FAILED;
     }
 
     if (cpio->fileend != cpio->offset) {
-        return CPIOERR_WRITE_FAILED;
+        return RPMERR_WRITE_FAILED;
     }
 
     if (st->st_size >= CPIO_FILESIZE_MAX) {
-	return CPIOERR_FILE_SIZE;
+	return RPMERR_FILE_SIZE;
     }
 
     rc = rpmcpioWritePad(cpio, 4);
@@ -187,7 +234,6 @@ int rpmcpioHeaderWrite(rpmcpio_t cpio, char * path, struct stat * st)
         return rc;
     }
 
-    memcpy(hdr->magic, CPIO_NEWC_MAGIC, sizeof(hdr->magic));
     SET_NUM_FIELD(hdr->inode, st->st_ino, field);
     SET_NUM_FIELD(hdr->mode, st->st_mode, field);
     SET_NUM_FIELD(hdr->uid, st->st_uid, field);
@@ -206,16 +252,22 @@ int rpmcpioHeaderWrite(rpmcpio_t cpio, char * path, struct stat * st)
 
     memcpy(hdr->checksum, "00000000", 8);
 
-    writen = Fwrite(hdr, PHYS_HDR_SIZE, 1, cpio->fd);
-    cpio->offset += writen;
-    if (writen != PHYS_HDR_SIZE) {
-        return CPIOERR_WRITE_FAILED;
+    written = Fwrite(CPIO_NEWC_MAGIC, 6, 1, cpio->fd);
+    cpio->offset += written;
+    if (written != 6) {
+        return RPMERR_WRITE_FAILED;
     }
 
-    writen = Fwrite(path, len, 1, cpio->fd);
-    cpio->offset += writen;
-    if (writen != len) {
-        return CPIOERR_WRITE_FAILED;
+    written = Fwrite(hdr, PHYS_HDR_SIZE, 1, cpio->fd);
+    cpio->offset += written;
+    if (written != PHYS_HDR_SIZE) {
+        return RPMERR_WRITE_FAILED;
+    }
+
+    written = Fwrite(path, len, 1, cpio->fd);
+    cpio->offset += written;
+    if (written != len) {
+        return RPMERR_WRITE_FAILED;
     }
 
     rc = rpmcpioWritePad(cpio, 4);
@@ -225,34 +277,77 @@ int rpmcpioHeaderWrite(rpmcpio_t cpio, char * path, struct stat * st)
     return rc;
 }
 
-ssize_t rpmcpioWrite(rpmcpio_t cpio, void * buf, size_t size)
+int rpmcpioStrippedHeaderWrite(rpmcpio_t cpio, int fx, off_t fsize)
 {
-    size_t writen, left;
+    struct cpioStrippedPhysicalHeader hdr_s;
+    struct cpioStrippedPhysicalHeader * hdr = &hdr_s;
+    char field[64];
+    size_t written;
+    int rc = 0;
 
     if ((cpio->mode & O_ACCMODE) != O_WRONLY) {
-        return CPIOERR_WRITE_FAILED;
+        return RPMERR_WRITE_FAILED;
+    }
+
+    if (cpio->fileend != cpio->offset) {
+        return RPMERR_WRITE_FAILED;
+    }
+
+    rc = rpmcpioWritePad(cpio, 4);
+    if (rc) {
+        return rc;
+    }
+
+    SET_NUM_FIELD(hdr->fx, fx, field);
+
+    written = Fwrite(CPIO_STRIPPED_MAGIC, 6, 1, cpio->fd);
+    cpio->offset += written;
+    if (written != 6) {
+        return RPMERR_WRITE_FAILED;
+    }
+
+    written = Fwrite(hdr, STRIPPED_PHYS_HDR_SIZE, 1, cpio->fd);
+    cpio->offset += written;
+    if (written != STRIPPED_PHYS_HDR_SIZE) {
+        return RPMERR_WRITE_FAILED;
+    }
+
+    rc = rpmcpioWritePad(cpio, 4);
+
+    cpio->fileend = cpio->offset + fsize;
+
+    return rc;
+}
+
+ssize_t rpmcpioWrite(rpmcpio_t cpio, const void * buf, size_t size)
+{
+    size_t written, left;
+
+    if ((cpio->mode & O_ACCMODE) != O_WRONLY) {
+        return RPMERR_WRITE_FAILED;
     }
 
     // Do not write beyond file length
     left = cpio->fileend - cpio->offset;
     size = size > left ? left : size;
-    writen = Fwrite(buf, size, 1, cpio->fd);
-    cpio->offset += writen;
-    return writen;
+    written = Fwrite(buf, size, 1, cpio->fd);
+    cpio->offset += written;
+    return written;
 }
 
 
-int rpmcpioHeaderRead(rpmcpio_t cpio, char ** path, struct stat * st)
+int rpmcpioHeaderRead(rpmcpio_t cpio, char ** path, int * fx)
 {
     struct cpioCrcPhysicalHeader hdr;
     int nameSize;
     char * end;
-    unsigned int major, minor;
     int rc = 0;
     ssize_t read;
+    char magic[6];
+    rpm_loff_t fsize;
 
     if ((cpio->mode & O_ACCMODE) != O_RDONLY) {
-        return CPIOERR_READ_FAILED;
+        return RPMERR_READ_FAILED;
     }
 
     /* Move to next file */
@@ -262,7 +357,7 @@ int rpmcpioHeaderRead(rpmcpio_t cpio, char ** path, struct stat * st)
         while (cpio->fileend != cpio->offset) {
             read = cpio->fileend - cpio->offset > 8*BUFSIZ ? 8*BUFSIZ : cpio->fileend - cpio->offset;
             if (rpmcpioRead(cpio, &buf, read) != read) {
-                return CPIOERR_READ_FAILED;
+                return RPMERR_READ_FAILED;
             }
         }
     }
@@ -270,48 +365,64 @@ int rpmcpioHeaderRead(rpmcpio_t cpio, char ** path, struct stat * st)
     rc = rpmcpioReadPad(cpio);
     if (rc) return rc;
 
+    read = Fread(&magic, 6, 1, cpio->fd);
+    cpio->offset += read;
+    if (read != 6)
+        return RPMERR_READ_FAILED;
+
+    /* read stripped header */
+    if (!strncmp(CPIO_STRIPPED_MAGIC, magic,
+                 sizeof(CPIO_STRIPPED_MAGIC)-1)) {
+        struct cpioStrippedPhysicalHeader shdr;
+        read = Fread(&shdr, STRIPPED_PHYS_HDR_SIZE, 1, cpio->fd);
+        cpio->offset += read;
+        if (read != STRIPPED_PHYS_HDR_SIZE)
+            return RPMERR_READ_FAILED;
+
+        GET_NUM_FIELD(shdr.fx, *fx);
+        rc = rpmcpioReadPad(cpio);
+
+        if (!rc && *fx == -1)
+            rc = RPMERR_ITER_END;
+        return rc;
+    }
+
+    if (strncmp(CPIO_CRC_MAGIC, magic, sizeof(CPIO_CRC_MAGIC)-1) &&
+	strncmp(CPIO_NEWC_MAGIC, magic, sizeof(CPIO_NEWC_MAGIC)-1)) {
+	return RPMERR_BAD_MAGIC;
+    }
+
     read = Fread(&hdr, PHYS_HDR_SIZE, 1, cpio->fd);
     cpio->offset += read;
     if (read != PHYS_HDR_SIZE)
-	return CPIOERR_READ_FAILED;
+	return RPMERR_READ_FAILED;
 
-    if (strncmp(CPIO_CRC_MAGIC, hdr.magic, sizeof(CPIO_CRC_MAGIC)-1) &&
-	strncmp(CPIO_NEWC_MAGIC, hdr.magic, sizeof(CPIO_NEWC_MAGIC)-1)) {
-	return CPIOERR_BAD_MAGIC;
-    }
-    GET_NUM_FIELD(hdr.inode, st->st_ino);
-    GET_NUM_FIELD(hdr.mode, st->st_mode);
-    GET_NUM_FIELD(hdr.uid, st->st_uid);
-    GET_NUM_FIELD(hdr.gid, st->st_gid);
-    GET_NUM_FIELD(hdr.nlink, st->st_nlink);
-    GET_NUM_FIELD(hdr.mtime, st->st_mtime);
-    GET_NUM_FIELD(hdr.filesize, st->st_size);
-
-    GET_NUM_FIELD(hdr.devMajor, major);
-    GET_NUM_FIELD(hdr.devMinor, minor);
-    st->st_dev = makedev(major, minor);
-
-    GET_NUM_FIELD(hdr.rdevMajor, major);
-    GET_NUM_FIELD(hdr.rdevMinor, minor);
-    st->st_rdev = makedev(major, minor);
-
+    GET_NUM_FIELD(hdr.filesize, fsize);
     GET_NUM_FIELD(hdr.namesize, nameSize);
 
-    *path = xmalloc(nameSize + 1);
-    read = Fread(*path, nameSize, 1, cpio->fd);
-    (*path)[nameSize] = '\0';
+    char name[nameSize + 1];
+    read = Fread(name, nameSize, 1, cpio->fd);
+    name[nameSize] = '\0';
     cpio->offset += read;
     if (read != nameSize ) {
-        return CPIOERR_BAD_HEADER;
+        return RPMERR_BAD_HEADER;
     }
 
     rc = rpmcpioReadPad(cpio);
-    cpio->fileend = cpio->offset + st->st_size;
+    cpio->fileend = cpio->offset + fsize;
 
-    if (!rc && rstreq(*path, CPIO_TRAILER))
-	rc = CPIOERR_HDR_TRAILER;
+    if (!rc && rstreq(name, CPIO_TRAILER))
+	rc = RPMERR_ITER_END;
+
+    if (!rc && path)
+	*path = xstrdup(name);
 
     return rc;
+}
+
+void rpmcpioSetExpectedFileSize(rpmcpio_t cpio, off_t fsize)
+{
+    cpio->fileend = cpio->offset + fsize;
 }
 
 ssize_t rpmcpioRead(rpmcpio_t cpio, void * buf, size_t size)
@@ -319,7 +430,7 @@ ssize_t rpmcpioRead(rpmcpio_t cpio, void * buf, size_t size)
     size_t read, left;
 
     if ((cpio->mode & O_ACCMODE) != O_RDONLY) {
-        return CPIOERR_READ_FAILED;
+        return RPMERR_READ_FAILED;
     }
 
     left = cpio->fileend - cpio->offset;
@@ -348,68 +459,4 @@ rpmcpio_t rpmcpioFree(rpmcpio_t cpio)
 	free(cpio);
     }
     return NULL;
-}
-
-const char * rpmcpioStrerror(int rc)
-{
-    static char msg[256];
-    const char *s;
-    int myerrno = errno;
-    size_t l;
-
-    strcpy(msg, "cpio: ");
-    switch (rc) {
-    default: {
-	char *t = msg + strlen(msg);
-	sprintf(t, _("(error 0x%x)"), (unsigned)rc);
-	s = NULL;
-	break;
-    }
-    case CPIOERR_BAD_MAGIC:	s = _("Bad magic");		break;
-    case CPIOERR_BAD_HEADER:	s = _("Bad/unreadable  header");break;
-
-    case CPIOERR_OPEN_FAILED:	s = "open";	break;
-    case CPIOERR_CHMOD_FAILED:	s = "chmod";	break;
-    case CPIOERR_CHOWN_FAILED:	s = "chown";	break;
-    case CPIOERR_WRITE_FAILED:	s = "write";	break;
-    case CPIOERR_UTIME_FAILED:	s = "utime";	break;
-    case CPIOERR_UNLINK_FAILED:	s = "unlink";	break;
-    case CPIOERR_RENAME_FAILED:	s = "rename";	break;
-    case CPIOERR_SYMLINK_FAILED: s = "symlink";	break;
-    case CPIOERR_STAT_FAILED:	s = "stat";	break;
-    case CPIOERR_LSTAT_FAILED:	s = "lstat";	break;
-    case CPIOERR_MKDIR_FAILED:	s = "mkdir";	break;
-    case CPIOERR_RMDIR_FAILED:	s = "rmdir";	break;
-    case CPIOERR_MKNOD_FAILED:	s = "mknod";	break;
-    case CPIOERR_MKFIFO_FAILED:	s = "mkfifo";	break;
-    case CPIOERR_LINK_FAILED:	s = "link";	break;
-    case CPIOERR_READLINK_FAILED: s = "readlink";	break;
-    case CPIOERR_READ_FAILED:	s = "read";	break;
-    case CPIOERR_COPY_FAILED:	s = "copy";	break;
-    case CPIOERR_LSETFCON_FAILED: s = "lsetfilecon";	break;
-    case CPIOERR_SETCAP_FAILED: s = "cap_set_file";	break;
-
-    case CPIOERR_HDR_SIZE:	s = _("Header size too big");	break;
-    case CPIOERR_FILE_SIZE:	s = _("File too large for archive");	break;
-    case CPIOERR_UNKNOWN_FILETYPE: s = _("Unknown file type");	break;
-    case CPIOERR_MISSING_HARDLINK: s = _("Missing hard link(s)"); break;
-    case CPIOERR_DIGEST_MISMATCH: s = _("Digest mismatch");	break;
-    case CPIOERR_INTERNAL:	s = _("Internal error");	break;
-    case CPIOERR_UNMAPPED_FILE:	s = _("Archive file not in header"); break;
-    case CPIOERR_ENOENT:	s = strerror(ENOENT); break;
-    case CPIOERR_ENOTEMPTY:	s = strerror(ENOTEMPTY); break;
-    }
-
-    l = sizeof(msg) - strlen(msg) - 1;
-    if (s != NULL) {
-	if (l > 0) strncat(msg, s, l);
-	l -= strlen(s);
-    }
-    if ((rc & CPIOERR_CHECK_ERRNO) && myerrno) {
-	s = _(" failed - ");
-	if (l > 0) strncat(msg, s, l);
-	l -= strlen(s);
-	if (l > 0) strncat(msg, strerror(myerrno), l);
-    }
-    return msg;
 }

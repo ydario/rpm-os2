@@ -60,6 +60,9 @@ struct rpmluapb_s {
 
 static rpmlua globalLuaState = NULL;
 
+static char *(*nextFileFunc)(void *) = NULL;
+static void *nextFileFuncParam = NULL;
+
 static int luaopen_rpm(lua_State *L);
 static int rpm_print(lua_State *L);
 
@@ -210,6 +213,12 @@ static int pushvar(lua_State *L, rpmluavType type, void *value)
 	    break;
     }
     return ret;
+}
+
+void rpmluaSetNextFileFunc(char *(*func)(void *), void *funcParam)
+{
+    nextFileFunc = func;
+    nextFileFuncParam = funcParam;
 }
 
 void rpmluaSetVar(rpmlua _lua, rpmluav var)
@@ -526,6 +535,8 @@ int rpmluaRunScript(rpmlua _lua, const char *script, const char *name)
     int ret = 0;
     if (name == NULL)
 	name = "<lua>";
+    if (script == NULL)
+	script = "";
     if (luaL_loadbuffer(L, script, strlen(script), name) != 0) {
 	rpmlog(RPMLOG_ERR, _("invalid syntax in lua script: %s\n"),
 		 lua_tostring(L, -1));
@@ -669,10 +680,28 @@ static int rpm_define(lua_State *L)
     return 0;
 }
 
+static int rpm_load(lua_State *L)
+{
+    const char *str = luaL_checkstring(L, 1);
+    int rc = rpmLoadMacroFile(NULL, str);
+    lua_pushnumber(L, rc);
+    return 1;
+}
+
 static int rpm_interactive(lua_State *L)
 {
     _rpmluaInteractive(L);
     return 0;
+}
+
+static int rpm_next_file(lua_State *L)
+{
+    if (nextFileFunc)
+	lua_pushstring(L, nextFileFunc(nextFileFuncParam));
+    else
+	lua_pushstring(L, NULL);
+
+    return 1;
 }
 
 typedef struct rpmluaHookData_s {
@@ -861,10 +890,12 @@ static const luaL_Reg rpmlib[] = {
     {"b64decode", rpm_b64decode},
     {"expand", rpm_expand},
     {"define", rpm_define},
+    {"load", rpm_load},
     {"register", rpm_register},
     {"unregister", rpm_unregister},
     {"call", rpm_call},
     {"interactive", rpm_interactive},
+    {"next_file", rpm_next_file},
     {NULL, NULL}
 };
 

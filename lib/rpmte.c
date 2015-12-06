@@ -13,6 +13,7 @@
 #include <rpm/rpmdb.h>
 #include <rpm/rpmlog.h>
 
+#include "lib/misc.h"
 #include "lib/rpmplugins.h"
 #include "lib/rpmte_internal.h"
 /* strpool-related interfaces */
@@ -50,7 +51,8 @@ struct rpmte_s {
     rpmds conflicts;		/*!< Conflicts: dependencies. */
     rpmds obsoletes;		/*!< Obsoletes: dependencies. */
     rpmds order;		/*!< Order: dependencies. */
-    rpmfi fi;			/*!< File information. */
+    rpmfiles files;		/*!< File information. */
+    rpmfi fi;			/*!< File iterator (backwards compat) */
     rpmps probs;		/*!< Problems (relocations) */
     rpmts ts;			/*!< Parent transaction */
 
@@ -70,11 +72,6 @@ struct rpmte_s {
     int failed;			/*!< (parent) install/erase failed */
 
     rpmfs fs;
-
-    ARGV_t lastInCollectionsAny;	/*!< list of collections this te is the last to be installed or removed */
-    ARGV_t lastInCollectionsAdd;	/*!< list of collections this te is the last to be only installed */
-    ARGV_t firstInCollectionsRemove;	/*!< list of collections this te is the first to be only removed */
-    ARGV_t collections;			/*!< list of collections */
 };
 
 /* forward declarations */
@@ -91,111 +88,26 @@ void rpmteCleanDS(rpmte te)
     te->order = rpmdsFree(te->order);
 }
 
-static rpmfi getFI(rpmte p, Header h)
+static rpmfiles getFiles(rpmte p, Header h)
 {
     rpmfiFlags fiflags;
     fiflags = (p->type == TR_ADDED) ? (RPMFI_NOHEADER | RPMFI_FLAGS_INSTALL) :
 				      (RPMFI_NOHEADER | RPMFI_FLAGS_ERASE);
 
     /* relocate stuff in header if necessary */
-    if (rpmteType(p) == TR_ADDED && rpmfsFC(p->fs) > 0 && p->nrelocs) {
-	if (!headerIsSource(h) && !headerIsEntry(h, RPMTAG_ORIGBASENAMES)) {
-	    rpmRelocateFileList(p->relocs, p->nrelocs, p->fs, h);
-	}
-    }
-    return rpmfiNewPool(rpmtsPool(p->ts), h, RPMTAG_BASENAMES, fiflags);
-}
-
-/* stupid bubble sort, but it's probably faster here */
-static void sortRelocs(rpmRelocation *relocations, int numRelocations)
-{
-    for (int i = 0; i < numRelocations; i++) {
-	int madeSwap = 0;
-	for (int j = 1; j < numRelocations; j++) {
-	    rpmRelocation tmpReloc;
-	    if (relocations[j - 1].oldPath == NULL || /* XXX can't happen */
-		relocations[j    ].oldPath == NULL || /* XXX can't happen */
-		strcmp(relocations[j - 1].oldPath, relocations[j].oldPath) <= 0)
-		continue;
-	    tmpReloc = relocations[j - 1];
-	    relocations[j - 1] = relocations[j];
-	    relocations[j] = tmpReloc;
-	    madeSwap = 1;
-	}
-	if (!madeSwap) break;
-    }
-}
-
-static char * stripTrailingChar(char * s, char c)
-{
-    char * t;
-    for (t = s + strlen(s) - 1; *t == c && t >= s; t--)
-	*t = '\0';
-    return s;
-}
-
-static void buildRelocs(rpmte p, Header h, rpmRelocation *relocs)
-{
-    int i;
-    struct rpmtd_s validRelocs;
-
-    for (rpmRelocation *r = relocs; r->oldPath || r->newPath; r++)
-	p->nrelocs++;
-
-    headerGet(h, RPMTAG_PREFIXES, &validRelocs, HEADERGET_MINMEM);
-    p->relocs = xmalloc(sizeof(*p->relocs) * (p->nrelocs+1));
-
-    /* Build sorted relocation list from raw relocations. */
-    for (i = 0; i < p->nrelocs; i++) {
-	char * t;
-
-	/*
-	 * Default relocations (oldPath == NULL) are handled in the UI,
-	 * not rpmlib.
-	 */
-	if (relocs[i].oldPath == NULL) continue; /* XXX can't happen */
-
-	/* FIXME: Trailing /'s will confuse us greatly. Internal ones will 
-	   too, but those are more trouble to fix up. :-( */
-	t = xstrdup(relocs[i].oldPath);
-	p->relocs[i].oldPath = (t[0] == '/' && t[1] == '\0')
-	    ? t
-	    : stripTrailingChar(t, '/');
-
-	/* An old path w/o a new path is valid, and indicates exclusion */
-	if (relocs[i].newPath) {
-	    int valid = 0;
-	    const char *validprefix;
-
-	    t = xstrdup(relocs[i].newPath);
-	    p->relocs[i].newPath = (t[0] == '/' && t[1] == '\0')
-		? t
-		: stripTrailingChar(t, '/');
-
-	   	/* FIX:  relocations[i].oldPath == NULL */
-	    /* Verify that the relocation's old path is in the header. */
-	    rpmtdInit(&validRelocs);
-	    while ((validprefix = rpmtdNextString(&validRelocs))) {
-		if (rstreq(validprefix, p->relocs[i].oldPath)) {
-		    valid = 1;
-		    break;
+    if (rpmteType(p) == TR_ADDED && rpmfsFC(p->fs) > 0) {
+	if (!headerIsEntry(h, RPMTAG_ORIGBASENAMES)) {
+	    if (rpmteIsSource(p)) {
+		/* Unlike binary packages, source relocation can fail */
+		if (rpmRelocateSrpmFileList(h, rpmtsRootDir(p->ts)) < 0) {
+		    return NULL;
 		}
+	    } else {
+		rpmRelocateFileList(p->relocs, p->nrelocs, p->fs, h);
 	    }
-
-	    if (!valid) {
-		if (p->badrelocs == NULL)
-		    p->badrelocs = xcalloc(p->nrelocs, sizeof(*p->badrelocs));
-		p->badrelocs[i] = 1;
-	    }
-	} else {
-	    p->relocs[i].newPath = NULL;
 	}
     }
-    p->relocs[i].oldPath = NULL;
-    p->relocs[i].newPath = NULL;
-    sortRelocs(p->relocs, p->nrelocs);
-    
-    rpmtdFreeData(&validRelocs);
+    return rpmfilesNew(rpmtsPool(p->ts), h, RPMTAG_BASENAMES, fiflags);
 }
 
 /**
@@ -208,7 +120,7 @@ static void buildRelocs(rpmte p, Header h, rpmRelocation *relocs)
 static int addTE(rpmte p, Header h, fnpyKey key, rpmRelocation * relocs)
 {
     rpmstrPool tspool = rpmtsPool(p->ts);
-    struct rpmtd_s colls, bnames;
+    struct rpmtd_s bnames;
     int rc = 1; /* assume failure */
 
     p->name = headerGetAsString(h, RPMTAG_NAME);
@@ -237,7 +149,7 @@ static int addTE(rpmte p, Header h, fnpyKey key, rpmRelocation * relocs)
     p->relocs = NULL;
     p->badrelocs = NULL;
     if (relocs != NULL)
-	buildRelocs(p, h, relocs);
+	rpmRelocationBuild(h, relocs, &p->nrelocs, &p->relocs, &p->badrelocs);
 
     p->db_instance = headerGetInstance(h);
     p->key = key;
@@ -258,10 +170,10 @@ static int addTE(rpmte p, Header h, fnpyKey key, rpmRelocation * relocs)
     p->fs = rpmfsNew(rpmtdCount(&bnames), (p->type == TR_ADDED));
     rpmtdFreeData(&bnames);
 
-    p->fi = getFI(p, h);
+    p->files = getFiles(p, h);
 
     /* Packages with no files return an empty file info set, NULL is an error */
-    if (p->fi == NULL)
+    if (p->files == NULL)
 	goto exit;
 
     /* See if we have pre/posttrans scripts. */
@@ -271,19 +183,6 @@ static int addTE(rpmte p, Header h, fnpyKey key, rpmRelocation * relocs)
     p->transscripts |= (headerIsEntry(h, RPMTAG_POSTTRANS) ||
 			 headerIsEntry(h, RPMTAG_POSTTRANSPROG)) ?
 			RPMTE_HAVE_POSTTRANS : 0;
-
-    p->lastInCollectionsAny = NULL;
-    p->lastInCollectionsAdd = NULL;
-    p->firstInCollectionsRemove = NULL;
-    p->collections = NULL;
-    if (headerGet(h, RPMTAG_COLLECTIONS, &colls, HEADERGET_MINMEM)) {
-	const char *collname;
-	while ((collname = rpmtdNextString(&colls))) {
-	    argvAdd(&p->collections, collname);
-	}
-	argvSort(p->collections, NULL);
-	rpmtdFreeData(&colls);
-    }
 
 // these are required only for multilib install on linux X86_64 of
 // mixed 32bit/64bit ELF files
@@ -324,15 +223,11 @@ rpmte rpmteFree(rpmte te)
 
 	fdFree(te->fd);
 	rpmfiFree(te->fi);
+	rpmfilesFree(te->files);
 	headerFree(te->h);
 	rpmfsFree(te->fs);
 	rpmpsFree(te->probs);
 	rpmteCleanDS(te);
-
-	argvFree(te->collections);
-	argvFree(te->lastInCollectionsAny);
-	argvFree(te->lastInCollectionsAdd);
-	argvFree(te->firstInCollectionsRemove);
 
 	memset(te, 0, sizeof(*te));	/* XXX trash and burn */
 	free(te);
@@ -437,46 +332,6 @@ rpm_color_t rpmteSetColor(rpmte te, rpm_color_t color)
     return ocolor;
 }
 
-ARGV_const_t rpmteCollections(rpmte te)
-{
-    return (te != NULL) ? te->collections : NULL;
-}
-
-int rpmteHasCollection(rpmte te, const char *collname)
-{
-    return (argvSearch(rpmteCollections(te), collname, NULL) != NULL);
-}
-
-int rpmteAddToLastInCollectionAdd(rpmte te, const char *collname)
-{
-    if (te != NULL) {
-	argvAdd(&te->lastInCollectionsAdd, collname);
-	argvSort(te->lastInCollectionsAdd, NULL);
-	return 0;
-    }
-    return -1;
-}
-
-int rpmteAddToLastInCollectionAny(rpmte te, const char *collname)
-{
-    if (te != NULL) {
-	argvAdd(&te->lastInCollectionsAny, collname);
-	argvSort(te->lastInCollectionsAny, NULL);
-	return 0;
-    }
-    return -1;
-}
-
-int rpmteAddToFirstInCollectionRemove(rpmte te, const char *collname)
-{
-    if (te != NULL) {
-	argvAdd(&te->firstInCollectionsRemove, collname);
-	argvSort(te->firstInCollectionsRemove, NULL);
-	return 0;
-    }
-    return -1;
-}
-
 rpm_loff_t rpmtePkgFileSize(rpmte te)
 {
     return (te != NULL ? te->pkgFileSize : 0);
@@ -575,14 +430,12 @@ rpmds rpmteDS(rpmte te, rpmTagVal tag)
     return NULL;
 }
 
-rpmfi rpmteSetFI(rpmte te, rpmfi fi)
+void rpmteCleanFiles(rpmte te)
 {
     if (te != NULL)  {
 	te->fi = rpmfiFree(te->fi);
-	if (fi != NULL)
-	    te->fi = rpmfiLink(fi);
+	te->files = rpmfilesFree(te->files);
     }
-    return NULL;
 }
 
 rpmfi rpmteFI(rpmte te)
@@ -590,12 +443,20 @@ rpmfi rpmteFI(rpmte te)
     if (te == NULL)
 	return NULL;
 
+    if (te->fi == NULL)
+	te->fi = rpmfilesIter(te->files, RPMFI_ITER_FWD);
+
     return te->fi; /* XXX take fi reference here? */
+}
+
+rpmfiles rpmteFiles(rpmte te)
+{
+    return (te != NULL) ? rpmfilesLink(te->files) : NULL;
 }
 
 static void rpmteColorDS(rpmte te, rpmTag tag)
 {
-    rpmfi fi = rpmteFI(te);
+    rpmfi fi;
     rpmds ds = rpmteDS(te, tag);
     char deptype = 'R';
     char mydt;
@@ -606,7 +467,7 @@ static void rpmteColorDS(rpmte te, rpmTag tag)
     unsigned ix;
     int ndx, i;
 
-    if (!(te && (Count = rpmdsCount(ds)) > 0 && rpmfiFC(fi) > 0))
+    if (!(te && (Count = rpmdsCount(ds)) > 0 && rpmfilesFC(te->files) > 0))
 	return;
 
     switch (tag) {
@@ -624,8 +485,7 @@ static void rpmteColorDS(rpmte te, rpmTag tag)
     colors = xcalloc(Count, sizeof(*colors));
 
     /* Calculate dependency color. */
-    fi = rpmfiInit(fi, 0);
-    if (fi != NULL)
+    fi = rpmfilesIter(te->files, RPMFI_ITER_FWD);
     while (rpmfiNext(fi) >= 0) {
 	val = rpmfiFColor(fi);
 	ddict = NULL;
@@ -650,6 +510,7 @@ assert (ix < Count);
 	(void) rpmdsSetColor(ds, val);
     }
     free(colors);
+    rpmfiFree(fi);
 }
 
 static Header rpmteDBHeader(rpmte te)
@@ -711,8 +572,8 @@ static int rpmteOpen(rpmte te, int reload_fi)
     if (h != NULL) {
 	if (reload_fi) {
 	    /* This can fail if we get a different, bad header from callback */
-	    te->fi = getFI(te, h);
-	    rc = (te->fi != NULL);
+	    te->files = getFiles(te, h);
+	    rc = (te->files != NULL);
 	} else {
 	    rc = 1;
 	}
@@ -743,7 +604,7 @@ static int rpmteClose(rpmte te, int reset_fi)
     }
     rpmteSetHeader(te, NULL);
     if (reset_fi) {
-	rpmteSetFI(te, NULL);
+	rpmteCleanFiles(te);
     }
     return 1;
 }
@@ -880,69 +741,6 @@ rpmfs rpmteGetFileStates(rpmte te)
     return te->fs;
 }
 
-rpmRC rpmteSetupCollectionPlugins(rpmte te)
-{
-    ARGV_const_t colls = rpmteCollections(te);
-    rpmPlugins plugins = rpmtsPlugins(te->ts);
-    rpmRC rc = RPMRC_OK;
-
-    if (!colls) {
-	return rc;
-    }
-
-    rpmteOpen(te, 0);
-    for (; colls && *colls; colls++) {
-	if (!rpmpluginsPluginAdded(plugins, *colls)) {
-	    rc = rpmpluginsAddCollectionPlugin(plugins, *colls);
-	    if (rc != RPMRC_OK) {
-		break;
-	    }
-	}
-	rc = rpmpluginsCallOpenTE(plugins, *colls, te);
-	if (rc != RPMRC_OK) {
-	    break;
-	}
-    }
-    rpmteClose(te, 0);
-
-    return rc;
-}
-
-static rpmRC rpmteRunAllCollections(rpmte te, rpmPluginHook hook)
-{
-    ARGV_const_t colls;
-    rpmRC(*collHook) (rpmPlugins, const char *);
-    rpmRC rc = RPMRC_OK;
-
-    if (rpmtsFlags(te->ts) & RPMTRANS_FLAG_NOCOLLECTIONS) {
-	goto exit;
-    }
-
-    switch (hook) {
-    case PLUGINHOOK_COLL_POST_ADD:
-	colls = te->lastInCollectionsAdd;
-	collHook = rpmpluginsCallCollectionPostAdd;
-	break;
-    case PLUGINHOOK_COLL_POST_ANY:
-	colls = te->lastInCollectionsAny;
-	collHook = rpmpluginsCallCollectionPostAny;
-	break;
-    case PLUGINHOOK_COLL_PRE_REMOVE:
-	colls = te->firstInCollectionsRemove;
-	collHook = rpmpluginsCallCollectionPreRemove;
-	break;
-    default:
-	goto exit;
-    }
-
-    for (; colls && *colls; colls++) {
-	rc = collHook(rpmtsPlugins(te->ts), *colls);
-    }
-
-  exit:
-    return rc;
-}
-
 int rpmteProcess(rpmte te, pkgGoal goal)
 {
     /* Only install/erase resets pkg file info */
@@ -958,20 +756,11 @@ int rpmteProcess(rpmte te, pkgGoal goal)
 	}
     }
 
-    if (!scriptstage) {
-	rpmteRunAllCollections(te, PLUGINHOOK_COLL_PRE_REMOVE);
-    }
-
     if (rpmteOpen(te, reset_fi)) {
 	failed = rpmpsmRun(te->ts, te, goal);
 	rpmteClose(te, reset_fi);
     }
     
-    if (!scriptstage) {
-	rpmteRunAllCollections(te, PLUGINHOOK_COLL_POST_ADD);
-	rpmteRunAllCollections(te, PLUGINHOOK_COLL_POST_ANY);
-    }
-
     if (failed) {
 	failed = rpmteMarkFailed(te);
     }

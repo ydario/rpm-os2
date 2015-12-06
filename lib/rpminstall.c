@@ -22,6 +22,7 @@ static int rpmcliHashesCurrent = 0;
 static int rpmcliHashesTotal = 0;
 static int rpmcliProgressCurrent = 0;
 static int rpmcliProgressTotal = 0;
+static int rpmcliProgressState = 0;
 
 /**
  * Print a CLI progress bar.
@@ -103,7 +104,6 @@ void * rpmShowProgress(const void * arg,
     void * rc = NULL;
     const char * filename = (const char *)key;
     static FD_t fd = NULL;
-    static int state = -1;
 
     switch (what) {
     case RPMCALLBACK_INST_OPEN_FILE:
@@ -134,8 +134,8 @@ void * rpmShowProgress(const void * arg,
 
     case RPMCALLBACK_INST_START:
     case RPMCALLBACK_UNINST_START:
-	if (state != what) {
-	    state = what;
+	if (rpmcliProgressState != what) {
+	    rpmcliProgressState = what;
 	    if (flags & INSTALL_HASH) {
 		if (what == RPMCALLBACK_INST_START) {
 		    fprintf(stdout, _("Updating / installing...\n"));
@@ -185,7 +185,7 @@ void * rpmShowProgress(const void * arg,
 	rpmcliProgressTotal = 1;
 	rpmcliProgressCurrent = 0;
 	rpmcliPackagesTotal = total;
-	state = what;
+	rpmcliProgressState = what;
 	if (!(flags & INSTALL_LABEL))
 	    break;
 	if (flags & INSTALL_HASH)
@@ -290,8 +290,8 @@ static int rpmcliTransaction(rpmts ts, struct rpmInstallArguments_s * ia,
 
 	ps = rpmtsProblems(ts);
 
-	if ((rpmpsNumProblems(ps) > 0) && (eflags? 1 : (rc > 0)))
-	    rpmpsPrint((eflags? NULL : stderr), ps);
+	if (rpmpsNumProblems(ps) > 0 && (eflags || rc > 0))
+	    rpmpsPrint(NULL, ps);
 	ps = rpmpsFree(ps);
     }
 
@@ -385,6 +385,19 @@ static int checkFreshenStatus(rpmts ts, Header h)
     return (oldH != NULL);
 }
 
+static int rpmNoGlob(const char *fn, int *argcPtr, ARGV_t * argvPtr)
+{
+    struct stat sb;
+    int rc = stat(fn, &sb);
+    if (rc == 0) {
+	argvAdd(argvPtr, fn);
+	*argcPtr = 1;
+    } else {
+	*argcPtr = 0;
+    }
+    return rc;
+}
+
 /** @todo Generalize --freshen policies. */
 int rpmInstall(rpmts ts, struct rpmInstallArguments_s * ia, ARGV_t fileArgv)
 {
@@ -417,21 +430,28 @@ int rpmInstall(rpmts ts, struct rpmInstallArguments_s * ia, ARGV_t fileArgv)
     for (eiu->fnp = fileArgv; *eiu->fnp != NULL; eiu->fnp++) {
     	ARGV_t av = NULL;
     	int ac = 0;
-	char * fn;
 
-	fn = rpmEscapeSpaces(*eiu->fnp);
-	// check if it is a full path
-	if (fn[0] != '/' && fn[1] != ':') {
-	    char _fullpath[_MAX_PATH];
-	    // convert to full path because chroot() changes default dir.
-	    _realrealpath( fn, _fullpath, sizeof( _fullpath));
-	    rc = rpmGlob(_fullpath, &ac, &av);
+	if (giFlags & RPMGI_NOGLOB) {
+	    rc = rpmNoGlob(*eiu->fnp, &ac, &av);
 	} else {
-	rc = rpmGlob(fn, &ac, &av);
+	    char * fn = rpmEscapeSpaces(*eiu->fnp);
+	    // check if it is a full path
+	    if (fn[0] != '/' && fn[1] != ':') {
+	        char _fullpath[_MAX_PATH];
+	        // convert to full path because chroot() changes default dir.
+	        _realrealpath( fn, _fullpath, sizeof( _fullpath));
+	        rc = rpmGlob(_fullpath, &ac, &av);
+	    } else {
+	        rc = rpmGlob(fn, &ac, &av);
+	    }
+	    fn = _free(fn);
 	}
-	fn = _free(fn);
 	if (rc || ac == 0) {
-	    rpmlog(RPMLOG_ERR, _("File not found by glob: %s\n"), *eiu->fnp);
+	    if (giFlags & RPMGI_NOGLOB) {
+		rpmlog(RPMLOG_ERR, _("File not found: %s\n"), *eiu->fnp);
+	    } else {
+		rpmlog(RPMLOG_ERR, _("File not found by glob: %s\n"), *eiu->fnp);
+	    }
 	    eiu->numFailed++;
 	    continue;
 	}
@@ -560,7 +580,10 @@ restart:
 	        continue;
 	    }
 
-	rc = rpmtsAddInstallElement(ts, h, (fnpyKey)fileName,
+	if (ia->installInterfaceFlags & INSTALL_REINSTALL)
+	    rc = rpmtsAddReinstallElement(ts, h, (fnpyKey)fileName);
+	else
+	    rc = rpmtsAddInstallElement(ts, h, (fnpyKey)fileName,
 			(ia->installInterfaceFlags & INSTALL_UPGRADE) != 0,
 			relocations);
 
@@ -602,6 +625,9 @@ restart:
     }
 
     if (eiu->numSRPMS && (eiu->sourceURL != NULL)) {
+	rpmcliProgressState = 0;
+	rpmcliProgressTotal = 0;
+	rpmcliProgressCurrent = 0;
 	for (i = 0; i < eiu->numSRPMS; i++) {
 	    rpmdbCheckSignals();
 	    if (eiu->sourceURL[i] != NULL) {

@@ -202,6 +202,12 @@ struct poptOption rpmInstallPoptTable[] = {
  { "nopostun", '\0', POPT_BIT_SET|POPT_ARGFLAG_DOC_HIDDEN, &rpmIArgs.transFlags,
 	RPMTRANS_FLAG_NOPOSTUN,
 	N_("do not execute %%postun scriptlet (if any)"), NULL },
+ { "nopretrans", '\0', POPT_BIT_SET|POPT_ARGFLAG_DOC_HIDDEN, &rpmIArgs.transFlags,
+	RPMTRANS_FLAG_NOPRETRANS,
+	N_("do not execute %%pretrans scriptlet (if any)"), NULL },
+ { "noposttrans", '\0', POPT_BIT_SET|POPT_ARGFLAG_DOC_HIDDEN, &rpmIArgs.transFlags,
+	RPMTRANS_FLAG_NOPOSTTRANS,
+	N_("do not execute %%posttrans scriptlet (if any)"), NULL },
 
  { "notriggers", '\0', POPT_BIT_SET, &rpmIArgs.transFlags, _noTransTriggers,
 	N_("do not execute any scriptlet(s) triggered by this package"), NULL},
@@ -217,10 +223,6 @@ struct poptOption rpmInstallPoptTable[] = {
  { "notriggerpostun", '\0', POPT_BIT_SET|POPT_ARGFLAG_DOC_HIDDEN,
 	&rpmIArgs.transFlags, RPMTRANS_FLAG_NOTRIGGERPOSTUN,
 	N_("do not execute any %%triggerpostun scriptlet(s)"), NULL},
-
- { "nocollections", '\0', POPT_BIT_SET,
-	&rpmIArgs.transFlags, RPMTRANS_FLAG_NOCOLLECTIONS,
-	N_("do not perform any collection actions"), NULL},
 
  { "oldpackage", '\0', POPT_BIT_SET,
 	&rpmIArgs.probFilter, RPMPROB_FILTER_OLDPACKAGE,
@@ -246,6 +248,10 @@ struct poptOption rpmInstallPoptTable[] = {
  { "upgrade", 'U', POPT_BIT_SET,
 	&rpmIArgs.installInterfaceFlags, (INSTALL_UPGRADE|INSTALL_INSTALL),
 	N_("upgrade package(s)"),
+	N_("<packagefile>+") },
+ { "reinstall", '\0', POPT_BIT_SET,
+	&rpmIArgs.installInterfaceFlags, (INSTALL_REINSTALL|INSTALL_INSTALL),
+	N_("reinstall package(s)"),
 	N_("<packagefile>+") },
 
    POPT_TABLEEND

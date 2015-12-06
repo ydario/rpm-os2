@@ -389,8 +389,17 @@ package or when debugging this package.\
 %_missing_doc_files_terminate_build	1
 
 #
+# Should empty %files manifest file terminate a build?
+#
+# Note: The default value should be 0 for legacy compatibility.
+%_empty_manifest_terminate_build	1
+
+#
 # Should binaries in noarch packages terminate a build?
 %_binaries_in_noarch_packages_terminate_build	1
+
+# Should invalid utf8 encoding in package metadata terminate a build?
+%_invalid_encoding_terminates_build 0
 
 #
 # Should rpm try to download missing sources at build-time?
@@ -472,6 +481,13 @@ package or when debugging this package.\
 #
 %_fileattrsdir		%{_rpmconfigdir}/fileattrs
 
+# This macro defines how much space (in bytes) in package should be
+# reserved for gpg signatures during building of a package. If this space is
+# big enough for gpg signatures to fit into it then signing of the packages is
+# very quick because it is not necessary to rewrite the whole package to make
+# some space for gpg signatures.
+%__gpg_reserved_space 4096
+
 #==============================================================================
 # ---- Database configuration macros.
 #	Macros used to configure Berkley db parameters.
@@ -522,11 +538,9 @@ package or when debugging this package.\
 #	Macro(s) to hold the arguments passed to GPG/PGP for package
 #	signing and verification.
 #
-%__gpg_check_password_cmd	%{__gpg} \
-	gpg --batch --no-verbose --passphrase-fd 3 -u "%{_gpg_name}" -so -
 
 %__gpg_sign_cmd			%{__gpg} \
-	gpg --batch --no-verbose --no-armor --passphrase-fd 3 \
+	gpg --no-verbose --no-armor \
 	%{?_gpg_digest_algo:--digest-algo %{_gpg_digest_algo}} \
 	--no-secmem-warning \
 	-u "%{_gpg_name}" -sbo %{__signature_filename} %{__plaintext_filename}
@@ -592,6 +606,7 @@ package or when debugging this package.\
 %_vsflags_erase		%{__vsflags}
 %_vsflags_install	%{__vsflags}
 %_vsflags_query		%{__vsflags}
+%_vsflags_query_rpmdb	0xf0f00
 %_vsflags_rebuilddb	0xc0c00
 %_vsflags_verify	%{__vsflags}
 
@@ -864,6 +879,10 @@ package or when debugging this package.\
 	--infodir=%{_infodir}
 
 #------------------------------------------------------------------------------
+# The "make" analogue, hiding the _smp_mflags magic from specs
+%make_build %{__make} %{?_smp_mflags}
+
+#------------------------------------------------------------------------------
 # The make install analogue of %configure for modern autotools:
 %make_install %{__make} install DESTDIR=%{?buildroot}
 
@@ -871,6 +890,7 @@ package or when debugging this package.\
 # Former make install analogue, kept for compatibility and for old/broken
 #  packages that don't support DESTDIR properly.
 %makeinstall \
+  echo "warning: %%makeinstall is deprecated, try %%make_install instead" 1>&2\
   %{__make} \\\
 	prefix=%{?buildroot:%{buildroot}}%{_prefix} \\\
 	exec_prefix=%{?buildroot:%{buildroot}}%{_exec_prefix} \\\
@@ -993,7 +1013,11 @@ done \
 
 #------------------------------------------------------------------------------
 # arch macro for all supported ARM processors
-%arm	armv3l armv4b armv4l armv4tl armv5tel armv5tejl armv6l armv7l
+%arm	armv3l armv4b armv4l armv4tl armv5tel armv5tejl armv6l armv6hl armv7l armv7hl armv7hnl
+
+#------------------------------------------------------------------------------
+# arch macro for all supported MIPS processors
+%mips	mips mipsel mips64 mips64el
 
 #------------------------------------------------------------------------------
 # arch macro for all supported Sparc processors
@@ -1005,7 +1029,7 @@ done \
 
 #------------------------------------------------------------------------------
 # arch macro for all supported PowerPC 64 processors
-%power64	ppc64 ppc64p7
+%power64	ppc64 ppc64p7 ppc64le
 
 #------------------------------------------------------------------------
 # Use in %install to generate locale specific file lists. For example,
@@ -1023,17 +1047,16 @@ done \
 # for any special local needs use %__urlhelper_localopts in system-wide
 # or per-user macro configuration.
 %__urlhelpercmd         @__CURL@
-%__urlhelperopts        --silent --show-error --fail --location -o
+%__urlhelperopts        --silent --show-error --fail --globoff --location -o
 %__urlhelper_proxyopts   %{?_httpproxy:--proxy %{_httpproxy}%{?_httpport::%{_httpport}}}%{!?_httpproxy:%{nil}}
 %_urlhelper             %{__urlhelpercmd} %{?__urlhelper_localopts} %{?__urlhelper_proxyopts} %{__urlhelperopts}
 
-#------------------------------------------------------------------------------
-# Collection specific macros
+# Transaction plugin macros
 %__plugindir		%{_libdir}/rpm-plugins
-%__collection_font	%{__plugindir}/exec.so /usr/bin/fc-cache
-%__collection_java	%{__plugindir}/exec.so /usr/bin/rebuild-gcj-db
-%__collection_sepolicy		%{__plugindir}/sepolicy.so
-%__collection_sepolicy_flags	1
+%__transaction_systemd_inhibit	%{__plugindir}/systemd_inhibit.so
+%__transaction_selinux		%{__plugindir}/selinux.so
+%__transaction_syslog		%{__plugindir}/syslog.so
+%__transaction_ima		%{__plugindir}/ima.so
 
 #------------------------------------------------------------------------
 # handle file unlocking, options:
@@ -1220,8 +1243,15 @@ done \
 	--author "%{__scm_author}" -m "%{name}-%{version} base"
 
 %__scm_apply_git(qp:m:)\
-%{__git} apply %{-p:-p%{-p*}} -\
-%{__git} commit %{-q} -a -m %{-m*} --author "%{__scm_author}"
+%{__git} apply --index %{-p:-p%{-p*}} -\
+%{__git} commit %{-q} -m %{-m*} --author "%{__scm_author}"
+
+# Git, using "git am" (-m is unused)
+%__scm_setup_git_am(q)\
+%{expand:%__scm_setup_git %{-q}}
+
+%__scm_apply_git_am(qp:m:)\
+%{__git} am %{-q} %{-p:-p%{-p*}}
 
 # Quilt
 %__scm_setup_quilt(q) %{nil}
@@ -1247,8 +1277,9 @@ done \
 # Automatically apply all patches
 %autopatch(vp:)\
 %{lua:\
+local options = rpm.expand("%{!-v:-q} %{-p:-p%{-p*}} ")\
 for i, p in ipairs(patches) do\
-    print(rpm.expand("%apply_patch -m %{basename:"..p.."}  "..rpm.expand("%{!-v:-q} %{-p:-p%{-p*}} ")..p.."\\n"))\
+    print(rpm.expand("%apply_patch -m %{basename:"..p.."}  "..options..p.."\\n"))\
 end}
 
 # One macro to (optionally) do it all.

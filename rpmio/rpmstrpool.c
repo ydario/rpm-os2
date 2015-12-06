@@ -27,7 +27,7 @@ struct poolHash_s {
 };
 
 struct rpmstrPool_s {
-    char ** offs;		/* pointers into data area */
+    const char ** offs;		/* pointers into data area */
     rpmsid offs_size;		/* largest offset index */;
     rpmsid offs_alloced;	/* offsets allocation size */
 
@@ -35,6 +35,7 @@ struct rpmstrPool_s {
     size_t chunks_size;		/* current chunk */
     size_t chunks_allocated;	/* allocated size of the chunks array */
     size_t chunk_allocated;	/* size of the current chunk */
+    size_t chunk_used;		/* usage of the current chunk */
 
     poolHash hash;		/* string -> sid hash table */
     int frozen;			/* are new id additions allowed? */
@@ -219,7 +220,7 @@ static void rpmstrPoolRehash(rpmstrPool pool)
 	pool->hash = poolHashFree(pool->hash);
 
     pool->hash = poolHashCreate(sizehint);
-    for (int i = 1; i < pool->offs_size; i++)
+    for (int i = 1; i <= pool->offs_size; i++)
 	poolHashAddEntry(pool, rpmstrPoolStr(pool, i), i);
 }
 
@@ -234,8 +235,8 @@ rpmstrPool rpmstrPoolCreate(void)
     pool->chunks = xcalloc(pool->chunks_allocated, sizeof(*pool->chunks));
     pool->chunks_size = 1;
     pool->chunk_allocated = STRDATA_CHUNK;
-    pool->offs[1] = xcalloc(1, pool->chunk_allocated);
-    pool->chunks[pool->chunks_size] = pool->offs[1];
+    pool->chunks[pool->chunks_size] = xcalloc(1, pool->chunk_allocated);
+    pool->offs[1] = pool->chunks[pool->chunks_size];
 
     rpmstrPoolRehash(pool);
     pool->nrefs = 1;
@@ -296,43 +297,40 @@ static rpmsid rpmstrPoolPut(rpmstrPool pool, const char *s, size_t slen, unsigne
 {
     char *t = NULL;
     size_t ssize = slen + 1;
-    size_t chunk_used;
 
     pool->offs_size += 1;
-    /* need one extra for end of string */
-    /* and one extra to mark the end of the chunk */
-    if (pool->offs_alloced <= pool->offs_size + 2) {
+    if (pool->offs_alloced <= pool->offs_size) {
 	pool->offs_alloced += STROFFS_CHUNK;
 	pool->offs = xrealloc(pool->offs,
 			      pool->offs_alloced * sizeof(*pool->offs));
     }
 
-    chunk_used = pool->offs[pool->offs_size] - pool->chunks[pool->chunks_size];
-    if (ssize + 1 > pool->chunk_allocated - chunk_used) {
-	/* check size of ->chunks */
+    /* Do we need a new chunk to store the string? */
+    if (ssize > pool->chunk_allocated - pool->chunk_used) {
 	pool->chunks_size += 1;
+	/* Grow chunks array if needed */
 	if (pool->chunks_size >= pool->chunks_allocated) {
 	    pool->chunks_allocated += pool->chunks_allocated;
 	    pool->chunks = xrealloc(pool->chunks,
 				pool->chunks_allocated * sizeof(*pool->chunks));
 	}
 
-	/* Check if string is bigger than chunks */
+	/* Ensure the string fits in the new chunk we're about to allocate */
 	if (ssize > pool->chunk_allocated) {
 	    pool->chunk_allocated = 2 * ssize;
 	}
 
-	/* Dummy entry for end of last string*/
-	pool->offs_size += 1;
-
-	pool->offs[pool->offs_size] = xcalloc(1, pool->chunk_allocated);
-	pool->chunks[pool->chunks_size] = pool->offs[pool->offs_size];
+	pool->chunks[pool->chunks_size] = xcalloc(1, pool->chunk_allocated);
+	pool->chunk_used = 0;
     }
 
-    t = memcpy(pool->offs[pool->offs_size], s, slen);
+    /* Copy the string into current chunk, ensure termination */
+    t = memcpy(pool->chunks[pool->chunks_size] + pool->chunk_used, s, slen);
     t[slen] = '\0';
-    pool->offs[pool->offs_size+1] = t + ssize;
+    pool->chunk_used += ssize;
 
+    /* Actually add the string to the pool */
+    pool->offs[pool->offs_size] = t;
     poolHashAddHEntry(pool, t, hash, pool->offs_size);
 
     return pool->offs_size;
@@ -406,8 +404,8 @@ const char * rpmstrPoolStr(rpmstrPool pool, rpmsid sid)
 size_t rpmstrPoolStrlen(rpmstrPool pool, rpmsid sid)
 {
     size_t slen = 0;
-    if (pool && sid <= pool->offs_size) {
-	slen = pool->offs[sid+1] - pool->offs[sid] - 1;
+    if (pool && sid > 0 && sid <= pool->offs_size) {
+	slen = strlen(pool->offs[sid]);
     }
     return slen;
 }

@@ -22,6 +22,8 @@
 #define SKIPWHITE(_x)	{while(*(_x) && (risspace(*_x) || *(_x) == ',')) (_x)++;}
 #define SKIPNONWHITE(_x){while(*(_x) &&!(risspace(*_x) || *(_x) == ',')) (_x)++;}
 
+#define WHITELIST_NAME ".-_+%{}"
+
 /**
  */
 static const rpmTagVal copyTagsDuringParse[] = {
@@ -92,7 +94,7 @@ static int parseSimplePart(const char *line, char **name, int *flag)
     *name = NULL;
 
     if (!(tok = strtok(NULL, " \t\n"))) {
-	rc = 0;
+	rc = 1;
 	goto exit;
     }
     
@@ -306,7 +308,7 @@ static int addSource(rpmSpec spec, Package pkg, const char *field, rpmTagVal tag
 	addMacro(spec->macros, buf, NULL, p->fullSource, RMIL_SPEC);
 	free(buf);
 #ifdef WITH_LUA
-	if (!spec->recursing) {
+	{
 	    rpmlua lua = NULL; /* global state */
 	    const char * what = (flag & RPMBUILD_ISPATCH) ? "patches" : "sources";
 	    rpmluaPushTable(lua, what);
@@ -598,34 +600,99 @@ if (multiToken) { \
 
 /**
  * Check for inappropriate characters. All alphanums are considered sane.
- * @param spec		spec
+ * @param spec		spec (or NULL)
  * @param field		string to check
- * @param fsize		size of string to check
  * @param whitelist	string of permitted characters
  * @return		RPMRC_OK if OK
  */
-rpmRC rpmCharCheck(rpmSpec spec, const char *field, size_t fsize, const char *whitelist)
+rpmRC rpmCharCheck(rpmSpec spec, const char *field, const char *whitelist)
 {
-    const char *ch, *stop = &field[fsize];
+    const char *ch;
+    char *err = NULL;
+    rpmRC rc = RPMRC_OK;
 
-    for (ch=field; *ch && ch < stop; ch++) {
+    for (ch=field; *ch; ch++) {
 	if (risalnum(*ch) || strchr(whitelist, *ch)) continue;
-	if (isprint(*ch)) {
-	    rpmlog(RPMLOG_ERR, _("line %d: Illegal char '%c' in: %s\n"),
-		spec->lineNum, *ch, spec->line);
+	rasprintf(&err, _("Illegal char '%c' (0x%x)"),
+		  isprint(*ch) ? *ch : '?', *ch);
+    }
+    if (err == NULL && strstr(field, "..") != NULL) {
+	rasprintf(&err, _("Illegal sequence \"..\""));
+    }
+
+    if (err) {
+	if (spec) {
+	    rpmlog(RPMLOG_ERR, _("line %d: %s in: %s\n"),
+		   spec->lineNum, err, spec->line);
 	} else {
-	    rpmlog(RPMLOG_ERR, _("line %d: Illegal char in: %s\n"),
-		spec->lineNum, spec->line);
+	    rpmlog(RPMLOG_ERR, _("%s in: %s\n"), err, field);
 	}
-	return RPMRC_FAIL;
+	free(err);
+	rc = RPMRC_FAIL;
     }
-    if (strstr(field, "..") != NULL) {
-	rpmlog(RPMLOG_ERR, _("line %d: Illegal sequence \"..\" in: %s\n"),
-	    spec->lineNum, spec->line);
-	return RPMRC_FAIL;
+    return rc;
+}
+
+static int haveLangTag(Header h, rpmTagVal tag, const char *lang)
+{
+    int rc = 0;	/* assume tag not present */
+    int langNum = -1;
+
+    if (lang && *lang) {
+	/* See if the language is in header i18n table */
+	struct rpmtd_s langtd;
+	const char *s = NULL;
+	headerGet(h, RPMTAG_HEADERI18NTABLE, &langtd, HEADERGET_MINMEM);
+	while ((s = rpmtdNextString(&langtd)) != NULL) {
+	    if (rstreq(s, lang)) {
+		langNum = rpmtdGetIndex(&langtd);
+		break;
+	    }
+	}
+	rpmtdFreeData(&langtd);
+    } else {
+	/* C locale */
+	langNum = 0;
     }
-    
-    return RPMRC_OK;
+
+    /* If locale is present, check the actual tag content */
+    if (langNum >= 0) {
+	struct rpmtd_s td;
+	headerGet(h, tag, &td, HEADERGET_MINMEM|HEADERGET_RAW);
+	if (rpmtdSetIndex(&td, langNum) == langNum) {
+	    const char *s = rpmtdGetString(&td);
+	    /* non-empty string means a dupe */
+	    if (s && *s)
+		rc = 1;
+	}
+	rpmtdFreeData(&td);
+    };
+
+    return rc;
+}
+
+int addLangTag(rpmSpec spec, Header h, rpmTagVal tag,
+		      const char *field, const char *lang)
+{
+    int skip = 0;
+
+    if (haveLangTag(h, tag, lang)) {
+	/* Turn this into an error eventually */
+	rpmlog(RPMLOG_WARNING, _("line %d: second %s\n"),
+		spec->lineNum, rpmTagGetName(tag));
+    }
+
+    if (!*lang) {
+	headerPutString(h, tag, field);
+    } else {
+    	skip = ((spec->flags & RPMSPEC_NOLANG) &&
+		!rstreq(lang, RPMBUILD_DEFAULT_LANG));
+	if (skip)
+	    return 0;
+	headerAddI18NString(h, tag, field, lang);
+    }
+
+    return 0;
 }
 
 static rpmRC handlePreambleTag(rpmSpec spec, Package pkg, rpmTagVal tag,
@@ -667,7 +734,7 @@ static rpmRC handlePreambleTag(rpmSpec spec, Package pkg, rpmTagVal tag,
     switch (tag) {
     case RPMTAG_NAME:
 	SINGLE_TOKEN_ONLY;
-	if (rpmCharCheck(spec, field, strlen(field), ".-_+%{}"))
+	if (rpmCharCheck(spec, field, WHITELIST_NAME))
 	   goto exit;
 	headerPutString(pkg->header, tag, field);
 	/* Main pkg name is unknown at the start, populate as soon as we can */
@@ -677,7 +744,7 @@ static rpmRC handlePreambleTag(rpmSpec spec, Package pkg, rpmTagVal tag,
     case RPMTAG_VERSION:
     case RPMTAG_RELEASE:
 	SINGLE_TOKEN_ONLY;
-	if (rpmCharCheck(spec, field, strlen(field), "._+%{}~"))
+	if (rpmCharCheck(spec, field, "._+%{}~"))
 	   goto exit;
 	headerPutString(pkg->header, tag, field);
 	break;
@@ -695,11 +762,8 @@ static rpmRC handlePreambleTag(rpmSpec spec, Package pkg, rpmTagVal tag,
     case RPMTAG_VENDOR:
     case RPMTAG_LICENSE:
     case RPMTAG_PACKAGER:
-	if (!*lang) {
-	    headerPutString(pkg->header, tag, field);
-	} else if (!((spec->flags & RPMSPEC_NOLANG) &&
-		   !rstreq(lang, RPMBUILD_DEFAULT_LANG)))
-	    headerAddI18NString(pkg->header, tag, field, lang);
+	if (addLangTag(spec, pkg->header, tag, field, lang))
+	    goto exit;
 	break;
     case RPMTAG_BUILDROOT:
 	/* just silently ignore BuildRoot */
@@ -783,6 +847,10 @@ static rpmRC handlePreambleTag(rpmSpec spec, Package pkg, rpmTagVal tag,
 	}
 	/* fallthrough */
     case RPMTAG_PREREQ:
+    case RPMTAG_RECOMMENDFLAGS:
+    case RPMTAG_SUGGESTFLAGS:
+    case RPMTAG_SUPPLEMENTFLAGS:
+    case RPMTAG_ENHANCEFLAGS:
     case RPMTAG_CONFLICTFLAGS:
     case RPMTAG_OBSOLETEFLAGS:
     case RPMTAG_PROVIDEFLAGS:
@@ -828,9 +896,8 @@ static rpmRC handlePreambleTag(rpmSpec spec, Package pkg, rpmTagVal tag,
 	    spec->BANames = _free(spec->BANames);
 	break;
     }
-    case RPMTAG_COLLECTIONS:
-	if (addOrAppendListEntry(pkg->header, tag, field))
-	   goto exit;
+    case RPMTAG_REMOVEPATHPOSTFIXES:
+	argvSplit(&pkg->removePostfixes, field, ":");
 	break;
     default:
 	rpmlog(RPMLOG_ERR, _("Internal error: Bogus tag %d\n"), tag);
@@ -872,7 +939,7 @@ static struct PreambleRec_s const preambleList[] = {
     {RPMTAG_GROUP,		1, 0, LEN_AND_STR("group")},
     {RPMTAG_PACKAGER,		0, 0, LEN_AND_STR("packager")},
     {RPMTAG_URL,		0, 0, LEN_AND_STR("url")},
-    {RPMTAG_VCS,        0, 0, LEN_AND_STR("vcs")},
+    {RPMTAG_VCS,		0, 0, LEN_AND_STR("vcs")},
     {RPMTAG_SOURCE,		0, 0, LEN_AND_STR("source")},
     {RPMTAG_PATCH,		0, 0, LEN_AND_STR("patch")},
     {RPMTAG_NOSOURCE,		0, 0, LEN_AND_STR("nosource")},
@@ -884,6 +951,10 @@ static struct PreambleRec_s const preambleList[] = {
     {RPMTAG_ICON,		0, 0, LEN_AND_STR("icon")},
     {RPMTAG_PROVIDEFLAGS,	0, 0, LEN_AND_STR("provides")},
     {RPMTAG_REQUIREFLAGS,	2, 0, LEN_AND_STR("requires")},
+    {RPMTAG_RECOMMENDFLAGS,	0, 0, LEN_AND_STR("recommends")},
+    {RPMTAG_SUGGESTFLAGS,	0, 0, LEN_AND_STR("suggests")},
+    {RPMTAG_SUPPLEMENTFLAGS,	0, 0, LEN_AND_STR("supplements")},
+    {RPMTAG_ENHANCEFLAGS,	0, 0, LEN_AND_STR("enhances")},
     {RPMTAG_PREREQ,		2, 1, LEN_AND_STR("prereq")},
     {RPMTAG_CONFLICTFLAGS,	0, 0, LEN_AND_STR("conflicts")},
     {RPMTAG_OBSOLETEFLAGS,	0, 0, LEN_AND_STR("obsoletes")},
@@ -901,8 +972,8 @@ static struct PreambleRec_s const preambleList[] = {
     {RPMTAG_DOCDIR,		0, 0, LEN_AND_STR("docdir")},
     {RPMTAG_DISTTAG,		0, 0, LEN_AND_STR("disttag")},
     {RPMTAG_BUGURL,		0, 0, LEN_AND_STR("bugurl")},
-    {RPMTAG_COLLECTIONS,	0, 0, LEN_AND_STR("collections")},
     {RPMTAG_ORDERFLAGS,		2, 0, LEN_AND_STR("orderwithrequires")},
+    {RPMTAG_REMOVEPATHPOSTFIXES,0, 0, LEN_AND_STR("removepathpostfixes")},
     {0, 0, 0, 0}
 };
 
@@ -983,6 +1054,9 @@ int parsePreamble(rpmSpec spec, int initialPackage)
 			spec->line);
 	    goto exit;
 	}
+
+	if (rpmCharCheck(spec, name, WHITELIST_NAME))
+	    goto exit;
 	
 	if (!lookupPackage(spec, name, flag, NULL)) {
 	    rpmlog(RPMLOG_ERR, _("Package already exists: %s\n"), spec->line);

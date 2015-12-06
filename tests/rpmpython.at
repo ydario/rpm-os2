@@ -213,6 +213,17 @@ for h in ts.dbMatch('packages', ix):
 
 RPMPY_CHECK([
 ts = rpm.ts()
+mi = ts.dbMatch()
+mi.pattern('name', rpm.RPMMIRE_DEFAULT, 'f*')
+for h in mi:
+    myprint(h['nevra'])
+],
+[foo-1.0-1.noarch
+],
+[])
+
+RPMPY_CHECK([
+ts = rpm.ts()
 for h in ts.dbMatch('name'):
     myprint(h['nevra'])
 ],
@@ -249,7 +260,7 @@ for h in ts.dbMatch('basenames', '/usr/share/doc/hello-2.0/FAQ'):
 [])
 RPMPY_CHECK([
 ts = rpm.ts()
-for di in ts.dbIndex('obsoletes'):
+for di in sorted(ts.dbIndex('obsoletes')):
     myprint(di)
 ],
 [howdy
@@ -258,7 +269,7 @@ for di in ts.dbIndex('obsoletes'):
 
 RPMPY_CHECK([
 ts = rpm.ts()
-for di in ts.dbIndex('provides'):
+for di in sorted(ts.dbIndex('provides')):
     myprint(di)
 ],
 [foo
@@ -310,6 +321,76 @@ for f in fi:
 2: /usr/share/doc/hello-2.0/COPYING
 2: /usr/share/doc/hello-2.0/FAQ
 2: /usr/share/doc/hello-2.0/README
+],
+[])
+
+RPMPY_TEST([string pool 1],[
+p = rpm.strpool()
+for s in ['foo', 'bar', 'foo', 'zoo']:
+    p.str2id(s)
+myprint('%s' % len(p))
+for i in range(1, len(p)+1):
+    myprint('%s: %s' % (i, p[i]))
+],
+[3
+1: foo
+2: bar
+3: zoo
+],
+[])
+
+RPMPY_TEST([string pool 2],[
+p = rpm.strpool()
+d1 = rpm.ds(('foo', rpm.RPMSENSE_EQUAL, '2.0'), rpm.RPMTAG_PROVIDES, pool=p)
+d2 = rpm.ds(('bar', rpm.RPMSENSE_EQUAL, '2.0'), rpm.RPMTAG_PROVIDES, pool=p)
+d3 = rpm.ds(('bar', rpm.RPMSENSE_EQUAL, '2.0'), rpm.RPMTAG_PROVIDES, pool=p)
+myprint('%s' % len(p))
+del p
+myprint(d1.DNEVR())
+myprint(d2.DNEVR())
+myprint(d3.DNEVR())
+],
+[3
+P foo = 2.0
+P bar = 2.0
+P bar = 2.0
+],
+[])
+
+RPMPY_TEST([archive 1],[
+import hashlib
+ts = rpm.ts()
+fd = rpm.fd.open('${RPMDATA}/SRPMS/hello-1.0-1.src.rpm')
+h = ts.hdrFromFdno(fd)
+payload = rpm.fd.open(fd, flags=h['payloadcompressor'])
+files = rpm.files(h)
+archive = files.archive(payload)
+for f in archive:
+    if not f.fflags & rpm.RPMFILE_SPECFILE:
+        continue
+    spec = archive.read()
+    hash = hashlib.md5(spec)
+    if f.digest != hash.hexdigest():
+        myprint('%s should be %s' % (hash.hexdigest(), f.digest))
+    break
+],
+[],
+[])
+
+RPMPY_TEST([header unload],[
+ts = rpm.ts()
+h = ts.hdrFromFdno('${RPMDATA}/RPMS/hello-2.0-1.i686.rpm')
+# Add some garbage to header to make it non-sorted
+h['installtime'] = 0
+# RhBug:1061730 causes export of non-sorted header to be larger than it should
+len1 = len(h.unload())
+# Accessing the header before export forces sorting to take place even on
+# buggy versions
+t = h['installtime']
+len2 = len(h.unload())
+myprint(len1 == len2)
+],
+[True
 ],
 [])
 

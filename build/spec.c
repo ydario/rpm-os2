@@ -13,6 +13,7 @@
 #include <rpm/rpmfileutil.h>
 
 #include "rpmio/rpmlua.h"
+#include "lib/rpmfi_internal.h"		/* rpmfiles stuff */
 #include "build/rpmbuild_internal.h"
 
 #include "debug.h"
@@ -103,6 +104,7 @@ Package newPackage(const char *name, rpmstrPool pool, Package *pkglist)
     p->fileFile = NULL;
     p->policyList = NULL;
     p->pool = rpmstrPoolLink(pool);
+    p->dpaths = NULL;
 
     if (name)
 	p->name = rpmstrPoolId(p->pool, name, 1);
@@ -135,19 +137,22 @@ static Package freePackage(Package pkg)
 
     pkg->header = headerFree(pkg->header);
     pkg->ds = rpmdsFree(pkg->ds);
-    pkg->requires = rpmdsFree(pkg->requires);
-    pkg->provides = rpmdsFree(pkg->provides);
-    pkg->conflicts = rpmdsFree(pkg->conflicts);
-    pkg->obsoletes = rpmdsFree(pkg->obsoletes);
-    pkg->triggers = rpmdsFree(pkg->triggers);
-    pkg->order = rpmdsFree(pkg->order);
+
+    for (int i=0; i<PACKAGE_NUM_DEPS; i++) {
+	pkg->dependencies[i] = rpmdsFree(pkg->dependencies[i]);
+    }
+
     pkg->fileList = argvFree(pkg->fileList);
     pkg->fileFile = argvFree(pkg->fileFile);
     pkg->policyList = argvFree(pkg->policyList);
-    pkg->cpioList = rpmfiFree(pkg->cpioList);
+    pkg->removePostfixes = argvFree(pkg->removePostfixes);
+    pkg->cpioList = rpmfilesFree(pkg->cpioList);
+    pkg->dpaths = argvFree(pkg->dpaths);
 
     pkg->icon = freeSources(pkg->icon);
     pkg->triggerFiles = freeTriggerFiles(pkg->triggerFiles);
+    pkg->fileTriggerFiles = freeTriggerFiles(pkg->fileTriggerFiles);
+    pkg->transFileTriggerFiles = freeTriggerFiles(pkg->transFileTriggerFiles);
     pkg->pool = rpmstrPoolFree(pkg->pool);
 
     free(pkg);
@@ -165,6 +170,21 @@ static Package freePackages(Package packages)
     }
     return NULL;
 }
+
+rpmds * packageDependencies(Package pkg, rpmTagVal tag)
+{
+    for (int i=0; i<PACKAGE_NUM_DEPS; i++) {
+	if (pkg->dependencies[i] == NULL) {
+	    return &pkg->dependencies[i];
+	}
+	rpmTagVal tagN = rpmdsTagN(pkg->dependencies[i]);
+	if (tagN == tag || tagN == 0) {
+	    return &pkg->dependencies[i];
+	}
+    }
+    return NULL;
+}
+
 
 rpmSpec newSpec(void)
 {
@@ -219,6 +239,8 @@ rpmSpec newSpec(void)
     {
     /* make sure patches and sources tables always exist */
     rpmlua lua = NULL; /* global state */
+    rpmluaDelVar(lua, "patches");
+    rpmluaDelVar(lua, "sources");
     rpmluaPushTable(lua, "patches");
     rpmluaPushTable(lua, "sources");
     rpmluaPop(lua);
@@ -352,6 +374,18 @@ rpmSpecPkg rpmSpecPkgIterNext(rpmSpecPkgIter iter)
 Header rpmSpecPkgHeader(rpmSpecPkg pkg)
 {
     return (pkg != NULL) ? pkg->header : NULL;
+}
+
+char* rpmSpecPkgGetSection(rpmSpecPkg pkg, int section)
+{
+    if (pkg) {
+        switch (section) {
+        case RPMBUILD_FILE_FILE: return argvJoin(pkg->fileFile, "");
+        case RPMBUILD_FILE_LIST: return argvJoin(pkg->fileList, "");
+        case RPMBUILD_POLICY:    return argvJoin(pkg->policyList, "");
+        }
+    }
+    return NULL;
 }
 
 rpmSpecSrcIter rpmSpecSrcIterInit(rpmSpec spec)

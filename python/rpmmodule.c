@@ -8,14 +8,17 @@
 #include <rpm/rpmmacro.h>
 
 #include "header-py.h"
+#include "rpmarchive-py.h"
 #include "rpmds-py.h"
 #include "rpmfd-py.h"
 #include "rpmfi-py.h"
+#include "rpmfiles-py.h"
 #include "rpmkeyring-py.h"
 #include "rpmmi-py.h"
 #include "rpmii-py.h"
 #include "rpmps-py.h"
 #include "rpmmacro-py.h"
+#include "rpmstrpool-py.h"
 #include "rpmtd-py.h"
 #include "rpmte-py.h"
 #include "rpmts-py.h"
@@ -131,43 +134,76 @@ static PyObject * reloadConfig(PyObject * self, PyObject * args, PyObject *kwds)
     return PyBool_FromLong(rc == 0);
 }
 
+static PyObject * setInterruptSafety(PyObject * self, PyObject * args, PyObject *kwds)
+{
+    int on = 1;
+    PyObject * obj;
+    char * kwlist[] = { "on", NULL };
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "|O", kwlist, &obj))
+	return NULL;
+    if (obj) {
+	on = PyObject_IsTrue(obj);
+    }
+    rpmsqSetInterruptSafety(on);
+    Py_RETURN_NONE;
+}
+
 static PyMethodDef rpmModuleMethods[] = {
     { "addMacro", (PyCFunction) rpmmacro_AddMacro, METH_VARARGS|METH_KEYWORDS,
-	NULL },
+      "addMacro(macro, value)\n"
+    },
     { "delMacro", (PyCFunction) rpmmacro_DelMacro, METH_VARARGS|METH_KEYWORDS,
-	NULL },
+      "delMacro(macro)\n"
+    },
     { "expandMacro", (PyCFunction) rpmmacro_ExpandMacro, METH_VARARGS|METH_KEYWORDS,
-	NULL },
+      "expandMacro(string, numeric=False) -- expands a string containing macros\n\n"
+      "Returns an int if numeric is True. 'Y' or 'y' returns 1,\n'N' or 'n' returns 0\nAn undefined macro returns 0."},
 
     { "archscore", (PyCFunction) archScore, METH_O,
-	NULL },
+      "archscore(archname) -- How well does an architecture fit on this machine\n\n"
+      "0 for non matching arch names\n1 for best arch\nhigher numbers for less fitting arches\n(e.g. 2 for \"i586\" on an i686 machine)" },
 
     { "signalCaught", (PyCFunction) signalCaught, METH_O, 
-	NULL },
+	"signalCaught(signo) -- Returns True if signal was caught." },
     { "checkSignals", (PyCFunction) checkSignals, METH_NOARGS,
-        NULL },
+      "checkSignals() -- Check for and exit on termination signals."},
 
     { "mergeHeaderListFromFD", (PyCFunction) rpmMergeHeadersFromFD, METH_VARARGS|METH_KEYWORDS,
 	NULL },
 
     { "log",		(PyCFunction) doLog, METH_VARARGS|METH_KEYWORDS,
-	NULL },
+	"log(level, msg) -- Write msg to log if level is selected to be logged.\n\n"
+    "level must be one of the RPMLOG_* constants."},
     { "setLogFile", (PyCFunction) setLogFile, METH_O,
-	NULL },
+	"setLogFile(file) -- set file to write log messages to or None." },
 
     { "versionCompare", (PyCFunction) versionCompare, METH_VARARGS|METH_KEYWORDS,
-	NULL },
+      "versionCompare(version0, version1) -- compares two version strings\n\n"
+      "Returns 1 if version0 > version1\n"
+      "Returns 0 if version0 == version1\n"
+      "Returns -1 if version0 < version1\n"},
     { "labelCompare", (PyCFunction) labelCompare, METH_VARARGS|METH_KEYWORDS,
-	NULL },
+      "labelCompare(version0, version1) -- as versionCompare()\n\n"
+      "but arguments are tuples of of strings for (epoch, version, release)"},
     { "setVerbosity", (PyCFunction) setVerbosity, METH_O,
-	NULL },
+      "setVerbosity(level) -- Set log level. See RPMLOG_* constants." },
     { "setEpochPromote", (PyCFunction) setEpochPromote, METH_O,
-	NULL },
+	"setEpochPromote(bool) -- Set if no epoch shall be treated as epoch 0" },
     { "setStats", (PyCFunction) setStats, METH_O,
-	NULL },
+      "setStats(bool) -- Set if timing stats are printed after a transaction."},
     { "reloadConfig", (PyCFunction) reloadConfig, METH_VARARGS|METH_KEYWORDS,
-	NULL },
+      "readloadConfig(path=None) -- Read config file.\n\nSet all macros and settings accordingly."},
 
+    { "setInterruptSafety", (PyCFunction) setInterruptSafety,
+      METH_VARARGS|METH_KEYWORDS,
+      "setInterruptSafety(on=True) -- Set if various signals get intercepted.\n\n"
+      "By default, librpm will trap various unix signals (like SIGINT and\n"
+      "SIGTERM), in order to avoid process exit while locks are held or\n"
+      "a transaction is being performed.\n\n"
+      "If this is not the desired behaviour it's recommended to call this\n"
+      "once only at process startup because currently signal handlers will\n"
+      "not be retroactively applied if a database is open."
+    },
     { NULL }
 } ;
 
@@ -179,8 +215,7 @@ static void rpm_exithook(void)
    rpmdbCheckTerminate(1);
 }
 
-static char rpm__doc__[] =
-"";
+static char rpm__doc__[] = "";
 
 /*
  * Add rpm tag dictionaries to the module
@@ -215,14 +250,18 @@ static void addRpmTags(PyObject *module)
 static int prepareInitModule(void)
 {
     if (PyType_Ready(&hdr_Type) < 0) return 0;
+    if (PyType_Ready(&rpmarchive_Type) < 0) return 0;
     if (PyType_Ready(&rpmds_Type) < 0) return 0;
     if (PyType_Ready(&rpmfd_Type) < 0) return 0;
     if (PyType_Ready(&rpmfi_Type) < 0) return 0;
+    if (PyType_Ready(&rpmfile_Type) < 0) return 0;
+    if (PyType_Ready(&rpmfiles_Type) < 0) return 0;
     if (PyType_Ready(&rpmKeyring_Type) < 0) return 0;
     if (PyType_Ready(&rpmmi_Type) < 0) return 0;
     if (PyType_Ready(&rpmii_Type) < 0) return 0;
     if (PyType_Ready(&rpmProblem_Type) < 0) return 0;
     if (PyType_Ready(&rpmPubkey_Type) < 0) return 0;
+    if (PyType_Ready(&rpmstrPool_Type) < 0) return 0;
 #if 0
     if (PyType_Ready(&rpmtd_Type) < 0) return 0;
 #endif
@@ -294,7 +333,9 @@ static int initModule(PyObject *m)
     if (Py_AtExit(rpm_exithook) == -1)
         return 0;
 
-    rpmReadConfigFiles(NULL, NULL);
+    /* failure to initialize rpm (crypto and all) is rather fatal too... */
+    if (rpmReadConfigFiles(NULL, NULL) == -1)
+	return 0;
 
     d = PyModule_GetDict(m);
 
@@ -305,6 +346,9 @@ static int initModule(PyObject *m)
     Py_INCREF(&hdr_Type);
     PyModule_AddObject(m, "hdr", (PyObject *) &hdr_Type);
 
+    Py_INCREF(&rpmarchive_Type);
+    PyModule_AddObject(m, "archive", (PyObject *) &rpmarchive_Type);
+
     Py_INCREF(&rpmds_Type);
     PyModule_AddObject(m, "ds", (PyObject *) &rpmds_Type);
 
@@ -313,6 +357,12 @@ static int initModule(PyObject *m)
 
     Py_INCREF(&rpmfi_Type);
     PyModule_AddObject(m, "fi", (PyObject *) &rpmfi_Type);
+
+    Py_INCREF(&rpmfile_Type);
+    PyModule_AddObject(m, "file", (PyObject *) &rpmfile_Type);
+
+    Py_INCREF(&rpmfiles_Type);
+    PyModule_AddObject(m, "files", (PyObject *) &rpmfiles_Type);
 
     Py_INCREF(&rpmKeyring_Type);
     PyModule_AddObject(m, "keyring", (PyObject *) &rpmKeyring_Type);
@@ -329,6 +379,9 @@ static int initModule(PyObject *m)
     Py_INCREF(&rpmPubkey_Type);
     PyModule_AddObject(m, "pubkey", (PyObject *) &rpmPubkey_Type);
 
+    Py_INCREF(&rpmstrPool_Type);
+    PyModule_AddObject(m, "strpool", (PyObject *) &rpmstrPool_Type);
+
 #if 0
     Py_INCREF(&rpmtd_Type);
     PyModule_AddObject(m, "td", (PyObject *) &rpmtd_Type);
@@ -343,6 +396,9 @@ static int initModule(PyObject *m)
     addRpmTags(m);
 
     PyModule_AddStringConstant(m, "__version__", RPMVERSION);
+
+    PyModule_AddObject(m, "header_magic",
+		PyBytes_FromStringAndSize((const char *)rpm_header_magic, 8));
 
 #define REGISTER_ENUM(val) PyModule_AddIntConstant(m, #val, val)
 
@@ -362,8 +418,10 @@ static int initModule(PyObject *m)
 
     REGISTER_ENUM(RPMFILE_CONFIG);
     REGISTER_ENUM(RPMFILE_DOC);
+    REGISTER_ENUM(RPMFILE_ICON);
     REGISTER_ENUM(RPMFILE_MISSINGOK);
     REGISTER_ENUM(RPMFILE_NOREPLACE);
+    REGISTER_ENUM(RPMFILE_SPECFILE);
     REGISTER_ENUM(RPMFILE_GHOST);
     REGISTER_ENUM(RPMFILE_LICENSE);
     REGISTER_ENUM(RPMFILE_README);
@@ -402,6 +460,7 @@ static int initModule(PyObject *m)
     REGISTER_ENUM(RPMTRANS_FLAG_NOTRIGGERS);
     REGISTER_ENUM(RPMTRANS_FLAG_NODOCS);
     REGISTER_ENUM(RPMTRANS_FLAG_ALLFILES);
+    REGISTER_ENUM(RPMTRANS_FLAG_NOPLUGINS);
     REGISTER_ENUM(RPMTRANS_FLAG_KEEPOBSOLETE);
     REGISTER_ENUM(RPMTRANS_FLAG_NOCONTEXTS);
     REGISTER_ENUM(RPMTRANS_FLAG_REPACKAGE);
@@ -414,6 +473,8 @@ static int initModule(PyObject *m)
     REGISTER_ENUM(RPMTRANS_FLAG_NOPREUN);
     REGISTER_ENUM(RPMTRANS_FLAG_NOPOSTUN);
     REGISTER_ENUM(RPMTRANS_FLAG_NOTRIGGERPOSTUN);
+    REGISTER_ENUM(RPMTRANS_FLAG_NOPRETRANS);
+    REGISTER_ENUM(RPMTRANS_FLAG_NOPOSTTRANS);
     REGISTER_ENUM(RPMTRANS_FLAG_NOMD5);
     REGISTER_ENUM(RPMTRANS_FLAG_NOFILEDIGEST);
     REGISTER_ENUM(RPMTRANS_FLAG_NOSUGGEST);

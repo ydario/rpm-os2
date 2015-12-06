@@ -47,17 +47,47 @@ struct specPkgObject_s {
     rpmSpecPkg pkg;
 };
 
+static PyObject *pkgGetSection(rpmSpecPkg pkg, int section)
+{
+    char *sect = rpmSpecPkgGetSection(pkg, section);
+    if (sect != NULL) {
+        PyObject *ps = PyBytes_FromString(sect);
+        free(sect);
+        if (ps != NULL)
+            return ps;
+    }
+    Py_RETURN_NONE;
+}
+
 static char specPkg_doc[] =
-"";
+"Package data parsed from spec file.";
 
 static PyObject * specpkg_get_header(specPkgObject *s, void *closure)
 {
     return makeHeader(rpmSpecPkgHeader(s->pkg));
 }
 
+static PyObject * specpkg_get_fileFile(specPkgObject *s, void *closure)
+{
+    return  pkgGetSection(s->pkg, RPMBUILD_FILE_FILE);
+}
+
+static PyObject * specpkg_get_fileList(specPkgObject *s, void *closure)
+{
+    return  pkgGetSection(s->pkg, RPMBUILD_FILE_LIST);
+}
+
+static PyObject * specpkg_get_policyList(specPkgObject *s, void *closure)
+{
+    return  pkgGetSection(s->pkg, RPMBUILD_POLICY);
+}
+
 static PyGetSetDef specpkg_getseters[] = {
-    { "header",	(getter) specpkg_get_header, NULL, NULL },
-    { NULL } 	/* sentinel */
+    { "header",     (getter) specpkg_get_header,     NULL, NULL },
+    { "fileFile",   (getter) specpkg_get_fileFile,   NULL, NULL },
+    { "fileList",   (getter) specpkg_get_fileList,   NULL, NULL },
+    { "policyList", (getter) specpkg_get_policyList, NULL, NULL },
+    { NULL }   /* sentinel */
 };
 
 PyTypeObject specPkg_Type = {
@@ -144,6 +174,11 @@ static PyObject * spec_get_install(specObject * s, void *closure)
     return getSection(s->spec, RPMBUILD_INSTALL);
 }
 
+static PyObject * spec_get_check(specObject * s, void *closure)
+{
+    return getSection(s->spec, RPMBUILD_CHECK);
+}
+
 static PyObject * spec_get_clean(specObject * s, void *closure) 
 {
     return getSection(s->spec, RPMBUILD_CLEAN);
@@ -217,6 +252,7 @@ static PyGetSetDef spec_getseters[] = {
     {"prep",   (getter) spec_get_prep, NULL, NULL },
     {"build",   (getter) spec_get_build, NULL, NULL },
     {"install",   (getter) spec_get_install, NULL, NULL },
+    {"check",	(getter) spec_get_check, NULL, NULL },
     {"clean",   (getter) spec_get_clean, NULL, NULL },
     {"packages", (getter) spec_get_packages, NULL, NULL },
     {"sourceHeader", (getter) spec_get_source_header, NULL, NULL },

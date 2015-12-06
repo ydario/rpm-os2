@@ -85,6 +85,24 @@ typedef rpmFlags rpmsenseFlags;
 #define	isInstallPreReq(_x)	((_x) & _INSTALL_ONLY_MASK)
 #define	isErasePreReq(_x)	((_x) & _ERASE_ONLY_MASK)
 
+
+
+/** \ingroup rpmds
+ * Return only those flags allowed for given type of dependencies
+ * @param tagN		type of dependency
+ * @param Flags		flags
+ * @return		flags filtered to allowed bits
+ */
+rpmsenseFlags rpmSanitizeDSFlags(rpmTagVal tagN, rpmsenseFlags Flags);
+
+/** \ingroup rpmds
+ * Convert a string to the sense flags
+ * @param str		the string
+ * @param len		length of the string
+ * @return		flags, zero for unknwon relations
+ */
+rpmsenseFlags rpmParseDSFlags(const char *str, size_t len);
+
 /** \ingroup rpmds
  * Reference a dependency set instance.
  * @param ds		dependency set
@@ -143,6 +161,14 @@ rpmds rpmdsSingle(rpmTagVal tagN, const char * N, const char * EVR, rpmsenseFlag
 rpmds rpmdsCurrent(rpmds ds);
 
 /** \ingroup rpmds
+ * Write content of the dependency set to the header
+ * @param ds		dependency set
+ * @param h             header
+ * @return		0 on success
+ */
+int rpmdsPutToHeader(rpmds ds, Header h);
+
+/** \ingroup rpmds
  * Return dependency set count.
  * @param ds		dependency set
  * @return		current count
@@ -172,6 +198,20 @@ int rpmdsSetIx(rpmds ds, int ix);
 const char * rpmdsDNEVR(const rpmds ds);
 
 /** \ingroup rpmds
+ * Return one char indicating the type of the dependency.
+ * @param ds		dependency set
+ * @return		character
+ */
+char rpmdsD(const rpmds ds);
+
+/** \ingroup rpmds
+ * Return matching tagN for one char dependency type description.
+ * @param deptype	character
+ * @return		type of dependency
+ */
+rpmTagVal rpmdsDToTagN(char deptype);
+
+/** \ingroup rpmds
  * Return current dependency name.
  * @param ds		dependency set
  * @return		current dependency name, NULL on invalid
@@ -186,6 +226,13 @@ const char * rpmdsN(const rpmds ds);
 const char * rpmdsEVR(const rpmds ds);
 
 /** \ingroup rpmds
+ * Return current dependency triggerindex.
+ * @param ds		dependency set
+ * @return		current dependency trigger index, 0 on invalid
+ */
+int rpmdsTi(const rpmds ds);
+
+/** \ingroup rpmds
  * Return current dependency flags.
  * @param ds		dependency set
  * @return		current dependency flags, 0 on invalid
@@ -198,6 +245,27 @@ rpmsenseFlags rpmdsFlags(const rpmds ds);
  * @return		current dependency type, 0 on invalid
  */
 rpmTagVal rpmdsTagN(const rpmds ds);
+
+/** \ingroup rpmds
+ * Return current dependency type.
+ * @param ds		dependency set
+ * @return		current dependency type version tag, 0 on invalid
+ */
+rpmTagVal rpmdsTagEVR(const rpmds ds);
+
+/** \ingroup rpmds
+ * Return current dependency type.
+ * @param ds		dependency set
+ * @return		current dependency type flags tag, 0 on invalid
+ */
+rpmTagVal rpmdsTagF(const rpmds ds);
+
+/** \ingroup rpmds
+ * Return current dependency type.
+ * @param ds		dependency set
+ * @return		current dependency type trigger index tag, 0 on invalid
+ */
+rpmTagVal rpmdsTagTi(const rpmds ds);
 
 /** \ingroup rpmds
  * Return dependency header instance, ie whether the dependency comes from 
@@ -371,6 +439,20 @@ rpmds rpmdsThisPool(rpmstrPool pool,
 rpmds rpmdsSinglePool(rpmstrPool pool, rpmTagVal tagN,
 		      const char * N, const char * EVR, rpmsenseFlags Flags);
 
+/** \ingroup rpmds
+ * Create, load and initialize a trigger dependency set of size 1.
+ * @param pool		string pool (or NULL for private pool)
+ * @param tagN		type of dependency
+ * @param N		name
+ * @param EVR		epoch:version-release
+ * @param Flags		comparison flags
+ * @param triggerIndex	trigger index
+ * @return		new dependency set
+ */
+rpmds rpmdsSinglePoolTix(rpmstrPool pool, rpmTagVal tagN,
+			    const char * N, const char * EVR, 
+			    rpmsenseFlags Flags, int triggerIndex);
+
 /**
  * Load rpmlib provides into a dependency set.
  * @param pool		shared string pool (or NULL for private pool)
@@ -379,6 +461,62 @@ rpmds rpmdsSinglePool(rpmstrPool pool, rpmTagVal tagN,
  * @return		0 on success
  */
 int rpmdsRpmlibPool(rpmstrPool pool, rpmds * dsp, const void * tblp);
+
+
+typedef enum rpmrichOp_e {
+    RPMRICHOP_SINGLE = 1,
+    RPMRICHOP_AND    = 2,
+    RPMRICHOP_OR     = 3,
+    RPMRICHOP_IF     = 4,
+    RPMRICHOP_ELSE   = 5
+} rpmrichOp;
+
+typedef enum rpmrichParseType_e {
+    RPMRICH_PARSE_SIMPLE = 1,	/* standard N <=> EVR dep */
+    RPMRICH_PARSE_ENTER  = 2,	/* entering sub-dependency */
+    RPMRICH_PARSE_LEAVE  = 3,	/* leaving sub-dependency */
+    RPMRICH_PARSE_OP     = 4	/* parsed a rich dependency op */
+} rpmrichParseType;
+
+typedef rpmRC (*rpmrichParseFunction) (void *cbdata, rpmrichParseType type,
+			 const char *n, int nl, const char *e, int el, rpmsenseFlags sense,
+			 rpmrichOp op, char **emsg);
+
+/**
+ * Parse a rich dependency string
+ * @param dstrp		pointer to sting, will be updated
+ * @param emsg		returns the error string, can be NULL
+ * @param cb		callback function
+ * @param cbdata	callback function data
+ * @return		RPMRC_OK on success
+ */
+rpmRC rpmrichParse(const char **dstrp, char **emsg, rpmrichParseFunction cb, void *cbdata);
+
+
+/**
+ * Return if current depenency is rich
+ * @param dep		the dependency
+ * @return		1 is dependency is a rich 0 otherwise
+ */
+int rpmdsIsRich(rpmds dep);
+
+/**
+ * Return a string representation of the rich dependency op
+ * @param op		the dependency op
+ * @return		constant string, do not free
+ */
+const char *rpmrichOpStr(rpmrichOp op);
+
+/**
+ * Parse a rich dependency string
+ * @param dep		the dependency
+ * @param leftds	returns the left dependency
+ * @param rightds	returns the right dependency
+ * @param op		returns the rich dep op
+ * @param emsg		returns the error string
+ * @return		RPMRC_OK on success
+ */
+rpmRC rpmdsParseRichDep(rpmds dep, rpmds *leftds, rpmds *rightds, rpmrichOp *op, char **emsg);
 
 #ifdef __cplusplus
 }

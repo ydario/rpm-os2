@@ -17,22 +17,21 @@ typedef struct rpmpsm_s * rpmpsm;
 /**
  * Execute a file actions for package
  * @param ts		transaction set
- * @param fi		transaction element file info
- * @param cfd
+ * @param te		transaction set element
+ * @param files		transaction element file info
  * @param psm		owner psm (or NULL)
- * @retval archiveSize	pointer to archive size
  * @retval failedFile	pointer to first file name that failed (malloced)
  * @return		0 on success
  */
 
-int rpmPackageFilesInstall(rpmts ts, rpmte te, rpmfi fi, FD_t cfd,
+int rpmPackageFilesInstall(rpmts ts, rpmte te, rpmfiles files,
               rpmpsm psm, char ** failedFile);
 
-int rpmPackageFilesRemove(rpmts ts, rpmte te, rpmfi fi,
+int rpmPackageFilesRemove(rpmts ts, rpmte te, rpmfiles files,
               rpmpsm psm, char ** failedFile);
 
-int rpmPackageFilesArchive(rpmfi fi, int isSrc, FD_t cfd,
-              rpm_loff_t * archiveSize, char ** failedFile);
+RPM_GNUC_INTERNAL
+int rpmfiArchiveReadToFilePsm(rpmfi fi, FD_t fd, int nodigest, rpmpsm psm);
 
 RPM_GNUC_INTERNAL
 void rpmpsmNotify(rpmpsm psm, int what, rpm_loff_t amount);

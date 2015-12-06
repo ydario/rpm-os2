@@ -134,6 +134,7 @@ static inline int addSingleRelation(rpmte p,
 /**
  * Record next "q <- p" relation (i.e. "p" requires "q").
  * @param ts		transaction set
+ * @param al		packages list
  * @param p		predecessor (i.e. package that "Requires: q")
  * @param requires	relation
  * @return		0 always
@@ -152,47 +153,35 @@ static inline int addRelation(rpmts ts,
     if (dsflags & (RPMSENSE_RPMLIB|RPMSENSE_CONFIG|RPMSENSE_PRETRANS|RPMSENSE_POSTTRANS))
 	return 0;
 
-    q = rpmalSatisfiesDepend(al, requires);
+    if (rpmdsIsRich(requires)) {
+	rpmds ds1, ds2;
+	rpmrichOp op;
+	if (rpmdsParseRichDep(requires, &ds1, &ds2, &op, NULL) == RPMRC_OK) {
+	    if (op != RPMRICHOP_ELSE)
+		addRelation(ts, al, p, ds1);
+	    if (op == RPMRICHOP_IF) {
+	      rpmds ds21, ds22;
+	      rpmrichOp op2;
+	      if (rpmdsParseRichDep(requires, &ds21, &ds22, &op2, NULL) == RPMRC_OK && op2 == RPMRICHOP_ELSE) {
+		addRelation(ts, al, p, ds22);
+	      }
+	      ds21 = rpmdsFree(ds21);
+	      ds22 = rpmdsFree(ds22);
+	    }
+	    if (op == RPMRICHOP_AND || op == RPMRICHOP_OR)
+		addRelation(ts, al, p, ds2);
+	    ds1 = rpmdsFree(ds1);
+	    ds2 = rpmdsFree(ds2);
+	}
+	return 0;
+    }
+    q = rpmalSatisfiesDepend(al, p, requires);
 
     /* Avoid deps outside this transaction and self dependencies */
     if (q == NULL || q == p)
 	return 0;
 
     addSingleRelation(p, q, dsflags);
-
-    return 0;
-}
-
-/*
- * Collections might have special ordering requirements. Notably
- * sepolicy collection requires having all the bits in the collection
- * close to each other. We try to ensure this by creating a strongly
- * connected component of such "grouped" collections, by introducing 
- * an artificial relation loop across the all its members.
- */
-static int addCollRelations(rpmal al, rpmte p, ARGV_t *seenColls)
-{
-    ARGV_const_t qcolls;
-
-    for (qcolls = rpmteCollections(p); qcolls && *qcolls; qcolls++) {
-	char * flags;
-	if (argvSearch(*seenColls, *qcolls, NULL))
-	    continue;
-
-	flags = rstrscat(NULL, "%{__collection_", *qcolls, "_flags}", NULL);
-	if (rpmExpandNumeric(flags) & 0x1) {
-	    rpmte *tes = rpmalAllInCollection(al, *qcolls);
-	    for (rpmte *te = tes; te && *te; te++) {
-		rpmte next = (*(te + 1) != NULL) ? *(te + 1) : *tes;
-		addSingleRelation(*te, next, RPMSENSE_ANY);
-	    }
-	    _free(tes);
-	}
-	free(flags);
-
-	argvAdd(seenColls, *qcolls);
-	argvSort(*seenColls, NULL);
-    }
 
     return 0;
 }
@@ -582,8 +571,6 @@ int rpmtsOrder(rpmts ts)
 	    /* Record next "q <- p" ordering request */
 	    (void) addRelation(ts, al, p, order);
 	}
-
-	addCollRelations(al, p, &seenColls);
     }
 
     seenColls = argvFree(seenColls);

@@ -30,6 +30,14 @@ typedef enum rpmdbOpX_e {
     RPMDB_OP_MAX		= 4
 } rpmdbOpX;
 
+typedef enum rpmdbCtrlOp_e {
+    RPMDB_CTRL_LOCK_RO         = 1,
+    RPMDB_CTRL_UNLOCK_RO       = 2,
+    RPMDB_CTRL_LOCK_RW         = 3,
+    RPMDB_CTRL_UNLOCK_RW       = 4,
+    RPMDB_CTRL_INDEXSYNC       = 5
+} rpmdbCtrlOp;
+
 /** \ingroup rpmdb
  * Retrieve operation timestamp from rpm database.
  * @param db            rpm database
@@ -79,7 +87,7 @@ unsigned int rpmdbGetIteratorFileNum(rpmdbMatchIterator mi);
  * @return		0 on success, 1 on failure (bad args)
  */
 int rpmdbAppendIterator(rpmdbMatchIterator mi,
-		const int * hdrNums, int nHdrNums);
+			const unsigned int * hdrNums, unsigned int nHdrNums);
 
 /** \ingroup rpmdb
  * Add pattern to iterator selector.
@@ -178,6 +186,16 @@ rpmdbIndexIterator rpmdbIndexIteratorInit(rpmdb db, rpmDbiTag rpmtag);
 int rpmdbIndexIteratorNext(rpmdbIndexIterator ii, const void ** key, size_t * keylen);
 
 /** \ingroup rpmdb
+ * Get the next key into a tag data container.
+ * Caller is responsible for calling rpmtdFreeData() to freeing the
+ * data returned in keytd once done with it.
+ * @param ii		index iterator
+ * @param keytd		tag container to store the key in
+ * @return 		0 on success; != 0 on error or end of index
+ */
+int rpmdbIndexIteratorNextTd(rpmdbIndexIterator ii, rpmtd keytd);
+
+/** \ingroup rpmdb
  * Get number of entries for current key
  * @param ii            index iterator
  * @return		number of entries. 0 on error.
@@ -207,6 +225,13 @@ unsigned int rpmdbIndexIteratorTagNum(rpmdbIndexIterator ii, unsigned int nr);
  */
 rpmdbIndexIterator rpmdbIndexIteratorFree(rpmdbIndexIterator ii);
 
+/** \ingroup rpmdb
+ * manipulate the rpm database
+ * @param db		rpm database
+ * @param ctrl		operation
+ * @return 		0 on success; != 0 on error
+ */
+int rpmdbCtrl(rpmdb db, rpmdbCtrlOp ctrl);
 
 #ifdef __cplusplus
 }

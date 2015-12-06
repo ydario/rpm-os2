@@ -5,6 +5,7 @@
 
 #include "header-py.h"
 #include "rpmfi-py.h"
+#include "rpmstrpool-py.h"
 
 struct rpmfiObject_s {
     PyObject_HEAD
@@ -54,6 +55,18 @@ rpmfi_FN(rpmfiObject * s, PyObject * unused)
 {
     return Py_BuildValue("s", rpmfiFN(s->fi));
 }
+
+static PyObject *
+rpmfi_FindFN(rpmfiObject * s, PyObject * args, PyObject * kwds)
+{
+    char * kwlist[] = {"filename", NULL};
+    PyObject * filename = NULL;
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "S:FindFN", kwlist,
+                                     &filename))
+        return NULL;
+    return Py_BuildValue("i", rpmfiFindFN(s->fi, PyBytes_AsString(filename)));
+}
+
 
 static PyObject *
 rpmfi_FFlags(rpmfiObject * s, PyObject * unused)
@@ -146,6 +159,25 @@ rpmfi_FClass(rpmfiObject * s, PyObject * unused)
 }
 
 static PyObject *
+rpmfi_FLinks(rpmfiObject * s, PyObject * unused)
+{
+    uint32_t nlinks;
+    const int * files;
+    PyObject * result;
+
+    nlinks = rpmfiFLinks(s->fi, &files);
+    if (nlinks==1) {
+	return Py_BuildValue("(i)", rpmfiFX(s->fi));
+    }
+
+    result = PyTuple_New(nlinks);
+    for (int i=0; i<nlinks; i++) {
+	PyTuple_SET_ITEM(result,  i, PyInt_FromLong(files[i]));
+    }
+    return result;
+}
+
+static PyObject *
 rpmfi_iternext(rpmfiObject * s)
 {
     PyObject * result = NULL;
@@ -206,47 +238,51 @@ rpmfi_iternext(rpmfiObject * s)
 
 static struct PyMethodDef rpmfi_methods[] = {
  {"FC",		(PyCFunction)rpmfi_FC,		METH_NOARGS,
-	NULL},
+  "fi.FC() -- Return number of files entries."},
  {"FX",		(PyCFunction)rpmfi_FX,		METH_NOARGS,
-	NULL},
+  "fi.FX() -- Return current position of the iterator."},
  {"DC",		(PyCFunction)rpmfi_DC,		METH_NOARGS,
-	NULL},
+  "fi.DC() --Return number of directory entries."},
  {"DX",		(PyCFunction)rpmfi_DX,		METH_NOARGS,
-	NULL},
+  "fi.DX() -- Return number of directory entry matching current file."},
  {"BN",		(PyCFunction)rpmfi_BN,		METH_NOARGS,
-	NULL},
+  "fi.BN() -- Return base name of current file."},
  {"DN",		(PyCFunction)rpmfi_DN,		METH_NOARGS,
-	NULL},
+  "fi.DN() -- Return directory name of the current file."},
  {"FN",		(PyCFunction)rpmfi_FN,		METH_NOARGS,
-	NULL},
+  "fi.FN() -- Return the name/path of the current file."},
+ {"FindFN",	(PyCFunction)rpmfi_FindFN,	METH_VARARGS|METH_KEYWORDS,
+  "fi.FindFN(pathname) -- Return entry number of given pathname.\n\nReturn -1 if file is not found.\nLeading '.' in the given name is stripped before the search."},
  {"FFlags",	(PyCFunction)rpmfi_FFlags,	METH_NOARGS,
-	NULL},
+  "fi.FFlags() -- Return the flags of the current file."},
  {"VFlags",	(PyCFunction)rpmfi_VFlags,	METH_NOARGS,
-	NULL},
+  "fi.VFlags() -- Return the verify flags of the current file.\n\nSee RPMVERIFY_* (in rpmvf.h)"},
  {"FMode",	(PyCFunction)rpmfi_FMode,	METH_NOARGS,
-	NULL},
+  "fi.FMode() -- Return the mode flags of the current file."},
  {"FState",	(PyCFunction)rpmfi_FState,	METH_NOARGS,
-	NULL},
+  "fi.FState() -- Return the file state of the current file."},
  {"MD5",	(PyCFunction)rpmfi_Digest,	METH_NOARGS,
-	NULL},
+  "fi.() -- Return the checksum of the current file.\n\nDEPRECATED! Use fi.Digest instead!"},
  {"Digest",	(PyCFunction)rpmfi_Digest,	METH_NOARGS,
-	NULL},
+  "fi.() -- Return the checksum of the current file."},
  {"FLink",	(PyCFunction)rpmfi_FLink,	METH_NOARGS,
-	NULL},
+  "fi.() -- Return the link target of the current file.\n\nFor soft links only."},
  {"FSize",	(PyCFunction)rpmfi_FSize,	METH_NOARGS,
-	NULL},
+  "fi.() -- Return the size of the current file."},
  {"FRdev",	(PyCFunction)rpmfi_FRdev,	METH_NOARGS,
-	NULL},
+  "fi.() -- Return the device number of the current file.\n\nFor device files only."},
  {"FMtime",	(PyCFunction)rpmfi_FMtime,	METH_NOARGS,
-	NULL},
+  "fi.() -- Return the modification time of the current file."},
  {"FUser",	(PyCFunction)rpmfi_FUser,	METH_NOARGS,
-	NULL},
+  "fi.() -- Return the user name owning the current file."},
  {"FGroup",	(PyCFunction)rpmfi_FGroup,	METH_NOARGS,
-	NULL},
+  "fi.() -- Return the group name of the current file."},
  {"FColor",	(PyCFunction)rpmfi_FColor,	METH_NOARGS,
-	NULL},
+  "fi.() -- Return the color of the current file.\n\n2 for 64 bit binaries\n1 for 32 bit binaries\n0 for everything else"},
  {"FClass",	(PyCFunction)rpmfi_FClass,	METH_NOARGS,
-	NULL},
+  "fi.() -- Return the classification of the current file."},
+ {"FLinks",	(PyCFunction)rpmfi_FLinks,	METH_NOARGS,
+  "fi.() -- Return the number of hardlinks pointing to of the\ncurrent file."},
  {NULL,		NULL}		/* sentinel */
 };
 
@@ -299,13 +335,15 @@ static PyObject * rpmfi_new(PyTypeObject * subtype, PyObject *args, PyObject *kw
     rpmfi fi = NULL;
     rpmTagVal tagN = RPMTAG_BASENAMES;
     int flags = 0;
-    char * kwlist[] = {"header", "tag", "flags", NULL};
+    rpmstrPool pool = NULL;
+    char * kwlist[] = {"header", "tag", "flags", "pool", NULL};
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "O&|Oi:rpmfi_init", kwlist,
-				hdrFromPyObject, &h, &to, &flags))
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "O&|OiO&:rpmfi_init", kwlist,
+				hdrFromPyObject, &h, &to, &flags,
+				poolFromPyObject, &pool))
 	return NULL;
 
-    fi = rpmfiNew(NULL, h, tagN, flags);
+    fi = rpmfiNewPool(pool, h, tagN, flags);
 
     if (fi == NULL) {
 	PyErr_SetString(PyExc_ValueError, "invalid file data in header");
@@ -316,7 +354,11 @@ static PyObject * rpmfi_new(PyTypeObject * subtype, PyObject *args, PyObject *kw
 }
 
 static char rpmfi_doc[] =
-"";
+"File iterator\n\n"
+"DEPRECATED! This old API mixes storing and iterating over the meta data\n"
+"of the files of a package. Use rpm.files and rpm.file data types as a\n"
+"much cleaner API.\n\n"
+"Iteration returns a tuple of\n(FN, FSize, FMode, FMtime, FFlags, FRdev, FInode, FNlink, FState,\n VFlags, FUser, FGroup, Digest)";
 
 PyTypeObject rpmfi_Type = {
 	PyVarObject_HEAD_INIT(&PyType_Type, 0)

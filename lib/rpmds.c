@@ -32,19 +32,20 @@ struct rpmds_s {
     int32_t Count;		/*!< No. of elements */
     unsigned int instance;	/*!< From rpmdb instance? */
     int i;			/*!< Element index. */
-    unsigned l;			/*!< Low element (bsearch). */
-    unsigned u;			/*!< High element (bsearch). */
     int nopromote;		/*!< Don't promote Epoch: in rpmdsCompare()? */
     int nrefs;			/*!< Reference count. */
+    int *ti;			/*!< Trigger index. */
 };
 
 static int dsType(rpmTagVal tag, 
-		  const char ** Type, rpmTagVal * tagEVR, rpmTagVal * tagF)
+		  const char ** Type, rpmTagVal * tagEVR, rpmTagVal * tagF,
+		  rpmTagVal * tagTi)
 {
     int rc = 0;
     const char *t = NULL;
     rpmTagVal evr = RPMTAG_NOT_FOUND;
     rpmTagVal f = RPMTAG_NOT_FOUND;
+    rpmTagVal ti = RPMTAG_NOT_FOUND;
 
     if (tag == RPMTAG_PROVIDENAME) {
 	t = "Provides";
@@ -54,6 +55,22 @@ static int dsType(rpmTagVal tag,
 	t = "Requires";
 	evr = RPMTAG_REQUIREVERSION;
 	f = RPMTAG_REQUIREFLAGS;
+    } else if (tag == RPMTAG_SUPPLEMENTNAME) {
+	t = "Supplements";
+	evr = RPMTAG_SUPPLEMENTVERSION;
+	f = RPMTAG_SUPPLEMENTFLAGS;
+    } else if (tag == RPMTAG_ENHANCENAME) {
+	t = "Enhances";
+	evr = RPMTAG_ENHANCEVERSION;
+	f = RPMTAG_ENHANCEFLAGS;
+    } else if (tag == RPMTAG_RECOMMENDNAME) {
+	t = "Recommends";
+	evr = RPMTAG_RECOMMENDVERSION;
+	f = RPMTAG_RECOMMENDFLAGS;
+    } else if (tag == RPMTAG_SUGGESTNAME) {
+	t = "Suggests";
+	evr = RPMTAG_SUGGESTVERSION;
+	f = RPMTAG_SUGGESTFLAGS;
     } else if (tag == RPMTAG_CONFLICTNAME) {
 	t = "Conflicts";
 	evr = RPMTAG_CONFLICTVERSION;
@@ -70,14 +87,102 @@ static int dsType(rpmTagVal tag,
 	t = "Trigger";
 	evr = RPMTAG_TRIGGERVERSION;
 	f = RPMTAG_TRIGGERFLAGS;
+	ti = RPMTAG_TRIGGERINDEX;
+    } else if (tag == RPMTAG_OLDSUGGESTSNAME) {
+	t = "Oldsuggests";
+	evr = RPMTAG_OLDSUGGESTSVERSION;
+	f = RPMTAG_OLDSUGGESTSFLAGS;
+    } else if (tag == RPMTAG_OLDENHANCESNAME) {
+	t = "Oldenhances";
+	evr = RPMTAG_OLDENHANCESVERSION;
+	f = RPMTAG_OLDENHANCESFLAGS;
+    } else if (tag == RPMTAG_FILETRIGGERNAME) {
+	t = "FileTrigger";
+	evr = RPMTAG_FILETRIGGERVERSION;
+	f = RPMTAG_FILETRIGGERFLAGS;
+	ti = RPMTAG_FILETRIGGERINDEX;
+    } else if (tag == RPMTAG_TRANSFILETRIGGERNAME) {
+	t = "TransFileTrigger";
+	evr = RPMTAG_TRANSFILETRIGGERVERSION;
+	f = RPMTAG_TRANSFILETRIGGERFLAGS;
+	ti = RPMTAG_TRANSFILETRIGGERINDEX;
     } else {
 	rc = 1;
     } 
     if (Type) *Type = t;
     if (tagEVR) *tagEVR = evr;
     if (tagF) *tagF = f;
+    if (tagTi) *tagTi = ti;
     return rc;
 }    
+
+static char tagNToChar(rpmTagVal tagN)
+{
+    switch (tagN) {
+    default:
+	return 'R';
+	break;
+    case RPMTAG_REQUIRENAME:
+	return 'R';
+	break;
+    case RPMTAG_PROVIDENAME:
+	return 'P';
+	break;
+    case RPMTAG_RECOMMENDNAME:
+	return 'r';
+	break;
+    case RPMTAG_SUGGESTNAME:
+	return 's';
+	break;
+    case RPMTAG_SUPPLEMENTNAME:
+	return 'S';
+	break;
+    case RPMTAG_ENHANCENAME:
+	return 'e';
+	break;
+    case RPMTAG_CONFLICTNAME:
+	return 'C';
+	break;
+    case RPMTAG_OBSOLETENAME:
+	return 'O';
+	break;
+    }
+}
+
+rpmTagVal rpmdsDToTagN(char deptype)
+{
+    rpmTagVal tagN = RPMTAG_REQUIRENAME;
+    switch (deptype) {
+    default:
+	tagN = RPMTAG_NOT_FOUND;
+	break;
+    case 'P':
+	tagN = RPMTAG_PROVIDENAME;
+	break;
+    case 'R':
+	tagN = RPMTAG_REQUIRENAME;
+	break;
+    case 'r':
+	tagN = RPMTAG_RECOMMENDNAME;
+	break;
+    case 's':
+	tagN = RPMTAG_SUGGESTNAME;
+	break;
+    case 'S':
+	tagN = RPMTAG_SUPPLEMENTNAME;
+	break;
+    case 'e':
+	tagN = RPMTAG_ENHANCENAME;
+	break;
+    case 'C':
+	tagN = RPMTAG_CONFLICTNAME;
+	break;
+    case 'O':
+	tagN = RPMTAG_OBSOLETENAME;
+	break;
+    }
+    return tagN;
+}
 
 rpmsid rpmdsNIdIndex(rpmds ds, int i)
 {
@@ -118,6 +223,14 @@ rpmsenseFlags rpmdsFlagsIndex(rpmds ds, int i)
     return Flags;
 }
 
+int rpmdsTiIndex(rpmds ds, int i)
+{
+    int ti = -1;
+    if (ds != NULL && i >= 0 && i < ds->Count && ds->ti != NULL)
+	ti = ds->ti[i];
+    return ti;
+}
+
 rpm_color_t rpmdsColorIndex(rpmds ds, int i)
 {
     rpm_color_t Color = 0;
@@ -141,7 +254,7 @@ rpmds rpmdsLink(rpmds ds)
 
 rpmds rpmdsFree(rpmds ds)
 {
-    rpmTagVal tagEVR, tagF;
+    rpmTagVal tagEVR, tagF, tagTi;
 
     if (ds == NULL)
 	return NULL;
@@ -149,13 +262,14 @@ rpmds rpmdsFree(rpmds ds)
     if (ds->nrefs > 1)
 	return rpmdsUnlink(ds);
 
-    if (dsType(ds->tagN, NULL, &tagEVR, &tagF))
+    if (dsType(ds->tagN, NULL, &tagEVR, &tagF, &tagTi))
 	return NULL;
 
     if (ds->Count > 0) {
 	ds->N = _free(ds->N);
 	ds->EVR = _free(ds->EVR);
 	ds->Flags = _free(ds->Flags);
+	ds->ti = _free(ds->ti);
     }
 
     ds->pool = rpmstrPoolFree(ds->pool);
@@ -187,15 +301,15 @@ static rpmds rpmdsCreate(rpmstrPool pool,
 
 rpmds rpmdsNewPool(rpmstrPool pool, Header h, rpmTagVal tagN, int flags)
 {
-    rpmTagVal tagEVR, tagF;
+    rpmTagVal tagEVR, tagF, tagTi;
     rpmds ds = NULL;
     const char * Type;
     struct rpmtd_s names;
-    if (dsType(tagN, &Type, &tagEVR, &tagF))
+    if (dsType(tagN, &Type, &tagEVR, &tagF, &tagTi))
 	goto exit;
 
     if (headerGet(h, tagN, &names, HEADERGET_MINMEM)) {
-	struct rpmtd_s evr, flags; 
+	struct rpmtd_s evr, flags, tindices;
 
 	ds = rpmdsCreate(pool, tagN, Type,
 			 rpmtdCount(&names), headerGetInstance(h));
@@ -205,6 +319,10 @@ rpmds rpmdsNewPool(rpmstrPool pool, Header h, rpmTagVal tagN, int flags)
 	ds->EVR = rpmtdToPool(&evr, ds->pool);
 	headerGet(h, tagF, &flags, HEADERGET_ALLOC);
 	ds->Flags = flags.data;
+	if (tagTi != RPMTAG_NOT_FOUND) {
+	    headerGet(h, tagTi, &tindices, HEADERGET_ALLOC);
+	    ds->ti = tindices.data;
+	}
 	/* ensure rpmlib() requires always have RPMSENSE_RPMLIB flag set */
 	if (tagN == RPMTAG_REQUIRENAME && ds->Flags) {
 	    for (int i = 0; i < ds->Count; i++) {
@@ -281,12 +399,14 @@ char * rpmdsNewDNEVR(const char * dspfx, const rpmds ds)
 
 static rpmds singleDSPool(rpmstrPool pool, rpmTagVal tagN,
 			  rpmsid N, rpmsid EVR, rpmsenseFlags Flags,
-			  unsigned int instance, rpm_color_t Color)
+			  unsigned int instance, rpm_color_t Color,
+			  int triggerIndex)
 {
     rpmds ds = NULL;
     const char * Type;
+    rpmTagVal tagTi;
 
-    if (dsType(tagN, &Type, NULL, NULL))
+    if (dsType(tagN, &Type, NULL, NULL, &tagTi))
 	goto exit;
 
     ds = rpmdsCreate(pool, tagN, Type, 1, instance);
@@ -297,6 +417,10 @@ static rpmds singleDSPool(rpmstrPool pool, rpmTagVal tagN,
     ds->EVR[0] = EVR;
     ds->Flags = xmalloc(sizeof(*ds->Flags));
     ds->Flags[0] = Flags;
+    if (tagTi != RPMTAG_NOT_FOUND) {
+	ds->ti = xmalloc(sizeof(*ds->ti));
+	ds->ti[0] = triggerIndex;
+    }
     ds->i = 0;
     if (Color)
 	rpmdsSetColor(ds, Color);
@@ -308,9 +432,10 @@ exit:
 static rpmds singleDS(rpmstrPool pool, rpmTagVal tagN,
 		      const char * N, const char * EVR,
 		      rpmsenseFlags Flags, unsigned int instance,
-		      rpm_color_t Color)
+		      rpm_color_t Color, int triggerIndex)
 {
-    rpmds ds = singleDSPool(pool, tagN, 0, 0, Flags, instance, Color);
+    rpmds ds = singleDSPool(pool, tagN, 0, 0, Flags, instance, Color,
+			    triggerIndex);
     if (ds) {
 	/* now that we have a pool, we can insert our N & EVR strings */
 	ds->N[0] = rpmstrPoolId(ds->pool, N ? N : "", 1);
@@ -327,7 +452,7 @@ rpmds rpmdsThisPool(rpmstrPool pool,
 {
     char *evr = headerGetAsString(h, RPMTAG_EVR);
     rpmds ds = singleDS(pool, tagN, headerGetString(h, RPMTAG_NAME),
-			evr, Flags, headerGetInstance(h), 0);
+			evr, Flags, headerGetInstance(h), 0, 0);
     free(evr);
     return ds;
 }
@@ -340,7 +465,14 @@ rpmds rpmdsThis(Header h, rpmTagVal tagN, rpmsenseFlags Flags)
 rpmds rpmdsSinglePool(rpmstrPool pool,rpmTagVal tagN,
 		      const char * N, const char * EVR, rpmsenseFlags Flags)
 {
-    return singleDS(pool, tagN, N, EVR, Flags, 0, 0);
+    return singleDS(pool, tagN, N, EVR, Flags, 0, 0, 0);
+}
+
+rpmds rpmdsSinglePoolTix(rpmstrPool pool,rpmTagVal tagN,
+			    const char * N, const char * EVR,
+			    rpmsenseFlags Flags, int triggerIndex)
+{
+    return singleDS(pool, tagN, N, EVR, Flags, 0, 0, triggerIndex);
 }
 
 rpmds rpmdsSingle(rpmTagVal tagN, const char * N, const char * EVR, rpmsenseFlags Flags)
@@ -351,12 +483,76 @@ rpmds rpmdsSingle(rpmTagVal tagN, const char * N, const char * EVR, rpmsenseFlag
 rpmds rpmdsCurrent(rpmds ds)
 {
     rpmds cds = NULL;
+    int ti = -1;
     if (ds != NULL && ds->i >= 0 && ds->i < ds->Count) {
+	if (ds->ti)
+	    ti = ds->ti[ds->i];
 	/* Using parent's pool so we can just use the same id's */
 	cds = singleDSPool(ds->pool, ds->tagN, ds->N[ds->i], ds->EVR[ds->i],
-			   rpmdsFlags(ds), ds->instance, rpmdsColor(ds));
+			   rpmdsFlags(ds), ds->instance, rpmdsColor(ds), ti);
     }
     return cds;
+}
+
+rpmds rpmdsFilterTi(rpmds ds, int ti)
+{
+    int i, i2, tiCount = 0;
+    rpmds fds;
+
+    if (ds == NULL || !ds->ti || !ds->Count)
+	return NULL;
+
+    for (i = 0; i < ds->Count; i++) {
+	if (ds->ti[i] == ti)
+	    tiCount++;
+    }
+
+    if (!tiCount)
+	return NULL;
+
+    fds = rpmdsCreate(ds->pool, ds->tagN, ds->Type, tiCount, ds->instance);
+
+    fds->N = xmalloc(tiCount * sizeof(*fds->N));
+    fds->EVR = xmalloc(tiCount * sizeof(*fds->EVR));
+    fds->Flags = xmalloc(tiCount * sizeof(*fds->Flags));
+    fds->ti = xmalloc(tiCount * sizeof(*fds->ti));
+    fds->i = -1;
+
+    i2 = 0;
+    for (i = 0; i < ds->Count; i++) {
+	if (ds->ti[i] == ti) {
+	    fds->N[i2] = ds->N[i];
+	    fds->EVR[i2] = ds->EVR[i];
+	    fds->Flags[i2] = ds->Flags[i];
+	    fds->ti[i2] = ds->ti[i];
+	    i2++;
+	}
+    }
+
+    return fds;
+}
+
+int rpmdsPutToHeader(rpmds ds, Header h)
+{
+    rpmTagVal tagN = rpmdsTagN(ds);
+    rpmTagVal tagEVR = rpmdsTagEVR(ds);
+    rpmTagVal tagF = rpmdsTagF(ds);
+    rpmTagVal tagTi = rpmdsTagTi(ds);
+    if (!tagN)
+	return -1;
+
+    rpmds pi = rpmdsInit(ds);
+    while (rpmdsNext(pi) >= 0) {
+	rpmsenseFlags flags = rpmdsFlags(pi);
+	uint32_t index = rpmdsTi(pi);
+	headerPutString(h, tagN, rpmdsN(pi));
+	headerPutString(h, tagEVR, rpmdsEVR(pi));
+	headerPutUint32(h, tagF, &flags, 1);
+	if (tagTi != RPMTAG_NOT_FOUND) {
+	    headerPutUint32(h, tagTi, &index, 1);
+	}
+    }
+    return 0;
 }
 
 int rpmdsCount(const rpmds ds)
@@ -381,13 +577,22 @@ int rpmdsSetIx(rpmds ds, int ix)
     return i;
 }
 
+char rpmdsD(const rpmds ds)
+{
+    if (ds != NULL) {
+	return tagNToChar(ds->tagN);
+    } else {
+	return '\0';
+    }
+}
+
 const char * rpmdsDNEVR(const rpmds ds)
 {
     const char * DNEVR = NULL;
 
     if (ds != NULL && ds->i >= 0 && ds->i < ds->Count) {
 	if (ds->DNEVR == NULL) {
-	    char t[2] = { ds->Type[0], '\0' };
+	    char t[2] = { tagNToChar(ds->tagN), '\0' };
 	    ds->DNEVR = rpmdsNewDNEVR(t, ds);
 	}
 	DNEVR = ds->DNEVR;
@@ -420,6 +625,11 @@ rpmsenseFlags rpmdsFlags(const rpmds ds)
     return (ds != NULL) ? rpmdsFlagsIndex(ds, ds->i) : 0;
 }
 
+int rpmdsTi(const rpmds ds)
+{
+    return (ds != NULL) ? rpmdsTiIndex(ds, ds->i) : 0;
+}
+
 rpmTagVal rpmdsTagN(const rpmds ds)
 {
     rpmTagVal tagN = RPMTAG_NOT_FOUND;
@@ -427,6 +637,33 @@ rpmTagVal rpmdsTagN(const rpmds ds)
     if (ds != NULL)
 	tagN = ds->tagN;
     return tagN;
+}
+
+rpmTagVal rpmdsTagEVR(const rpmds ds)
+{
+    rpmTagVal tagEVR = RPMTAG_NOT_FOUND;
+
+    if (ds != NULL)
+	dsType(ds->tagN, NULL, &tagEVR, NULL, NULL);
+    return tagEVR;
+}
+
+rpmTagVal rpmdsTagF(const rpmds ds)
+{
+    rpmTagVal tagF = RPMTAG_NOT_FOUND;
+
+    if (ds != NULL)
+	dsType(ds->tagN, NULL, NULL, &tagF, NULL);
+    return tagF;
+}
+
+rpmTagVal rpmdsTagTi(const rpmds ds)
+{
+    rpmTagVal tagTi = RPMTAG_NOT_FOUND;
+
+    if (ds != NULL)
+	dsType(ds->tagN, NULL, NULL, NULL, &tagTi);
+    return tagTi;
 }
 
 unsigned int rpmdsInstance(rpmds ds)
@@ -525,8 +762,6 @@ static rpmds rpmdsDup(const rpmds ods)
     size_t nb;
     
     ds->i = ods->i;
-    ds->l = ods->l;
-    ds->u = ods->u;
     ds->nopromote = ods->nopromote;
 
     nb = ds->Count * sizeof(*ds->N);
@@ -543,29 +778,36 @@ static rpmds rpmdsDup(const rpmds ods)
 	ds->Flags = memcpy(xmalloc(nb), ods->Flags, nb);
     }
 
+    if (ods->ti) {
+	nb = ds->Count * sizeof(*ds->ti);
+	ds->ti = memcpy(xmalloc(nb), ods->ti, nb);
+    }
+
     return ds;
 
 }
 
-int rpmdsFind(rpmds ds, const rpmds ods)
+static int doFind(rpmds ds, const rpmds ods, unsigned int *he)
 {
     int comparison;
     const char *N, *ON = rpmdsN(ods);
     const char *EVR, *OEVR = rpmdsEVR(ods);
     rpmsenseFlags Flags, OFlags = rpmdsFlags(ods);
+    int index, Oindex = rpmdsTi(ods);
     int rc = -1; /* assume not found */
 
     if (ds == NULL || ods == NULL)
 	return -1;
 
-    ds->l = 0;
-    ds->u = ds->Count;
-    while (ds->l < ds->u) {
-	ds->i = (ds->l + ds->u) / 2;
+    unsigned int l = 0;
+    unsigned int u = ds->Count;
+    while (l < u) {
+	ds->i = (l + u) / 2;
 
 	N = rpmdsN(ds);
 	EVR = rpmdsEVR(ds);
 	Flags = rpmdsFlags(ds);
+	index = rpmdsTi(ds);
 
 	comparison = strcmp(ON, N);
 
@@ -574,17 +816,26 @@ int rpmdsFind(rpmds ds, const rpmds ods)
 	    comparison = strcmp(OEVR, EVR);
 	if (comparison == 0)
 	    comparison = OFlags - Flags;
+	if (comparison == 0)
+	    comparison = Oindex - index;
 
 	if (comparison < 0)
-	    ds->u = ds->i;
+	    u = ds->i;
 	else if (comparison > 0)
-	    ds->l = ds->i + 1;
+	    l = ds->i + 1;
 	else {
 	    rc = ds->i;
 	    break;
 	}
     }
+    if (he)
+	*he = u;
     return rc;
+}
+
+int rpmdsFind(rpmds ds, const rpmds ods)
+{
+    return doFind(ds, ods, NULL);
 }
 
 int rpmdsMerge(rpmds * dsp, rpmds ods)
@@ -614,6 +865,12 @@ int rpmdsMerge(rpmds * dsp, rpmds ods)
 	ds->EVR = xcalloc(ds->Count, sizeof(*ds->EVR));
     if (ds->Flags == NULL)
 	ds->Flags = xcalloc(ds->Count, sizeof(*ds->Flags));
+    if (ds->ti == NULL && ods->ti) {
+	int i;
+	ds->ti = xcalloc(ds->Count, sizeof(*ds->ti));
+	for (i = 0; i < ds->Count; i++)
+	    ds->ti[i] = -1;
+    }
 
     /*
      * Add new entries.
@@ -622,10 +879,11 @@ int rpmdsMerge(rpmds * dsp, rpmds ods)
     ods = rpmdsInit(ods);
     while (rpmdsNext(ods) >= 0) {
 	const char *OEVR;
+	unsigned int u;
 	/*
 	 * If this entry is already present, don't bother.
 	 */
-	if (rpmdsFind(ds, ods) >= 0)
+	if (doFind(ds, ods, &u) >= 0)
 	    continue;
 
 	/*
@@ -633,26 +891,35 @@ int rpmdsMerge(rpmds * dsp, rpmds ods)
 	 */
 	rpmstrPoolUnfreeze(ds->pool);
 	ds->N = xrealloc(ds->N, (ds->Count+1) * sizeof(*ds->N));
-	if (ds->u < ds->Count) {
-	    memmove(ds->N + ds->u + 1, ds->N + ds->u,
-		    (ds->Count - ds->u) * sizeof(*ds->N));
+	if (u < ds->Count) {
+	    memmove(ds->N + u + 1, ds->N + u,
+		    (ds->Count - u) * sizeof(*ds->N));
 	}
-	ds->N[ds->u] = rpmstrPoolId(ds->pool, rpmdsN(ods), 1);
+	ds->N[u] = rpmstrPoolId(ds->pool, rpmdsN(ods), 1);
 
 	ds->EVR = xrealloc(ds->EVR, (ds->Count+1) * sizeof(*ds->EVR));
-	if (ds->u < ds->Count) {
-	    memmove(ds->EVR + ds->u + 1, ds->EVR + ds->u,
-		    (ds->Count - ds->u) * sizeof(*ds->EVR));
+	if (u < ds->Count) {
+	    memmove(ds->EVR + u + 1, ds->EVR + u,
+		    (ds->Count - u) * sizeof(*ds->EVR));
 	}
 	OEVR = rpmdsEVR(ods);
-	ds->EVR[ds->u] = rpmstrPoolId(ds->pool, OEVR ? OEVR : "", 1);
+	ds->EVR[u] = rpmstrPoolId(ds->pool, OEVR ? OEVR : "", 1);
 
 	ds->Flags = xrealloc(ds->Flags, (ds->Count+1) * sizeof(*ds->Flags));
-	if (ds->u < ds->Count) {
-	    memmove(ds->Flags + ds->u + 1, ds->Flags + ds->u,
-		    (ds->Count - ds->u) * sizeof(*ds->Flags));
+	if (u < ds->Count) {
+	    memmove(ds->Flags + u + 1, ds->Flags + u,
+		    (ds->Count - u) * sizeof(*ds->Flags));
 	}
-	ds->Flags[ds->u] = rpmdsFlags(ods);
+	ds->Flags[u] = rpmdsFlags(ods);
+
+	if (ds->ti || ods->ti) {
+	    ds->ti = xrealloc(ds->ti, (ds->Count+1) * sizeof(*ds->ti));
+	    if (u < ds->Count) {
+		memmove(ds->ti + u + 1, ds->ti + u,
+			(ds->Count - u) * sizeof(*ds->ti));
+	    }
+	    ds->ti[u] = rpmdsTi(ods);
+	}
 
 	ds->i = ds->Count;
 	ds->Count++;
@@ -987,6 +1254,12 @@ static const struct rpmlibProvides_s rpmlibProvides[] = {
     { "rpmlib(TildeInVersions)",    "4.10.0-1",
 	(		RPMSENSE_EQUAL),
     N_("dependency comparison supports versions with tilde.") },
+    { "rpmlib(LargeFiles)", 	"4.12.0-1",
+	(		RPMSENSE_EQUAL),
+    N_("support files larger than 4GB") },
+    { "rpmlib(RichDependencies)",    "4.12.0-1",
+	(		RPMSENSE_EQUAL),
+    N_("support for rich dependencies.") },
     { NULL,				NULL, 0,	NULL }
 };
 
@@ -1021,3 +1294,307 @@ rpmstrPool rpmdsPool(rpmds ds)
 {
     return (ds != NULL) ? ds->pool : NULL;
 }
+
+rpmsenseFlags rpmSanitizeDSFlags(rpmTagVal tagN, rpmsenseFlags Flags)
+{
+    rpmsenseFlags extra = RPMSENSE_ANY;
+    switch (tagN) {
+    case RPMTAG_PROVIDENAME:
+	extra = Flags & RPMSENSE_FIND_PROVIDES;
+	break;
+    case RPMTAG_TRIGGERNAME:
+    case RPMTAG_FILETRIGGERNAME:
+    case RPMTAG_TRANSFILETRIGGERNAME:
+	extra = Flags & RPMSENSE_TRIGGER;
+	break;
+    case RPMTAG_RECOMMENDNAME:
+    case RPMTAG_SUGGESTNAME:
+    case RPMTAG_SUPPLEMENTNAME:
+    case RPMTAG_ENHANCENAME:
+    case RPMTAG_REQUIRENAME:
+	extra = Flags & (_ALL_REQUIRES_MASK);
+	break;
+    case RPMTAG_CONFLICTNAME:
+	extra = Flags;
+	break;
+    default:
+	break;
+    }
+    return (Flags & RPMSENSE_SENSEMASK) | extra;
+}
+
+static struct ReqComp {
+const char * token;
+    rpmsenseFlags sense;
+} const ReqComparisons[] = { 
+    { "<=", RPMSENSE_LESS | RPMSENSE_EQUAL},
+    { "=<", RPMSENSE_LESS | RPMSENSE_EQUAL},
+    { "<",  RPMSENSE_LESS},
+
+    { "==", RPMSENSE_EQUAL},
+    { "=",  RPMSENSE_EQUAL},
+    
+    { ">=", RPMSENSE_GREATER | RPMSENSE_EQUAL},
+    { "=>", RPMSENSE_GREATER | RPMSENSE_EQUAL},
+    { ">",  RPMSENSE_GREATER},
+
+    { NULL, 0 },
+};
+
+rpmsenseFlags rpmParseDSFlags(const char *str, size_t len)
+{
+    const struct ReqComp *rc;
+    for (rc = ReqComparisons; rc->token != NULL; rc++)
+	if (len == strlen(rc->token) && rstreqn(str, rc->token, len))
+	    return rc->sense;
+    return 0;
+}
+
+static struct RichOpComp {
+    const char * token;
+    rpmrichOp op;
+} const RichOps[] = { 
+    { "and",	RPMRICHOP_AND},
+    { "or",	RPMRICHOP_OR},
+    { "if",	RPMRICHOP_IF},
+    { "else",	RPMRICHOP_ELSE},
+    { NULL, 0 },
+};
+
+int rpmdsIsRich(rpmds dep)
+{
+    const char * n = rpmdsN(dep);
+    return (n && n[0] == '(');
+}
+
+static rpmRC parseRichDepOp(const char **dstrp, rpmrichOp *opp, char **emsg)
+{
+    const char *p = *dstrp, *pe = p;
+    const struct RichOpComp *ro;
+
+    while (*pe && !risspace(*pe) && *pe != ')')
+	pe++;
+    for (ro = RichOps; ro->token != NULL; ro++)
+	if (pe - p == strlen(ro->token) && rstreqn(p, ro->token, pe - p)) {
+	    *opp = ro->op;
+	    *dstrp = pe; 
+	    return RPMRC_OK;
+	}
+    if (emsg)
+	rasprintf(emsg, _("Unknown rich dependency op '%.*s'"), (int)(pe - p), p); 
+    return RPMRC_FAIL;
+}
+
+const char *rpmrichOpStr(rpmrichOp op)
+{
+    if (op == RPMRICHOP_SINGLE)
+	return "SINGLE";
+    if (op == RPMRICHOP_AND)
+	return "&";
+    if (op == RPMRICHOP_OR)
+	return "|";
+    if (op == RPMRICHOP_IF)
+	return "IF";
+    if (op == RPMRICHOP_ELSE)
+	return "ELSE";
+    return NULL;
+}
+
+
+#define SKIPWHITE(_x)   {while(*(_x) && (risspace(*_x) || *(_x) == ',')) (_x)++;}
+#define SKIPNONWHITEX(_x){int bl = 0; while(*(_x) &&!(risspace(*_x) || *(_x) == ',' || (*(_x) == ')' && bl-- <= 0))) if (*(_x)++ == '(') bl++;}
+
+static rpmRC parseSimpleDep(const char **dstrp, char **emsg, rpmrichParseFunction cb, void *cbdata)
+{
+    const char *p = *dstrp;
+    const char *n, *e = 0;
+    int nl, el = 0;
+    rpmsenseFlags sense = 0;
+
+    n = p;
+    SKIPNONWHITEX(p);
+    nl = p - n;
+    if (nl == 0) {
+        if (emsg)
+          rasprintf(emsg, _("Name required"));
+        return RPMRC_FAIL;
+    }   
+    SKIPWHITE(p);
+    if (*p) {
+        const char *pe = p;
+
+        SKIPNONWHITEX(pe);
+	sense = rpmParseDSFlags(p, pe - p);
+        if (sense) {
+            p = pe; 
+            SKIPWHITE(p);
+            e = p;
+            SKIPNONWHITEX(p);
+            el = p - e;
+        }
+    }   
+    if (e && el == 0) {
+        if (emsg)
+          rasprintf(emsg, _("Version required"));
+        return RPMRC_FAIL;
+    }
+    if (cb(cbdata, RPMRICH_PARSE_SIMPLE, n, nl, e, el, sense, RPMRICHOP_SINGLE, emsg) != RPMRC_OK)
+	return RPMRC_FAIL;
+    *dstrp = p;
+    return RPMRC_OK;
+}
+
+rpmRC rpmrichParse(const char **dstrp, char **emsg, rpmrichParseFunction cb, void *cbdata)
+{
+    const char *p = *dstrp, *pe;
+    rpmrichOp op = RPMRICHOP_SINGLE, chainop = 0;
+
+    if (cb(cbdata, RPMRICH_PARSE_ENTER, p, 0, 0, 0, 0, op, emsg) != RPMRC_OK)
+        return RPMRC_FAIL;
+    if (*p++ != '(') {
+        if (emsg)
+          rasprintf(emsg, _("Rich dependency does not start with '('"));
+        return RPMRC_FAIL;
+    }
+    for (;;) {
+        SKIPWHITE(p);
+        if (*p == ')') {
+            if (emsg) {
+                if (chainop)
+                    rasprintf(emsg, _("Missing argument to rich dependency op"));
+                else
+                    rasprintf(emsg, _("Empty rich dependency"));
+            }
+            return RPMRC_FAIL;
+        }
+        if (*p == '(') {
+            if (rpmrichParse(&p, emsg, cb, cbdata) != RPMRC_OK)
+                return RPMRC_FAIL;
+        } else {
+            if (parseSimpleDep(&p, emsg, cb, cbdata) != RPMRC_OK)
+                return RPMRC_FAIL;
+        }
+        SKIPWHITE(p);
+        if (!*p) {
+            if (emsg)
+                rasprintf(emsg, _("Unterminated rich dependency: %s"), *dstrp);
+            return RPMRC_FAIL;
+        }
+        if (*p == ')')
+            break;
+        pe = p;
+        if (parseRichDepOp(&pe, &op, emsg) != RPMRC_OK)
+            return RPMRC_FAIL;
+	if (op == RPMRICHOP_ELSE && chainop == RPMRICHOP_IF)
+	    chainop = 0;
+        if (chainop && op != chainop) {
+            if (emsg)
+                rasprintf(emsg, _("Cannot chain different ops"));
+            return RPMRC_FAIL;
+        }
+        if (chainop && op != RPMRICHOP_AND && op != RPMRICHOP_OR) {
+            if (emsg)
+                rasprintf(emsg, _("Can only chain AND and OR ops"));
+            return RPMRC_FAIL;
+	}
+        if (cb(cbdata, RPMRICH_PARSE_OP, p, pe - p, 0, 0, 0, op, emsg) != RPMRC_OK)
+            return RPMRC_FAIL;
+        chainop = op;
+        p = pe;
+    }
+    p++;
+    if (cb(cbdata, RPMRICH_PARSE_LEAVE, *dstrp, p - *dstrp , 0, 0, 0, op, emsg) != RPMRC_OK)
+        return RPMRC_FAIL;
+    *dstrp = p;
+    return RPMRC_OK;
+}
+
+
+struct rpmdsParseRichDepData {
+    rpmds dep;
+    rpmsenseFlags depflags;
+
+    rpmds leftds;
+    rpmds rightds;
+    rpmrichOp op;
+
+    int depth;
+    const char *rightstart;
+    int dochain;
+};
+
+static rpmRC rpmdsParseRichDepCB(void *cbdata, rpmrichParseType type,
+		const char *n, int nl, const char *e, int el, rpmsenseFlags sense,
+		rpmrichOp op, char **emsg) {
+    struct rpmdsParseRichDepData *data = cbdata;
+    rpmds ds = 0;
+
+    if (type == RPMRICH_PARSE_ENTER)
+	data->depth++;
+    else if (type == RPMRICH_PARSE_LEAVE) {
+	if (--data->depth == 0 && data->dochain && data->rightstart) {
+	    /* chain op hack, construct a sub-ds from the right side of the chain */
+	    char *right = xmalloc(n + nl - data->rightstart + 2);
+	    right[0] = '(';
+	    strncpy(right + 1, data->rightstart, n + nl - data->rightstart);
+	    right[n + nl - data->rightstart + 1] = 0;
+	    data->rightds = rpmdsFree(data->rightds);
+	    ds = singleDS(data->dep->pool, data->dep->tagN, 0, 0, data->depflags, 0, 0, 0);
+	    ds->N[0] = rpmstrPoolId(ds->pool, right, 1);
+	    ds->EVR[0] = rpmstrPoolId(ds->pool, "", 1);
+	    data->rightds = ds;
+	    free(right);
+	}
+    }
+    if (data->depth != 1)
+	return RPMRC_OK;	/* we're only interested in top-level parsing */
+    if ((type == RPMRICH_PARSE_SIMPLE || type == RPMRICH_PARSE_LEAVE) && !data->dochain) {
+	if (type == RPMRICH_PARSE_SIMPLE && data->dep->tagN == RPMTAG_REQUIRENAME && nl > 7 &&
+			 rstreqn(n, "rpmlib(", sizeof("rpmlib(")-1))
+	    sense |= RPMSENSE_RPMLIB;
+	ds = singleDS(data->dep->pool, data->dep->tagN, 0, 0, sense | data->depflags, 0, 0, 0);
+	ds->N[0] = rpmstrPoolIdn(ds->pool, n, nl, 1);
+	ds->EVR[0] = rpmstrPoolIdn(ds->pool, e ? e : "", el, 1);
+	if (!data->leftds)
+	    data->leftds = ds;
+	else {
+	    data->rightds = ds;
+	    data->rightstart = n;
+	}
+    }
+    if (type == RPMRICH_PARSE_OP) {
+	if (data->op != RPMRICHOP_SINGLE)
+	    data->dochain = 1;	/* this is a chained op */
+	else
+	    data->op = op;
+    }
+    return RPMRC_OK;
+}
+
+
+rpmRC rpmdsParseRichDep(rpmds dep, rpmds *leftds, rpmds *rightds, rpmrichOp *op, char **emsg)
+{
+    rpmRC rc;
+    struct rpmdsParseRichDepData data;
+    const char *depstr = rpmdsN(dep);
+    memset(&data, 0, sizeof(data));
+    data.dep = dep;
+    data.op = RPMRICHOP_SINGLE;
+    data.depflags = rpmdsFlags(dep) & ~(RPMSENSE_SENSEMASK | RPMSENSE_MISSINGOK);
+    rc = rpmrichParse(&depstr, emsg, rpmdsParseRichDepCB, &data);
+    if (rc == RPMRC_OK && *depstr) {
+	if (emsg)
+	    rasprintf(emsg, _("Junk after rich dependency"));
+	rc = RPMRC_FAIL;
+    }
+    if (rc != RPMRC_OK) {
+	rpmdsFree(data.leftds);
+	rpmdsFree(data.rightds);
+    } else {
+	*leftds = data.leftds;
+	*rightds = data.rightds;
+	*op = data.op;
+    }
+    return rc;
+}
+

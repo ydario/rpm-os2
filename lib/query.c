@@ -30,20 +30,15 @@ static void printFileInfo(const char * name,
 			  unsigned int mtime,
 			  unsigned short rdev, unsigned int nlink,
 			  const char * owner, const char * group,
-			  const char * linkto)
+			  const char * linkto, time_t now)
 {
     char sizefield[21];
     char ownerfield[8+1], groupfield[8+1];
     char timefield[100];
     time_t when = mtime;  /* important if sizeof(int32_t) ! sizeof(time_t) */
     struct tm * tm;
-    static time_t now;
     char * perms = rpmPermsString(mode);
     char *link = NULL;
-
-    /* On first call, grab snapshot of now */
-    if (now == 0)
-	now = time(NULL);
 
     rstrlcpy(ownerfield, owner, sizeof(ownerfield));
     rstrlcpy(groupfield, group, sizeof(groupfield));
@@ -99,6 +94,7 @@ int showQueryPackage(QVA_t qva, rpmts ts, Header h)
     rpmfi fi = NULL;
     rpmfiFlags fiflags =  (RPMFI_NOHEADER | RPMFI_FLAGS_QUERY);
     int rc = 0;		/* XXX FIXME: need real return code */
+    time_t now = 0;
 
     if (qva->qva_queryFormat != NULL) {
 	const char *errstr;
@@ -219,11 +215,14 @@ int showQueryPackage(QVA_t qva, rpmts ts, Header h)
 	    }
 
 	    if (fuser && fgroup) {
+		/* On first call, grab snapshot of now */
+		if (now == 0)
+		    now = time(NULL);
 		if (buf) {
 		    rpmlog(RPMLOG_NOTICE, "%s", buf);
 		}
 		printFileInfo(fn, fsize, fmode, fmtime, frdev, fnlink,
-					fuser, fgroup, flink);
+					fuser, fgroup, flink, now);
 	    } else {
 		rpmlog(RPMLOG_ERR,
 			_("package has neither file owner or id lists\n"));
@@ -382,6 +381,34 @@ static rpmdbMatchIterator initQueryIterator(QVA_t qva, rpmts ts, const char * ar
 	mi = rpmtsInitIterator(ts, RPMDBI_REQUIRENAME, arg, 0);
 	if (mi == NULL) {
 	    rpmlog(RPMLOG_NOTICE, _("no package requires %s\n"), arg);
+	}
+	break;
+
+    case RPMQV_WHATRECOMMENDS:
+	mi = rpmtsInitIterator(ts, RPMDBI_RECOMMENDNAME, arg, 0);
+	if (mi == NULL) {
+	    rpmlog(RPMLOG_NOTICE, _("no package recommends %s\n"), arg);
+	}
+	break;
+
+    case RPMQV_WHATSUGGESTS:
+	mi = rpmtsInitIterator(ts, RPMDBI_SUGGESTNAME, arg, 0);
+	if (mi == NULL) {
+	    rpmlog(RPMLOG_NOTICE, _("no package suggests %s\n"), arg);
+	}
+	break;
+
+    case RPMQV_WHATSUPPLEMENTS:
+	mi = rpmtsInitIterator(ts, RPMDBI_SUPPLEMENTNAME, arg, 0);
+	if (mi == NULL) {
+	    rpmlog(RPMLOG_NOTICE, _("no package supplements %s\n"), arg);
+	}
+	break;
+
+    case RPMQV_WHATENHANCES:
+	mi = rpmtsInitIterator(ts, RPMDBI_ENHANCENAME, arg, 0);
+	if (mi == NULL) {
+	    rpmlog(RPMLOG_NOTICE, _("no package enhances %s\n"), arg);
 	}
 	break;
 
@@ -556,7 +583,14 @@ int rpmcliQuery(rpmts ts, QVA_t qva, char * const * argv)
 	qva->qva_queryFormat = fmt;
     }
 
-    vsflags = rpmExpandNumeric("%{?_vsflags_query}");
+    if (!(qva->qva_source & RPMQV_RPM) &&
+	rpmExpandNumeric("%{?_vsflags_query_rpmdb:1}")) {
+
+	vsflags = rpmExpandNumeric("%{?_vsflags_query_rpmdb}");
+    } else {
+	vsflags = rpmExpandNumeric("%{?_vsflags_query}");
+    }
+
     if (rpmcliQueryFlags & VERIFY_DIGEST)
 	vsflags |= _RPMVSF_NODIGESTS;
     if (rpmcliQueryFlags & VERIFY_SIGNATURE)

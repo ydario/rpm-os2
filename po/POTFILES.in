@@ -3,6 +3,7 @@
 # Package source files
 
 cliutils.c
+rpm2archive.c
 rpm2cpio.c
 rpmqv.c
 rpmbuild.c
@@ -46,6 +47,7 @@ lib/rpmal.c
 lib/rpmchecksig.c
 lib/rpmchroot.c
 lib/rpmds.c
+lib/relocation.c
 lib/rpmfi.c
 lib/rpmgi.c
 lib/rpminstall.c
@@ -66,14 +68,11 @@ lib/verify.c
 lib/fprint.c
 lib/header.c
 lib/headerfmt.c
-lib/merge.c
 lib/rpmdb.c
 lib/tagexts.c
 lib/tagname.c
 lib/backend/db3.c
-lib/backend/dbconfig.c
-plugins/exec.c
-plugins/sepolicy.c
+lib/backend/dbi.c
 python/rpmts-py.c
 rpmio/argv.c
 rpmio/digest.c

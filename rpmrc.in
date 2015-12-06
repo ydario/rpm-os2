@@ -41,14 +41,15 @@ optflags: sparc64v -O2 -g -m64 -mtune=niagara
 
 optflags: m68k -O2 -g -fomit-frame-pointer
 
-optflags: ppc -O2 -g -fsigned-char
-optflags: ppc8260 -O2 -g -fsigned-char
-optflags: ppc8560 -O2 -g -fsigned-char
-optflags: ppc32dy4 -O2 -g -fsigned-char
-optflags: ppciseries -O2 -g -fsigned-char
-optflags: ppcpseries -O2 -g -fsigned-char
-optflags: ppc64 -O2 -g -fsigned-char
-optflags: ppc64p7 -O3 -mtune=power7 -mcpu=power7 -g -fsigned-char
+optflags: ppc -O2 -g
+optflags: ppc8260 -O2 -g
+optflags: ppc8560 -O2 -g
+optflags: ppc32dy4 -O2 -g
+optflags: ppciseries -O2 -g
+optflags: ppcpseries -O2 -g
+optflags: ppc64 -O2 -g
+optflags: ppc64le -O2 -g
+optflags: ppc64p7 -O3 -mtune=power7 -mcpu=power7 -g
 
 optflags: parisc -O2 -g -mpa-risc-1-0
 optflags: hppa1.0 -O2 -g -mpa-risc-1-0
@@ -58,6 +59,8 @@ optflags: hppa2.0 -O2 -g -mpa-risc-1-0
 
 optflags: mips -O2 -g
 optflags: mipsel -O2 -g
+optflags: mips64 -O2 -g
+optflags: mips64el -O2 -g
 
 optflags: armv3l -O2 -g -march=armv3
 optflags: armv4b -O2 -g -march=armv4
@@ -66,7 +69,13 @@ optflags: armv4tl -O2 -g -march=armv4t
 optflags: armv5tel -O2 -g -march=armv5te
 optflags: armv5tejl -O2 -g -march=armv5te
 optflags: armv6l -O2 -g -march=armv6
+optflags: armv6hl -O2 -g -march=armv6 -mfloat-abi=hard -mfpu=vfp
+
 optflags: armv7l -O2 -g -march=armv7
+optflags: armv7hl -O2 -g -march=armv7-a -mfloat-abi=hard -mfpu=vfpv3-d16
+optflags: armv7hnl -O2 -g -march=armv7-a -mfloat-abi=hard -mfpu=neon
+
+optflags: m68k -O2 -g -fomit-frame-pointer
 
 optflags: atarist -O2 -g -fomit-frame-pointer
 optflags: atariste -O2 -g -fomit-frame-pointer
@@ -96,6 +105,7 @@ archcolor: sparc64 2
 archcolor: sparcv9 2
 archcolor: ppc 1
 archcolor: ppc64 2
+archcolor: ppc64le 2
 
 archcolor: armv3l 1
 archcolor: armv4b 1
@@ -105,6 +115,13 @@ archcolor: armv5tel 1
 archcolor: armv5tejl 1
 archcolor: armv6l 1
 archcolor: armv7l 1
+
+archcolor: mips 1
+archcolor: mipsel 1
+archcolor: mips64 2
+archcolor: mips64el 2
+
+archcolor: m68k 1
 
 archcolor: m68kmint 1
 
@@ -157,6 +174,7 @@ arch_canon:   sparcv9: sparcv9	3
 arch_canon:	sparcv9v: sparcv9v	3
 # This is really a place holder for MIPS.
 arch_canon:	mips:	mips	4
+arch_canon:	mipsel:	mipsel	4
 
 arch_canon:	ppc:	ppc	5
 arch_canon:	ppc8260:	ppc8260	5
@@ -170,7 +188,8 @@ arch_canon:	IP:	sgi	7
 arch_canon:     rs6000:	rs6000  8
 arch_canon:     ia64:	ia64	9
 
-arch_canon:	mipsel:	mipsel	11
+arch_canon:	mips64:		mips64		11
+arch_canon:	mips64el:	mips64el	11
 
 arch_canon:	armv3l: armv3l	12
 arch_canon:     armv4b:	armv4b 	12
@@ -178,7 +197,10 @@ arch_canon:     armv4l:	armv4l 	12
 arch_canon:     armv5tel: armv5tel 	12
 arch_canon:     armv5tejl: armv5tejl 	12
 arch_canon:     armv6l: armv6l 	12
+arch_canon:     armv6hl: armv6hl 	12
 arch_canon:     armv7l: armv7l 	12
+arch_canon:     armv7hl: armv7hl 	12
+arch_canon:     armv7hnl: armv7hnl 	12
 
 arch_canon:	m68kmint: m68kmint	13
 arch_canon:	atarist: m68kmint	13
@@ -194,6 +216,7 @@ arch_canon:	i370: i370	14
 arch_canon:	s390x: s390x	15
 
 arch_canon:	ppc64:	ppc64	16
+arch_canon:	ppc64le:	ppc64le	16
 arch_canon:    ppc64pseries: ppc64pseries  16
 arch_canon:    ppc64iseries: ppc64iseries  16
 arch_canon:    ppc64p7: ppc64p7  16
@@ -283,6 +306,7 @@ buildarchtranslate: ppcpseries: ppc
 buildarchtranslate: ppc64iseries: ppc64
 buildarchtranslate: ppc64pseries: ppc64
 buildarchtranslate: ppc64p7: ppc64
+buildarchtranslate: ppc64le: ppc64le
 
 buildarchtranslate: armv3l: armv3l
 buildarchtranslate: armv4b: armv4b
@@ -291,7 +315,17 @@ buildarchtranslate: armv4tl: armv4tl
 buildarchtranslate: armv5tel: armv5tel
 buildarchtranslate: armv5tejl: armv5tejl
 buildarchtranslate: armv6l: armv6l
+buildarchtranslate: armv6hl: armv6hl
 buildarchtranslate: armv7l: armv7l
+buildarchtranslate: armv7hl: armv7hl
+buildarchtranslate: armv7hnl: armv7hnl
+
+buildarchtranslate: mips: mips
+buildarchtranslate: mipsel: mipsel
+buildarchtranslate: mips64: mips64
+buildarchtranslate: mips64el: mips64el
+
+buildarchtranslate: m68k: m68k
 
 buildarchtranslate: atarist: m68kmint
 buildarchtranslate: atariste: m68kmint
@@ -354,6 +388,7 @@ arch_compat: rs6000: noarch fat
 arch_compat: ppc64pseries: ppc64
 arch_compat: ppc64iseries: ppc64
 arch_compat: ppc64p7: ppc64
+arch_compat: ppc64le: noarch fat
 
 arch_compat: sun4c: sparc
 arch_compat: sun4d: sparc
@@ -368,6 +403,8 @@ arch_compat: sparc: noarch
 
 arch_compat: mips: noarch
 arch_compat: mipsel: noarch
+arch_compat: mips64: mips
+arch_compat: mips64el: mipsel
 
 arch_compat: hppa2.0: hppa1.2
 arch_compat: hppa1.2: hppa1.1
@@ -383,6 +420,11 @@ arch_compat: armv5tel: armv4tl
 arch_compat: armv4tl: armv4l
 arch_compat: armv4l: armv3l
 arch_compat: armv3l: noarch
+arch_compat: armv7hnl: armv7hl
+arch_compat: armv7hl: armv6hl
+arch_compat: armv6hl: noarch
+
+arch_compat: m68k: noarch
 
 arch_compat: atarist: m68kmint noarch
 arch_compat: atariste: m68kmint noarch
@@ -477,12 +519,15 @@ buildarch_compat: ppciseries: noarch
 buildarch_compat: ppcpseries: noarch
 buildarch_compat: ppc: noarch fat
 buildarch_compat: ppc64: noarch fat
+buildarch_compat: ppc64le: noarch fat
 buildarch_compat: ppc64pseries: ppc64
 buildarch_compat: ppc64iseries: ppc64
 buildarch_compat: ppc64p7: ppc64
 
 buildarch_compat: mips: noarch
 buildarch_compat: mipsel: noarch
+buildarch_compat: mips64: noarch
+buildarch_compat: mips64el: noarch
 
 buildarch_compat: armv4b: noarch
 buildarch_compat: armv7l: armv6l
@@ -492,6 +537,10 @@ buildarch_compat: armv5tel: armv4tl
 buildarch_compat: armv4tl: armv4l
 buildarch_compat: armv4l: armv3l
 buildarch_compat: armv3l: noarch
+
+buildarch_compat: armv7hnl: armv7hl
+buildarch_compat: armv7hl: armv6hl
+buildarch_compat: armv6hl: noarch
 
 buildarch_compat: hppa2.0: hppa1.2
 buildarch_compat: hppa1.2: hppa1.1

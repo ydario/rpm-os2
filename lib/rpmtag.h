@@ -117,8 +117,8 @@ typedef enum rpmTag_e {
     RPMTAG_REQUIRENAME		= 1049,	/* s[] */
 #define	RPMTAG_REQUIRES RPMTAG_REQUIRENAME	/* s[] */
     RPMTAG_REQUIREVERSION	= 1050,	/* s[] */
-    RPMTAG_NOSOURCE		= 1051, /* i */
-    RPMTAG_NOPATCH		= 1052, /* i */
+    RPMTAG_NOSOURCE		= 1051, /* i[] */
+    RPMTAG_NOPATCH		= 1052, /* i[] */
     RPMTAG_CONFLICTFLAGS	= 1053, /* i[] */
     RPMTAG_CONFLICTNAME		= 1054,	/* s[] */
 #define	RPMTAG_CONFLICTS RPMTAG_CONFLICTNAME	/* s[] */
@@ -217,14 +217,14 @@ typedef enum rpmTag_e {
     RPMTAG_PRETRANSPROG		= 1153,	/* s[] */
     RPMTAG_POSTTRANSPROG	= 1154,	/* s[] */
     RPMTAG_DISTTAG		= 1155,	/* s */
-    RPMTAG_SUGGESTSNAME		= 1156,	/* s[] extension (unimplemented) */
-#define	RPMTAG_SUGGESTS RPMTAG_SUGGESTSNAME	/* s[] (unimplemented) */
-    RPMTAG_SUGGESTSVERSION	= 1157,	/* s[] extension (unimplemented) */
-    RPMTAG_SUGGESTSFLAGS	= 1158,	/* i[] extension (unimplemented) */
-    RPMTAG_ENHANCESNAME		= 1159,	/* s[] extension placeholder (unimplemented) */
-#define	RPMTAG_ENHANCES RPMTAG_ENHANCESNAME	/* s[] (unimplemented) */
-    RPMTAG_ENHANCESVERSION	= 1160,	/* s[] extension placeholder (unimplemented) */
-    RPMTAG_ENHANCESFLAGS	= 1161,	/* i[] extension placeholder (unimplemented) */
+    RPMTAG_OLDSUGGESTSNAME	= 1156, /* s[] - obsolete */
+#define RPMTAG_OLDSUGGESTS RPMTAG_OLDSUGGESTSNAME /* s[] - obsolete */
+    RPMTAG_OLDSUGGESTSVERSION	= 1157,	/* s[] - obsolete */
+    RPMTAG_OLDSUGGESTSFLAGS	= 1158,	/* i[] - obsolete */
+    RPMTAG_OLDENHANCESNAME	= 1159,	/* s[] - obsolete */
+#define RPMTAG_OLDENHANCES RPMTAG_OLDENHANCESNAME /* s[] - obsolete */
+    RPMTAG_OLDENHANCESVERSION	= 1160,	/* s[] - obsolete */
+    RPMTAG_OLDENHANCESFLAGS	= 1161,	/* i[] - obsolete */
     RPMTAG_PRIORITY		= 1162, /* i[] extension placeholder (unimplemented) */
     RPMTAG_CVSID		= 1163, /* s (unimplemented) */
 #define	RPMTAG_SVNID	RPMTAG_CVSID	/* s (unimplemented) */
@@ -261,6 +261,7 @@ typedef enum rpmTag_e {
     RPMTAG_BUILDOBSOLETES	= 1194, /* internal (unimplemented) */
     RPMTAG_DBINSTANCE		= 1195, /* i extension */
     RPMTAG_NVRA			= 1196, /* s extension */
+
     /* tags 1997-4999 reserved */
     RPMTAG_FILENAMES		= 5000, /* s[] extension */
     RPMTAG_FILEPROVIDE		= 5001, /* s[] extension */
@@ -290,7 +291,7 @@ typedef enum rpmTag_e {
     RPMTAG_POSTTRANSFLAGS	= 5025, /* i */
     RPMTAG_VERIFYSCRIPTFLAGS	= 5026, /* i */
     RPMTAG_TRIGGERSCRIPTFLAGS	= 5027, /* i[] */
-    RPMTAG_COLLECTIONS		= 5029, /* s[] list of collections */
+    RPMTAG_COLLECTIONS		= 5029, /* s[] list of collections (unimplemented) */
     RPMTAG_POLICYNAMES		= 5030,	/* s[] */
     RPMTAG_POLICYTYPES		= 5031,	/* s[] */
     RPMTAG_POLICYTYPESINDEXES	= 5032,	/* i[] */
@@ -307,6 +308,56 @@ typedef enum rpmTag_e {
     RPMTAG_OBSOLETENEVRS	= 5043, /* s[] extension */
     RPMTAG_CONFLICTNEVRS	= 5044, /* s[] extension */
     RPMTAG_FILENLINKS		= 5045,	/* i[] extension */
+    RPMTAG_RECOMMENDNAME	= 5046,	/* s[] */
+#define	RPMTAG_RECOMMENDS RPMTAG_RECOMMENDNAME	/* s[] */
+    RPMTAG_RECOMMENDVERSION	= 5047,	/* s[] */
+    RPMTAG_RECOMMENDFLAGS	= 5048,	/* i[] */
+    RPMTAG_SUGGESTNAME		= 5049,	/* s[] */
+#define	RPMTAG_SUGGESTS RPMTAG_SUGGESTNAME	/* s[] */
+    RPMTAG_SUGGESTVERSION	= 5050,	/* s[] extension */
+    RPMTAG_SUGGESTFLAGS		= 5051,	/* i[] extension */
+    RPMTAG_SUPPLEMENTNAME	= 5052,	/* s[] */
+#define	RPMTAG_SUPPLEMENTS RPMTAG_SUPPLEMENTNAME /* s[] */
+    RPMTAG_SUPPLEMENTVERSION	= 5053,	/* s[] */
+    RPMTAG_SUPPLEMENTFLAGS	= 5054,	/* i[] */
+    RPMTAG_ENHANCENAME		= 5055,	/* s[] */
+#define	RPMTAG_ENHANCES RPMTAG_ENHANCENAME	/* s[] */
+    RPMTAG_ENHANCEVERSION	= 5056,	/* s[] */
+    RPMTAG_ENHANCEFLAGS		= 5057,	/* i[] */
+    RPMTAG_RECOMMENDNEVRS	= 5058, /* s[] extension */
+    RPMTAG_SUGGESTNEVRS		= 5059, /* s[] extension */
+    RPMTAG_SUPPLEMENTNEVRS	= 5060, /* s[] extension */
+    RPMTAG_ENHANCENEVRS		= 5061, /* s[] extension */
+    RPMTAG_ENCODING		= 5062, /* s */
+    RPMTAG_FILETRIGGERIN		= 5063, /* internal */
+    RPMTAG_FILETRIGGERUN		= 5064, /* internal */
+    RPMTAG_FILETRIGGERPOSTUN		= 5065, /* internal */
+    RPMTAG_FILETRIGGERSCRIPTS		= 5066, /* s[] */
+    RPMTAG_FILETRIGGERSCRIPTPROG	= 5067, /* s[] */
+    RPMTAG_FILETRIGGERSCRIPTFLAGS	= 5068, /* i[] */
+    RPMTAG_FILETRIGGERNAME		= 5069, /* s[] */
+    RPMTAG_FILETRIGGERINDEX		= 5070, /* i[] */
+    RPMTAG_FILETRIGGERVERSION		= 5071, /* s[] */
+    RPMTAG_FILETRIGGERFLAGS		= 5072, /* i[] */
+    RPMTAG_TRANSFILETRIGGERIN		= 5073, /* internal */
+    RPMTAG_TRANSFILETRIGGERUN		= 5074, /* internal */
+    RPMTAG_TRANSFILETRIGGERPOSTUN	= 5075, /* internal */
+    RPMTAG_TRANSFILETRIGGERSCRIPTS	= 5076, /* s[] */
+    RPMTAG_TRANSFILETRIGGERSCRIPTPROG	= 5077, /* s[] */
+    RPMTAG_TRANSFILETRIGGERSCRIPTFLAGS	= 5078, /* i[] */
+    RPMTAG_TRANSFILETRIGGERNAME		= 5079, /* s[] */
+    RPMTAG_TRANSFILETRIGGERINDEX	= 5080, /* i[] */
+    RPMTAG_TRANSFILETRIGGERVERSION	= 5081, /* s[] */
+    RPMTAG_TRANSFILETRIGGERFLAGS	= 5082, /* i[] */
+    RPMTAG_REMOVEPATHPOSTFIXES  = 5083, /* s internal */
+    RPMTAG_FILETRIGGERPRIORITIES	= 5084, /* i[] */
+    RPMTAG_TRANSFILETRIGGERPRIORITIES	= 5085, /* i[] */
+    RPMTAG_FILETRIGGERCONDS		= 5086, /* s[] extension */
+    RPMTAG_FILETRIGGERTYPE		= 5087, /* s[] extension */
+    RPMTAG_TRANSFILETRIGGERCONDS	= 5088, /* s[] extension */
+    RPMTAG_TRANSFILETRIGGERTYPE		= 5089, /* s[] extension */
+    RPMTAG_FILESIGNATURES	= 5090, /* s[] */
+    RPMTAG_FILESIGNATURELENGTH  = 5091, /* i */
 
     RPMTAG_FIRSTFREE_TAG	/*!< internal */
 } rpmTag;
@@ -332,6 +383,12 @@ typedef enum rpmDbiTag_e {
     RPMDBI_SIGMD5		= RPMTAG_SIGMD5,
     RPMDBI_SHA1HEADER		= RPMTAG_SHA1HEADER,
     RPMDBI_INSTFILENAMES	= RPMTAG_INSTFILENAMES,
+    RPMDBI_FILETRIGGERNAME	= RPMTAG_FILETRIGGERNAME,
+    RPMDBI_TRANSFILETRIGGERNAME = RPMTAG_TRANSFILETRIGGERNAME,
+    RPMDBI_RECOMMENDNAME	= RPMTAG_RECOMMENDNAME,
+    RPMDBI_SUGGESTNAME		= RPMTAG_SUGGESTNAME,
+    RPMDBI_SUPPLEMENTNAME	= RPMTAG_SUPPLEMENTNAME,
+    RPMDBI_ENHANCENAME		= RPMTAG_ENHANCENAME,
 } rpmDbiTag;
 
 /** \ingroup signature
@@ -346,6 +403,7 @@ typedef enum rpmSigTag_e {
     RPMSIGTAG_GPG	= 1005, /*!< internal GnuPG signature. */
     RPMSIGTAG_PGP5	= 1006,	/*!< internal PGP5 signature @deprecated legacy. */
     RPMSIGTAG_PAYLOADSIZE = 1007,/*!< internal uncompressed payload size (32bit) in bytes. */
+    RPMSIGTAG_RESERVEDSPACE = 1008,/*!< internal space reserved for signatures */
     RPMSIGTAG_BADSHA1_1	= RPMTAG_BADSHA1_1,	/*!< internal Broken SHA1, take 1. */
     RPMSIGTAG_BADSHA1_2	= RPMTAG_BADSHA1_2,	/*!< internal Broken SHA1, take 2. */
     RPMSIGTAG_SHA1	= RPMTAG_SHA1HEADER,	/*!< internal sha1 header digest. */

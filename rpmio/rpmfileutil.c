@@ -19,6 +19,7 @@
 #include <errno.h>
 #include <popt.h>
 #include <ctype.h>
+#include <pthread.h>
 
 #include <rpm/rpmfileutil.h>
 #include <rpm/rpmurl.h>
@@ -31,6 +32,7 @@
 #include "debug.h"
 
 static const char *rpm_config_dir = NULL;
+static pthread_once_t configDirSet = PTHREAD_ONCE_INIT;
 
 static int is_prelinked(int fdno)
 {
@@ -146,8 +148,8 @@ int rpmDoDigest(int algo, const char * fn,int asAscii,
     const char * path;
     urltype ut = urlPath(fn, &path);
     unsigned char * dig = NULL;
-    size_t diglen;
-    unsigned char buf[32*BUFSIZ];
+    size_t diglen, buflen = 32 * BUFSIZ;
+    unsigned char *buf = xmalloc(buflen);
     FD_t fd;
     rpm_loff_t fsize = 0;
     pid_t pid = 0;
@@ -181,7 +183,7 @@ int rpmDoDigest(int algo, const char * fn,int asAscii,
 	
 	fdInitDigest(fd, algo, 0);
 	fsize = 0;
-	while ((rc = Fread(buf, sizeof(buf[0]), sizeof(buf), fd)) > 0)
+	while ((rc = Fread(buf, sizeof(*buf), buflen, fd)) > 0)
 	    fsize += rc;
 	fdFiniDigest(fd, algo, (void **)&dig, &diglen, asAscii);
 	if (dig == NULL || Ferror(fd))
@@ -205,6 +207,7 @@ exit:
     if (!rc)
 	memcpy(digest, dig, diglen);
     dig = _free(dig);
+    free(buf);
 
     return rc;
 }
@@ -341,7 +344,8 @@ int rpmFileIsCompressed(const char * file, rpmCompressedMagic * compressed)
 
     rc = 0;
 
-    if ((magic[0] == 'B') && (magic[1] == 'Z')) {
+    if ((magic[0] == 'B') && (magic[1] == 'Z') &&
+        (magic[2] == 'h')) {
 	*compressed = COMPRESSED_BZIP2;
     } else if ((magic[0] == 'P') && (magic[1] == 'K') &&
 	 (((magic[2] == 3) && (magic[3] == 4)) ||
@@ -645,11 +649,14 @@ int rpmMkdirs(const char *root, const char *pathstr)
     return rc;
 }
 
+static void setConfigDir(void)
+{
+    char *rpmenv = getenv("RPM_CONFIGDIR");
+    rpm_config_dir = rpmenv ? xstrdup(rpmenv) : RPMCONFIGDIR;
+}
+
 const char *rpmConfigDir(void)
 {
-    if (rpm_config_dir == NULL) {
-	char *rpmenv = getenv("RPM_CONFIGDIR");
-	rpm_config_dir = rpmenv ? xstrdup(rpmenv) : RPMCONFIGDIR;
-    }
+    pthread_once(&configDirSet, setConfigDir);
     return rpm_config_dir;
 }

@@ -8,6 +8,8 @@ struct rpmfdObject_s {
     PyObject_HEAD
     PyObject *md_dict;
     FD_t fd;
+    char *mode;
+    char *flags;
 };
 
 FD_t rpmfdGetFd(rpmfdObject *fdo)
@@ -43,14 +45,21 @@ static PyObject *err_closed(void)
     return NULL;
 }
 
-static FD_t openPath(const char *path, const char *mode, const char *flags)
+static FD_t openPath(const char *path, const char *mode)
 {
     FD_t fd;
-    char *m = rstrscat(NULL, mode, ".", flags, NULL);
     Py_BEGIN_ALLOW_THREADS
-    fd = Fopen(path, m);
+    fd = Fopen(path, mode);
     Py_END_ALLOW_THREADS;
-    free(m);
+    return fd;
+}
+
+static FD_t openFd(FD_t ofd, const char *mode)
+{
+    FD_t fd;
+    Py_BEGIN_ALLOW_THREADS
+    fd = Fdopen(ofd, mode);
+    Py_END_ALLOW_THREADS;
     return fd;
 }
 
@@ -59,6 +68,7 @@ static int rpmfd_init(rpmfdObject *s, PyObject *args, PyObject *kwds)
     char *kwlist[] = { "obj", "mode", "flags", NULL };
     const char *mode = "r";
     const char *flags = "ufdio";
+    char *rpmio_mode = NULL;
     PyObject *fo = NULL;
     FD_t fd = NULL;
     int fdno;
@@ -67,8 +77,10 @@ static int rpmfd_init(rpmfdObject *s, PyObject *args, PyObject *kwds)
 				     &fo, &mode, &flags))
 	return -1;
 
+    rpmio_mode = rstrscat(NULL, mode, ".", flags, NULL);
+
     if (PyBytes_Check(fo)) {
-	fd = openPath(PyBytes_AsString(fo), mode, flags);
+	fd = openPath(PyBytes_AsString(fo), rpmio_mode);
     } else if (PyUnicode_Check(fo)) {
 	PyObject *enc = NULL;
 	int rc;
@@ -78,24 +90,36 @@ static int rpmfd_init(rpmfdObject *s, PyObject *args, PyObject *kwds)
 	rc = utf8FromPyObject(fo, &enc);
 #endif
 	if (rc) {
-	    fd = openPath(PyBytes_AsString(enc), mode, flags);
+	    fd = openPath(PyBytes_AsString(enc), rpmio_mode);
 	    Py_DECREF(enc);
 	}
+    } else if (rpmfdObject_Check(fo)) {
+	rpmfdObject *fdo = (rpmfdObject *)fo;
+	fd = openFd(fdDup(Fileno(fdo->fd)), rpmio_mode);
     } else if ((fdno = PyObject_AsFileDescriptor(fo)) >= 0) {
-	fd = fdDup(fdno);
+	fd = openFd(fdDup(fdno), rpmio_mode);
     } else {
 	PyErr_SetString(PyExc_TypeError, "path or file object expected");
     }
 
     if (fd != NULL) {
-	/* TODO: remember our filename, mode & flags */
 	Fclose(s->fd); /* in case __init__ was called again */
+	free(s->mode);
+	free(s->flags);
 	s->fd = fd;
+	s->mode = rstrdup(mode);
+	s->flags = rstrdup(flags);
     } else {
 	PyErr_SetString(PyExc_IOError, Fstrerror(fd));
     }
 
+    free(rpmio_mode);
     return (fd == NULL) ? -1 : 0;
+}
+
+static PyObject *rpmfd_open(PyObject *cls, PyObject *args, PyObject *kwds)
+{
+    return PyObject_Call(cls, args, kwds);
 }
 
 static PyObject *do_close(rpmfdObject *s)
@@ -119,6 +143,8 @@ static void rpmfd_dealloc(rpmfdObject *s)
 {
     PyObject *res = do_close(s);
     Py_XDECREF(res);
+    free(s->mode);
+    free(s->flags);
     Py_TYPE(s)->tp_free((PyObject *)s);
 }
 
@@ -272,6 +298,8 @@ static PyObject *rpmfd_write(rpmfdObject *s, PyObject *args, PyObject *kwds)
 static char rpmfd_doc[] = "";
 
 static struct PyMethodDef rpmfd_methods[] = {
+    { "open",	(PyCFunction) rpmfd_open,	METH_VARARGS|METH_KEYWORDS|METH_CLASS,
+	NULL },
     { "close",	(PyCFunction) rpmfd_close,	METH_NOARGS,
 	NULL },
     { "fileno",	(PyCFunction) rpmfd_fileno,	METH_NOARGS,
@@ -302,9 +330,21 @@ static PyObject *rpmfd_get_name(rpmfdObject *s)
     return Py_BuildValue("s", Fdescr(s->fd));
 }
 
+static PyObject *rpmfd_get_mode(rpmfdObject *s)
+{
+    return Py_BuildValue("s", s->mode);
+}
+
+static PyObject *rpmfd_get_flags(rpmfdObject *s)
+{
+    return Py_BuildValue("s", s->flags);
+}
+
 static PyGetSetDef rpmfd_getseters[] = {
     { "closed", (getter)rpmfd_get_closed, NULL, NULL },
     { "name", (getter)rpmfd_get_name, NULL, NULL },
+    { "mode", (getter)rpmfd_get_mode, NULL, NULL },
+    { "flags", (getter)rpmfd_get_flags, NULL, NULL },
     { NULL },
 };
 

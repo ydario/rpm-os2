@@ -6,6 +6,7 @@
 #include <rpm/rpmcli.h>
 #include <rpm/rpmsign.h>
 #include "cliutils.h"
+#include "lib/rpmsignfiles.h"
 #include "debug.h"
 
 #if !defined(__GLIBC__) && !defined(__APPLE__) && !defined(__KLIBC__)
@@ -20,6 +21,10 @@ enum modes {
 
 static int mode = 0;
 
+static int signfiles = 0, fskpass = 0;
+static char * fileSigningKey = NULL;
+static char * fileSigningKeyPassword = NULL;
+
 static struct poptOption signOptsTable[] = {
     { "addsign", '\0', (POPT_ARG_VAL|POPT_ARGFLAG_OR), &mode, MODE_ADDSIGN,
 	N_("sign package(s)"), NULL },
@@ -27,6 +32,13 @@ static struct poptOption signOptsTable[] = {
 	N_("sign package(s) (identical to --addsign)"), NULL },
     { "delsign", '\0', (POPT_ARG_VAL|POPT_ARGFLAG_OR), &mode, MODE_DELSIGN,
 	N_("delete package signatures"), NULL },
+    { "signfiles", '\0', POPT_ARG_NONE, &signfiles, 0,
+	N_("sign package(s) files"), NULL},
+    { "fskpath", '\0', POPT_ARG_STRING, &fileSigningKey, 0,
+	N_("use file signing key <key>"),
+	N_("<key>") },
+    { "fskpass", '\0', POPT_ARG_NONE, &fskpass, 0,
+	N_("prompt for file signing key password"), NULL},
     POPT_TABLEEND
 };
 
@@ -41,96 +53,52 @@ static struct poptOption optionsTable[] = {
     POPT_TABLEEND
 };
 
-static int checkPassPhrase(const char * passPhrase)
-{
-    int passPhrasePipe[2];
-    int pid, status;
-    int rc = -1;
-    int xx;
-
-    if (passPhrase == NULL)
-	return -1;
-
-    passPhrasePipe[0] = passPhrasePipe[1] = 0;
-    if (pipe(passPhrasePipe))
-	return -1;
-
-    pid = fork();
-    if (pid < 0) {
-	close(passPhrasePipe[0]);
-	close(passPhrasePipe[1]);
-	return -1;
-    }
-
-    if (pid == 0) {
-	char * cmd, * gpg_path;
-	char *const *av;
-	int fdno;
-
-	close(STDIN_FILENO);
-	close(STDOUT_FILENO);
-	close(passPhrasePipe[1]);
-	if ((fdno = open("/dev/null", O_RDONLY)) != STDIN_FILENO) {
-	    xx = dup2(fdno, STDIN_FILENO);
-	    close(fdno);
-	}
-	if ((fdno = open("/dev/null", O_WRONLY)) != STDOUT_FILENO) {
-	    xx = dup2(fdno, STDOUT_FILENO);
-	    close(fdno);
-	}
-	xx = dup2(passPhrasePipe[0], 3);
-
-	unsetenv("MALLOC_CHECK_");
-	gpg_path = rpmExpand("%{?_gpg_path}", NULL);
-
-	if (!rstreq(gpg_path, ""))
-	    setenv("GNUPGHOME", gpg_path, 1);
-	
-	cmd = rpmExpand("%{?__gpg_check_password_cmd}", NULL);
-	rc = poptParseArgvString(cmd, NULL, (const char ***)&av);
-	if (xx >= 0 && rc == 0) {
-	    rc = execve(av[0], av+1, environ);
-	    fprintf(stderr, _("Could not exec %s: %s\n"), "gpg",
-			strerror(errno));
-	}
-	_exit(EXIT_FAILURE);
-    }
-
-    close(passPhrasePipe[0]);
-    xx = write(passPhrasePipe[1], passPhrase, strlen(passPhrase));
-    xx = write(passPhrasePipe[1], "\n", 1);
-    close(passPhrasePipe[1]);
-
-    if (xx >= 0 && waitpid(pid, &status, 0) >= 0)
-	rc = (WIFEXITED(status) && WEXITSTATUS(status) == 0) ? 0 : 1;
-
-    return rc;
-}
-
 /* TODO: permit overriding macro setup on the command line */
 static int doSign(poptContext optCon)
 {
     int rc = EXIT_FAILURE;
     char * passPhrase = NULL;
     char * name = rpmExpand("%{?_gpg_name}", NULL);
+    struct rpmSignArgs sig = {NULL, 0, 0};
 
     if (rstreq(name, "")) {
 	fprintf(stderr, _("You must set \"%%_gpg_name\" in your macro file\n"));
 	goto exit;
     }
 
-    /* XXX FIXME: eliminate obsolete getpass() usage */
-    passPhrase = getpass(_("Enter pass phrase: "));
-    passPhrase = (passPhrase != NULL) ? rstrdup(passPhrase) : NULL;
-    if (checkPassPhrase(passPhrase) == 0) {
-	const char *arg;
-	fprintf(stderr, _("Pass phrase is good.\n"));
-	rc = 0;
-	while ((arg = poptGetArg(optCon)) != NULL) {
-	    rc += rpmPkgSign(arg, NULL, passPhrase);
+    if (fileSigningKey) {
+	addMacro(NULL, "_file_signing_key", NULL, fileSigningKey, RMIL_GLOBAL);
+    }
+
+    if (signfiles) {
+	const char *key = rpmExpand("%{?_file_signing_key}", NULL);
+	if (rstreq(key, "")) {
+	    fprintf(stderr, _("You must set \"$$_file_signing_key\" in your macro file or on the command line with --fskpath\n"));
+	    goto exit;
 	}
-    } else {
-	fprintf(stderr, _("Pass phrase check failed or gpg key expired\n"));
+
+	if (fskpass) {
+#ifndef WITH_IMAEVM
+	    argerror(_("--fskpass may only be specified when signing files"));
+#else
+	    fileSigningKeyPassword = get_fskpass();
+#endif
+	}
+
+	addMacro(NULL, "_file_signing_key_password", NULL,
+	    fileSigningKeyPassword, RMIL_CMDLINE);
+	if (fileSigningKeyPassword) {
+	    memset(fileSigningKeyPassword, 0, strlen(fileSigningKeyPassword));
+	    free(fileSigningKeyPassword);
+	}
+
+	sig.signfiles = 1;
+    }
+
+    const char *arg;
+    rc = 0;
+    while ((arg = poptGetArg(optCon)) != NULL) {
+	rc += rpmPkgSign(arg, &sig);
     }
 
 exit:
@@ -152,6 +120,10 @@ int main(int argc, char *argv[])
 
     if (poptPeekArg(optCon) == NULL) {
 	argerror(_("no arguments given"));
+    }
+
+    if (fileSigningKey && !signfiles) {
+	argerror(_("--fskpath may only be specified when signing files"));
     }
 
     switch (mode) {

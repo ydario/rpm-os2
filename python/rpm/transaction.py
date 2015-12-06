@@ -1,7 +1,14 @@
 #!/usr/bin/python
 
+import sys
 import rpm
 from rpm._rpm import ts as TransactionSetCore
+
+if sys.version_info[0] == 3:
+    _string_types = str,
+else:
+    _string_types = basestring,
+
 
 # TODO: migrate relevant documentation from C-side
 class TransactionSet(TransactionSetCore):
@@ -11,7 +18,7 @@ class TransactionSet(TransactionSetCore):
         oval = getattr(self, attr)
         setattr(self, attr, val)
         return oval
-        
+
     def setVSFlags(self, flags):
         return self._wrapSetGet('_vsflags', flags)
 
@@ -31,8 +38,8 @@ class TransactionSet(TransactionSetCore):
         return self._wrapSetGet('_probFilter', ignoreSet)
 
     def parseSpec(self, specfile):
-        import _rpmb
-        return _rpmb.spec(specfile)
+        import rpm._rpmb
+        return rpm._rpmb.spec(specfile)
 
     def getKeys(self):
         keys = []
@@ -44,21 +51,31 @@ class TransactionSet(TransactionSetCore):
         else:
             return tuple(keys)
 
-    def addInstall(self, item, key, how="u"):
-        if isinstance(item, basestring):
-            f = file(item)
+    def _f2hdr(self, item):
+        if isinstance(item, _string_types):
+            f = open(item)
             header = self.hdrFromFdno(f)
             f.close()
-        elif isinstance(item, file):
-            header = self.hdrFromFdno(item)
-        else:
+        elif isinstance(item, rpm.hdr):
             header = item
+        else:
+            header = self.hdrFromFdno(item)
+        return header
 
-        if not how in ['u', 'i']:
+    def addInstall(self, item, key, how="u"):
+        header = self._f2hdr(item)
+
+        if how not in ['u', 'i']:
             raise ValueError('how argument must be "u" or "i"')
         upgrade = (how == "u")
 
         if not TransactionSetCore.addInstall(self, header, key, upgrade):
+            raise rpm.error("adding package to transaction failed")
+
+    def addReinstall(self, item, key):
+        header = self._f2hdr(item)
+
+        if not TransactionSetCore.addReinstall(self, header, key):
             raise rpm.error("adding package to transaction failed")
 
     def addErase(self, item):
@@ -69,7 +86,7 @@ class TransactionSet(TransactionSetCore):
             hdrs = item
         elif isinstance(item, int):
             hdrs = self.dbMatch(rpm.RPMDBI_PACKAGES, item)
-        elif isinstance(item, basestring):
+        elif isinstance(item, _string_types):
             hdrs = self.dbMatch(rpm.RPMDBI_LABEL, item)
         else:
             raise TypeError("invalid type %s" % type(item))
@@ -122,14 +139,18 @@ class TransactionSet(TransactionSetCore):
             needflags = rpm.RPMSENSE_ANY
             if len(needs) == 3:
                 needop = needs[1]
-                if needop.find('<') >= 0: needflags |= rpm.RPMSENSE_LESS
-                if needop.find('=') >= 0: needflags |= rpm.RPMSENSE_EQUAL
-                if needop.find('>') >= 0: needflags |= rpm.RPMSENSE_GREATER
+                if needop.find('<') >= 0:
+                    needflags |= rpm.RPMSENSE_LESS
+                if needop.find('=') >= 0:
+                    needflags |= rpm.RPMSENSE_EQUAL
+                if needop.find('>') >= 0:
+                    needflags |= rpm.RPMSENSE_GREATER
                 needver = needs[2]
             else:
                 needver = ""
 
-            res.append(((n, v, r),(needname,needver),needflags,sense,p.key))
+            res.append(((n, v, r),
+                        (needname, needver), needflags, sense, p.key))
 
         return res
 

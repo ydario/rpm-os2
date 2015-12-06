@@ -13,11 +13,9 @@ rpm \- RPM Package Manager
 
 \fBrpm\fR {\fB-q|--query\fR} [\fBselect-options\fR] [\fBquery-options\fR]
 
-
+\fBrpm\fR \fB--querytags\fR
 
 \fBrpm\fR {\fB-V|--verify\fR} [\fBselect-options\fR] [\fBverify-options\fR]
-
-
 
 .SS "INSTALLING, UPGRADING, AND REMOVING PACKAGES:"
 .PP
@@ -35,18 +33,21 @@ rpm \- RPM Package Manager
 
 
 
+\fBrpm\fR {\fB--reinstall\fR} [\fBinstall-options\fR] \fB\fIPACKAGE_FILE\fB\fR\fI ...\fR
+
+
+
 \fBrpm\fR {\fB-e|--erase\fR} [\fB--allmatches\fR] [\fB--nodeps\fR] [\fB--noscripts\fR]
     [\fB--notriggers\fR] [\fB--test\fR] \fB\fIPACKAGE_NAME\fB\fR\fI\ ...\fR
 
 .SS "MISCELLANEOUS:"
 .PP
 
+\fBrpm\fR \fB--showrc\fR
 
-\fBrpm\fR {\fB--querytags|--showrc\fR}
+\fBrpm\fR \fB--setperms\fR \fB\fIPACKAGE_NAME\fB\fR\fI ...\fR
 
-
-
-\fBrpm\fR {\fB--setperms|--setugids\fR} \fB\fIPACKAGE_NAME\fB\fR\fI ...\fR
+\fBrpm\fR \fB--setugids\fR \fB\fIPACKAGE_NAME\fB\fR\fI ...\fR
 
 .SS "select-options"
 .PP
@@ -57,16 +58,20 @@ rpm \- RPM Package Manager
  [\fB--hdrid \fISHA1\fB\fR] [\fB--pkgid \fIMD5\fB\fR] [\fB--tid \fITID\fB\fR]
  [\fB--querybynumber \fIHDRNUM\fB\fR] [\fB--triggeredby \fIPACKAGE_NAME\fB\fR]
  [\fB--whatprovides \fICAPABILITY\fB\fR] [\fB--whatrequires \fICAPABILITY\fB\fR]
+ [\fB--whatrecommends \fICAPABILITY\fB\fR] [\fB--whatsuggests \fICAPABILITY\fB\fR]
+ [\fB--whatsupplements \fICAPABILITY\fB\fR] [\fB--whatenhances \fICAPABILITY\fB\fR]
 
 .SS "query-options"
 .PP
 
 
  [\fB--changelog\fR] [\fB-c,--configfiles\fR] [\fB--conflicts\fR]
- [\fB-d,--docfiles\fR] [\fB--dump\fR] [\fB--filesbypkg\fR] [\fB-i,--info\fR]
- [\fB--last\fR] [\fB-l,--list\fR] [\fB--obsoletes\fR] [\fB--provides\fR]
- [\fB--qf,--queryformat \fIQUERYFMT\fB\fR] [\fB-R,--requires\fR]
- [\fB--scripts\fR] [\fB-s,--state\fR] [\fB--triggers,--triggerscripts\fR]
+ [\fB-d,--docfiles\fR] [\fB--dump\fR] [\fB--enhances\fR] [\fB--filesbypkg\fR]
+ [\fB-i,--info\fR] [\fB--last\fR] [\fB-l,--list\fR] [\fB--obsoletes\fR]
+ [\fB--provides\fR] [\fB--qf,--queryformat \fIQUERYFMT\fB\fR]
+ [\fB--recommends\fR] [\fB-R,--requires\fR] [\fB--suggests\fR]
+ [\fB--supplements\fR] [\fB--scripts\fR] [\fB-s,--state\fR]
+ [\fB--triggers,--triggerscripts\fR]
 
 .SS "verify-options"
 .PP
@@ -110,7 +115,7 @@ packages.
 One of the following basic modes must be selected:
 \fBQuery\fR,
 \fBVerify\fR,
-\fBInstall/Upgrade/Freshen\fR,
+\fBInstall/Upgrade/Freshen/Reinstall\fR,
 \fBUninstall\fR,
 \fBSet Owners/Groups\fR,
 \fBShow Querytags\fR, and
@@ -206,6 +211,13 @@ new package is installed.
 This will upgrade packages, but only ones for which an earlier version is
 installed.
 .PP
+The general form of an rpm reinstall command is 
+.PP
+\fBrpm\fR {\fB--reinstall\fR} [\fBinstall-options\fR] \fB\fIPACKAGE_FILE\fB\fR\fI ...\fR
+.PP
+This reinstalls a previously installed package.
+.PP
+.PP
 .TP
 \fB--allfiles\fR
 Installs or upgrades all the missingok files in the package,
@@ -278,6 +290,10 @@ packages would normally be reordered to satisfy dependencies.
 \fB--nopreun\fR
 .TP
 \fB--nopostun\fR
+.TP
+\fB--nopretrans\fR
+.TP
+\fB--noposttrans\fR
 Don't execute the scriptlet of the same name.
 The \fB--noscripts\fR option is equivalent to
 
@@ -285,12 +301,16 @@ The \fB--noscripts\fR option is equivalent to
 \fB--nopost\fR
 \fB--nopreun\fR
 \fB--nopostun\fR
+\fB--nopretrans\fR
+\fB--noposttrans\fR
 
 and turns off the execution of the corresponding
 \fB%pre\fR,
 \fB%post\fR,
-\fB%preun\fR, and
+\fB%preun\fR,
 \fB%postun\fR
+\fB%pretrans\fR, and
+\fB%posttrans\fR
 scriptlet(s).
 .TP
 \fB--notriggers\fR
@@ -505,7 +525,9 @@ and information selection.
 .PP
 .TP
 \fB\fIPACKAGE_NAME\fB\fR
-Query installed package named \fIPACKAGE_NAME\fR.
+Query installed package named \fIPACKAGE_NAME\fR. To specify the package more precisely the package name may be followed by the version or version and release
+both separated by a dash or an architecture name separated by a dot. See the output of \fBrpm -qa\fR or \fBrpm -qp \fIPACKAGE_FILE\fB\fR as an example.
+
 .TP
 \fB-a, --all\fR
 Query all installed packages.
@@ -570,6 +592,18 @@ Query all packages that provide the \fICAPABILITY\fR capability.
 .TP
 \fB--whatrequires \fICAPABILITY\fB\fR
 Query all packages that require \fICAPABILITY\fR for proper functioning.
+.TP
+\fB--whatrecommends \fICAPABILITY\fB\fR
+Query all packages that recommend \fICAPABILITY\fR.
+.TP
+\fB--whatsuggests \fICAPABILITY\fB\fR
+Query all packages that suggest \fICAPABILITY\fR.
+.TP
+\fB--whatsupplements \fICAPABILITY\fB\fR
+Query all packages that supplement \fICAPABILITY\fR.
+.TP
+\fB--whatenhances \fICAPABILITY\fB\fR
+Query all packages that enhance \fICAPABILITY\fR.
 .SS "PACKAGE QUERY OPTIONS:"
 .PP
 .TP
@@ -596,6 +630,9 @@ path size mtime digest mode owner group isconfig isdoc rdev symlink
 .fi
 .RE
 .TP
+\fB--enhances\fR
+List capabilities enhanced by package(s)
+.TP
 \fB--filesbypkg\fR
 List all the files in each selected package.
 .TP
@@ -619,8 +656,17 @@ List packages this package obsoletes.
 \fB--provides\fR
 List capabilities this package provides.
 .TP
+\fB--recommends\fR
+List capabilities recommended by package(s)
+.TP
 \fB-R, --requires\fR
 List capabilities on which this package depends.
+.TP
+\fB--suggests\fR
+List capabilities suggested by package(s)
+.TP
+\fB--supplements\fR
+List capabilities supplemented by package(s)
 .TP
 \fB--scripts\fR
 List the package specific scriptlet(s) that are used as part
@@ -739,7 +785,12 @@ configuration file(s).
 sets permissions of files in the given package.
 .TP
 \fBrpm\fR \fB--setugids\fR \fIPACKAGE_NAME\fR
-sets user/group ownership of files in the given package.
+sets user/group ownership of files in the given package. This command can
+change permissions of files in that package. It is caused by calling command
+\fBchmod\fR that can clear SUID and SGID bits in some situations. So it is
+safer to call also \fB--setperms\fR after calling \fB--setugids\fR.
+.TP
+Options \fB--setperms\fR and \fB--setugids\fR are mutually exclusive.
 
 .SS "FTP/HTTP OPTIONS"
 .PP

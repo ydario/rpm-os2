@@ -64,10 +64,12 @@ typedef struct rpmts_s * rpmts;
 typedef struct rpmte_s * rpmte;
 typedef struct rpmds_s * rpmds;
 typedef struct rpmfi_s * rpmfi;
+typedef struct rpmfiles_s * rpmfiles;
 typedef struct rpmdb_s * rpmdb;
 typedef struct rpmdbMatchIterator_s * rpmdbMatchIterator;
 typedef struct rpmtsi_s * rpmtsi;
 typedef struct rpmps_s * rpmps;
+typedef struct rpmtxn_s * rpmtxn;
 
 typedef struct rpmdbIndexIterator_s * rpmdbIndexIterator;
 typedef const void * fnpyKey;
@@ -80,6 +82,7 @@ typedef struct rpmKeyring_s * rpmKeyring;
 typedef uint32_t rpmsid;
 typedef struct rpmstrPool_s * rpmstrPool;
 
+typedef struct rpmPlugin_s * rpmPlugin;
 typedef struct rpmPlugins_s * rpmPlugins;
 
 typedef struct rpmgi_s * rpmgi;

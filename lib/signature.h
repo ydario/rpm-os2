@@ -15,6 +15,19 @@ typedef	enum sigType_e {
     RPMSIGTYPE_HEADERSIG= 5	/*!< Header style signature */
 } sigType;
 
+enum {
+    RPMSIG_UNKNOWN_TYPE		= 0,
+    RPMSIG_DIGEST_TYPE		= 1,
+    RPMSIG_SIGNATURE_TYPE	= 2,
+    RPMSIG_OTHER_TYPE		= 3,
+};
+
+struct sigtInfo_s {
+    int hashalgo;
+    int payload;
+    int type;
+};
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -45,20 +58,12 @@ rpmRC rpmReadSignature(FD_t fd, Header *sighp, sigType sig_type, char ** msg);
 int rpmWriteSignature(FD_t fd, Header h);
 
 /** \ingroup signature
- * Generate digest(s) from a header+payload file, save in signature header.
- * @param sigh		signature header
- * @param file		header+payload file name
- * @param sigTag	type of digest(s) to add
- * @return		0 on success, -1 on failure
- */
-int rpmGenDigest(Header sigh, const char * file, rpmTagVal sigTag);
-
-/** \ingroup signature
  * Verify a signature from a package.
  *
  * @param keyring	keyring handle
  * @param sigtd		signature tag data container
  * @param sig		signature/pubkey parameters
+ * @param ctx		digest context
  * @retval result	detailed text result of signature verification
  * 			(malloc'd)
  * @return		result of signature verification
@@ -73,10 +78,20 @@ rpmRC rpmVerifySignature(rpmKeyring keyring, rpmtd sigtd, pgpDigParams sig,
  */
 Header rpmFreeSignature(Header h);
 
-/* Dumb wrapper around pgpPrtParams() to log some error messages on failure */
+/** \ingroup signature
+ * Generate signature and write to file
+ * @param SHA1		SHA1 digest
+ * @param MD5		MD5 digest
+ * @param size		size of header
+ * @param payloadSize	size of archive
+ * @param fd		output file
+ */
+rpmRC rpmGenerateSignature(char *SHA1, uint8_t *MD5, rpm_loff_t size,
+				rpm_loff_t payloadSize, FD_t fd);
+
 RPM_GNUC_INTERNAL
-int parsePGPSig(rpmtd sigtd, const char *type, const char *fn,
-		 pgpDigParams *sig);
+rpmRC rpmSigInfoParse(rpmtd td, const char *origin,
+                     struct sigtInfo_s *sigt, pgpDigParams *sigp, char **msg);
 
 #ifdef __cplusplus
 }

@@ -6,6 +6,7 @@
 
 #include "header-py.h"
 #include "rpmds-py.h"
+#include "rpmstrpool-py.h"
 
 struct rpmdsObject_s {
     PyObject_HEAD
@@ -169,12 +170,18 @@ static PyObject *rpmds_Instance(rpmdsObject * s)
     return Py_BuildValue("i", rpmdsInstance(s->ds));
 }
 
-static PyObject * rpmds_Rpmlib(rpmdsObject * s)
+static PyObject * rpmds_Rpmlib(rpmdsObject * s, PyObject *args, PyObject *kwds)
 {
+    rpmstrPool pool = NULL;
     rpmds ds = NULL;
+    char * kwlist[] = {"pool", NULL};
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "|O&:rpmds_Rpmlib", kwlist, 
+		 &poolFromPyObject, &pool))
+	return NULL;
 
     /* XXX check return code, permit arg (NULL uses system default). */
-    rpmdsRpmlib(&ds, NULL);
+    rpmdsRpmlibPool(pool, &ds, NULL);
 
     return rpmds_Wrap(&rpmds_Type, ds);
 }
@@ -183,39 +190,41 @@ static struct PyMethodDef rpmds_methods[] = {
  {"Count",	(PyCFunction)rpmds_Count,	METH_NOARGS,
 	"Deprecated, use len(ds) instead.\n" },
  {"Ix",		(PyCFunction)rpmds_Ix,		METH_NOARGS,
-	"ds.Ix -> Ix		- Return current element index.\n" },
+	"ds.Ix -> Ix -- Return current element index.\n" },
  {"DNEVR",	(PyCFunction)rpmds_DNEVR,	METH_NOARGS,
-	"ds.DNEVR -> DNEVR	- Return current DNEVR.\n" },
+	"ds.DNEVR -> DNEVR -- Return current DNEVR.\n" },
  {"N",		(PyCFunction)rpmds_N,		METH_NOARGS,
-	"ds.N -> N		- Return current N.\n" },
+	"ds.N -> N -- Return current N.\n" },
  {"EVR",	(PyCFunction)rpmds_EVR,		METH_NOARGS,
-	"ds.EVR -> EVR		- Return current EVR.\n" },
+	"ds.EVR -> EVR -- Return current EVR.\n" },
  {"Flags",	(PyCFunction)rpmds_Flags,	METH_NOARGS,
-	"ds.Flags -> Flags	- Return current Flags.\n" },
+	"ds.Flags -> Flags -- Return current Flags.\n" },
  {"TagN",	(PyCFunction)rpmds_TagN,	METH_NOARGS,
-	"ds.TagN -> TagN	- Return current TagN.\n" },
+  "ds.TagN -> TagN -- Return TagN (RPMTAG_*NAME)\n\n"
+  "the type of all dependencies in this set.\n" },
  {"Color",	(PyCFunction)rpmds_Color,	METH_NOARGS,
-	"ds.Color -> Color	- Return current Color.\n" },
+	"ds.Color -> Color -- Return current Color.\n" },
  {"SetNoPromote",(PyCFunction)rpmds_SetNoPromote, METH_VARARGS|METH_KEYWORDS,
-	NULL},
+  "ds.SetNoPromote(noPromote) -- Set noPromote for this instance.\n\n"
+  "If True non existing epochs are no longer equal to an epoch of 0."},
  {"Notify",	(PyCFunction)rpmds_Notify,	METH_VARARGS|METH_KEYWORDS,
-	NULL},
+  "ds.Notify(location, returnCode) -- Print debug info message\n\n if debugging is enabled."},
  {"Sort",	(PyCFunction)rpmds_Sort,	METH_NOARGS,
 	NULL},
  {"Find",	(PyCFunction)rpmds_Find,	METH_O,
-	NULL},
+  "ds.find(other_ds) -- Return index of other_ds in ds"},
  {"Merge",	(PyCFunction)rpmds_Merge,	METH_O,
 	NULL},
  {"Search",     (PyCFunction)rpmds_Search,      METH_O,
 "ds.Search(element) -> matching ds index (-1 on failure)\n\
-- Check that element dependency range overlaps some member of ds.\n\
-The current index in ds is positioned at overlapping member upon success.\n" },
- {"Rpmlib",     (PyCFunction)rpmds_Rpmlib,      METH_NOARGS|METH_STATIC,
-	"ds.Rpmlib -> nds       - Return internal rpmlib dependency set.\n"},
+Check that element dependency range overlaps some member of ds.\n\
+The current index in ds is positioned at overlapping member." },
+ {"Rpmlib",     (PyCFunction)rpmds_Rpmlib,      METH_VARARGS|METH_KEYWORDS|METH_STATIC,
+	"ds.Rpmlib -> nds -- Return internal rpmlib dependency set.\n"},
  {"Compare",	(PyCFunction)rpmds_Compare,	METH_O,
-	NULL},
+  "ds.compare(other) -- Compare current entries of self and other.\n\nReturns True if the entries match each other, False otherwise"},
  {"Instance",	(PyCFunction)rpmds_Instance,	METH_NOARGS,
-	NULL},
+  "ds.Instance() -- Return rpmdb key of corresponding package or 0."},
  {NULL,		NULL}		/* sentinel */
 };
 
@@ -305,10 +314,12 @@ static PyObject * rpmds_new(PyTypeObject * subtype, PyObject *args, PyObject *kw
     rpmTagVal tagN = RPMTAG_REQUIRENAME;
     rpmds ds = NULL;
     Header h = NULL;
-    char * kwlist[] = {"obj", "tag", NULL};
+    rpmstrPool pool = NULL;
+    char * kwlist[] = {"obj", "tag", "pool", NULL};
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "OO&:rpmds_new", kwlist, 
-	    	 &obj, tagNumFromPyObject, &tagN))
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "OO&|O&:rpmds_new", kwlist, 
+	    	 &obj, tagNumFromPyObject, &tagN,
+		 &poolFromPyObject, &pool))
 	return NULL;
 
     if (PyTuple_Check(obj)) {
@@ -317,16 +328,16 @@ static PyObject * rpmds_new(PyTypeObject * subtype, PyObject *args, PyObject *kw
 	rpmsenseFlags flags = RPMSENSE_ANY;
 	/* TODO: if flags are specified, evr should be required too */
 	if (PyArg_ParseTuple(obj, "s|O&s", &name, depflags, &flags, &evr)) {
-	    ds = rpmdsSingle(tagN, name, evr, flags);
+	    ds = rpmdsSinglePool(pool, tagN, name, evr, flags);
 	} else {
 	    PyErr_SetString(PyExc_ValueError, "invalid dependency tuple");
 	    return NULL;
 	}
     } else if (hdrFromPyObject(obj, &h)) {
 	if (tagN == RPMTAG_NEVR) {
-	    ds = rpmdsThis(h, RPMTAG_PROVIDENAME, RPMSENSE_EQUAL);
+	    ds = rpmdsThisPool(pool, h, RPMTAG_PROVIDENAME, RPMSENSE_EQUAL);
 	} else {
-	    ds = rpmdsNew(h, tagN, 0);
+	    ds = rpmdsNewPool(pool, h, tagN, 0);
 	}
     } else {
 	PyErr_SetString(PyExc_TypeError, "header or tuple expected");
@@ -337,7 +348,11 @@ static PyObject * rpmds_new(PyTypeObject * subtype, PyObject *args, PyObject *kw
 }
 
 static char rpmds_doc[] =
-"";
+    "rpm.ds (dependendcy set) gives a more convenient access to dependencies\n\n"
+    "It can hold multiple entries of Name Flags and EVR.\n"
+    "It typically represents all dependencies of one kind of a package\n"
+    "e.g. all Requires or all Conflicts.\n"
+    ;
 
 PyTypeObject rpmds_Type = {
 	PyVarObject_HEAD_INIT(&PyType_Type, 0)

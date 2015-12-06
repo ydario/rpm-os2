@@ -2,7 +2,6 @@
 #define H_RPMDB_INTERNAL
 
 #include <assert.h>
-#include <db.h>
 
 #include <rpm/rpmsw.h>
 #include <rpm/rpmtypes.h>
@@ -16,7 +15,7 @@ extern "C" {
 #undef HASHTYPE
 #undef HTKEYTYPE
 #undef HTDATATYPE
-#define HASHTYPE removedHash
+#define HASHTYPE packageHash
 #define HTKEYTYPE unsigned int
 #define HTDATATYPE struct rpmte_s *
 #include "rpmhash.H"
@@ -58,14 +57,6 @@ int rpmdbInit(const char * prefix, int perms);
  */
 RPM_GNUC_INTERNAL
 int rpmdbClose (rpmdb db);
-
-/** \ingroup rpmdb
- * Sync all database indices.
- * @param db		rpm database
- * @return		0 on success
- */
-RPM_GNUC_INTERNAL
-int rpmdbSync (rpmdb db);
 
 /** \ingroup rpmdb
  * Rebuild database indices from package headers.
@@ -130,13 +121,31 @@ int rpmdbExtendIterator(rpmdbMatchIterator mi,
 void rpmdbSortIterator(rpmdbMatchIterator mi);
 
 /** \ingroup rpmdb
+ * uniq the iterator by recnum
+ * Return database iterator.
+ * @param mi		rpm database iterator
+ */
+void rpmdbUniqIterator(rpmdbMatchIterator mi);
+
+/** \ingroup rpmdb
+ * If neg equals to zero then it leaves in iterator only packages that
+ * header numbers are in hdrNums. If neg is not zero then removes from iterator
+ * all packages that header numbers are in hdrNums.
+ * @param mi		rpm database iterator
+ * @param hdrNums	hash of package numbers
+ * @param neg		mode
+ * return		0 on success, 1 on failure (bad args)
+ */
+int rpmdbFilterIterator(rpmdbMatchIterator mi, packageHash hdrNums, int neg);
+
+/** \ingroup rpmdb
  * Remove items from set of package instances to iterate.
  * @note Sorted hdrNums are always passed in rpmlib.
  * @param mi		rpm database iterator
  * @param hdrNums	hash of package instances
  * @return		0 on success, 1 on failure (bad args)
  */
-int rpmdbPruneIterator(rpmdbMatchIterator mi, removedHash hdrNums);
+int rpmdbPruneIterator(rpmdbMatchIterator mi, packageHash hdrNums);
 
 /** \ingroup rpmdb
  * Create a new, empty match iterator (for purposes of extending it
@@ -148,16 +157,59 @@ int rpmdbPruneIterator(rpmdbMatchIterator mi, removedHash hdrNums);
 RPM_GNUC_INTERNAL
 rpmdbMatchIterator rpmdbNewIterator(rpmdb db, rpmDbiTagVal dbitag);
 
-#ifndef __APPLE__
-/**
- *  * Mergesort, same arguments as qsort(2).
- *   */
+/** \ingroup rpmdb
+ * Return database iterator that iterates over database items
+ * starting with pfx.
+ * @param db		rpm database
+ * @param rpmtag	database index tag
+ * @param pfx		prefix data
+ * @param plen		prefix data length (0 will use strlen(keyp))
+ * @return		NULL on failure
+ */
 RPM_GNUC_INTERNAL
-int mergesort(void *base, size_t nmemb, size_t size,
-                int (*cmp) (const void *, const void *));
-#else
-/* mergesort is defined in stdlib.h on Mac OS X */
-#endif /* __APPLE__ */
+rpmdbMatchIterator rpmdbInitPrefixIterator(rpmdb db, rpmDbiTagVal rpmtag,
+					const void * pfx, size_t plen);
+/** \ingroup rpmdb
+ * Get package offsets of entries
+ * @param ii		index iterator
+ * @return		db offsets of pkgs
+ */
+RPM_GNUC_INTERNAL
+unsigned int *rpmdbIndexIteratorPkgOffsets(rpmdbIndexIterator ii);
+
+/** \ingroup rpmdb
+ * Return current index (position) in iterator.
+ * @param mi		rpm database iterator
+ * @return		current index
+ */
+RPM_GNUC_INTERNAL
+int rpmdbGetIteratorIndex(rpmdbMatchIterator mi);
+
+/** \ingroup rpmdb
+ * Set iterator index.
+ * @param mi		rpm database iterator
+ * @param ix		index
+ */
+RPM_GNUC_INTERNAL
+void rpmdbSetIteratorIndex(rpmdbMatchIterator mi, unsigned int ix);
+
+/** \ingroup rpmdb
+ * Return offset of package with given index.
+ * @param mi		rpm database iterator
+ * @param ix		index
+ * @return		package offset
+ */
+RPM_GNUC_INTERNAL
+unsigned int rpmdbGetIteratorOffsetFor(rpmdbMatchIterator mi, unsigned int ix);
+
+/** \ingroup rpmdb
+ * Return header located in rpmdb at given offset.
+ * @param db		rpm database
+ * @param offset	database offset
+ * @return		header at given offset
+ */
+RPM_GNUC_INTERNAL
+Header rpmdbGetHeaderAt(rpmdb db, unsigned int offset);
 
 #ifdef __cplusplus
 }

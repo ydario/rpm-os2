@@ -8,8 +8,7 @@ include $(top_srcdir)/rpm.am
 
 CLEANFILES =
 EXTRA_DIST = CHANGES ChangeLog CREDITS GROUPS INSTALL \
-	autodeps autogen.sh \
-	db3/configure installplatform platform.in
+	autogen.sh db3/configure installplatform platform.in
 BUILT_SOURCES =
 
 SUBDIRS = po misc
@@ -72,6 +71,7 @@ pkginclude_HEADERS += lib/rpmcli.h
 pkginclude_HEADERS += lib/rpmlib.h
 pkginclude_HEADERS += lib/rpmds.h
 pkginclude_HEADERS += lib/rpmfi.h
+pkginclude_HEADERS += lib/rpmfiles.h
 pkginclude_HEADERS += lib/rpmlegacy.h
 pkginclude_HEADERS += lib/rpmpol.h
 pkginclude_HEADERS += lib/rpmps.h
@@ -82,6 +82,7 @@ pkginclude_HEADERS += lib/rpmte.h
 pkginclude_HEADERS += lib/rpmts.h
 pkginclude_HEADERS += lib/rpmtypes.h
 pkginclude_HEADERS += lib/rpmvf.h
+pkginclude_HEADERS += lib/rpmarchive.h
 
 pkginclude_HEADERS += sign/rpmsign.h
 
@@ -94,13 +95,13 @@ rpmbindir = `echo $(bindir) | $(SED) -e s,usr/bin,bin,`
 rpmbin_PROGRAMS = rpm
 
 bin_PROGRAMS =		rpm2cpio rpmbuild rpmdb rpmkeys rpmsign rpmspec
+if WITH_ARCHIVE
+bin_PROGRAMS += 	rpm2archive 
+endif
 
 rpmlibexec_PROGRAMS =
-rpmconfig_SCRIPTS =	autodeps/find-provides autodeps/find-requires \
-			mkinstalldirs \
+rpmconfig_SCRIPTS =	mkinstalldirs \
 			config.guess config.sub
-DISTCLEANFILES = autodeps/find-provides
-DISTCLEANFILES += autodeps/find-requires
 
 noinst_LTLIBRARIES = 		libcliutils.la
 libcliutils_la_SOURCES = 	cliutils.h cliutils.c
@@ -147,6 +148,10 @@ rpmspec_LDADD +=	@WITH_NSS_LIB@ @WITH_POPT_LIB@ @WITH_ZLIB_LIB@
 rpm2cpio_SOURCES =	rpm2cpio.c debug.h system.h
 rpm2cpio_LDADD =	lib/librpm.la rpmio/librpmio.la
 rpm2cpio_LDADD +=	@WITH_NSS_LIB@ @WITH_POPT_LIB@ @WITH_ZLIB_LIB@
+
+rpm2archive_SOURCES =	rpm2archive.c debug.h system.h
+rpm2archive_LDADD =	lib/librpm.la rpmio/librpmio.la
+rpm2archive_LDADD +=	@WITH_NSS_LIB@ @WITH_POPT_LIB@ @WITH_ZLIB_LIB@ @WITH_ARCHIVE_LIB@
 
 
 if LIBELF
@@ -269,7 +274,7 @@ EXTRA_DIST += doc/hacking.doxy.in doc/hacking/Doxyheader
 
 # Always build librpm docs
 if DOXYGEN
-doc/librpm.doxy: doc/librpm.doxy.in doc/librpm/Doxyheader Makefile.am $(pkginclude_HEADERS)
+doc/librpm.doxy: doc/librpm.doxy.in doc/librpm/Doxyheader Makefile.am configure.ac $(pkginclude_HEADERS)
 	files=`echo " $(HEADERS)" | $(SED) -e "s, , \@top_srcdir\@/,g"`; \
 	$(SED) -e "s,[@]pkginclude_HEADERS[@],$$files," \
 	  -e "s,\@top_srcdir\@/,$(top_srcdir)/,g" \
@@ -290,7 +295,7 @@ db.h:	$(top_builddir)/db3/db.h
 	$(LN_S) $(top_builddir)/db3/db.h $@
 BUILT_SOURCES += db.h
 endif
-DISTCLEANFILES += db.h
+DISTCLEANFILES = db.h
 
 clean-local:
 	rm -rf doc/hacking/html

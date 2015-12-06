@@ -36,6 +36,7 @@ enum rpmSpecFlags_e {
     RPMSPEC_ANYARCH	= (1 << 0),
     RPMSPEC_FORCE	= (1 << 1),
     RPMSPEC_NOLANG	= (1 << 2),
+    RPMSPEC_NOUTF8	= (1 << 3),
 };
 
 typedef rpmFlags rpmSpecFlags;
@@ -54,6 +55,13 @@ rpmSpecPkgIter rpmSpecPkgIterFree(rpmSpecPkgIter iter);
 
 /* Getters for spec package attributes */
 Header rpmSpecPkgHeader(rpmSpecPkg pkg);
+
+/*
+ * Retrieve package specific parsed spec script section (RPMBUILD_FILE_LIST,
+ * RPMBUILD_FILE_FILE, RPMBUILD_POLICY) as a malloc'ed string.
+ */
+char * rpmSpecPkgGetSection(rpmSpecPkg pkg, int section);
+
 
 /* Iterator for spec sources */
 rpmSpecSrcIter rpmSpecSrcIterInit(rpmSpec spec);

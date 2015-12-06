@@ -1,39 +1,15 @@
 #include "system.h"
 
+#include <pthread.h>
 #include <pwd.h>
 #include <grp.h>
+#include <netdb.h>
 #include <rpm/rpmlog.h>
 #include <rpm/rpmstring.h>
 
 #include "lib/misc.h"
 #include "lib/rpmug.h"
 #include "debug.h"
-
-#define HASHTYPE strCache
-#define HTKEYTYPE const char *
-#include "lib/rpmhash.H"
-#include "lib/rpmhash.C"
-#undef HASHTYPE
-#undef HTKEYTYPE
-
-static strCache strStash = NULL;
-
-const char * rpmugStashStr(const char *str)
-{
-    const char *ret = NULL;
-    if (str) {
-	if (strStash == NULL) {
-	    strStash = strCacheCreate(64, rstrhash, strcmp,
-				      (strCacheFreeKey)rfree);
-	}
-	
-	if (!strCacheGetEntry(strStash, str, &ret)) {
-	    strCacheAddEntry(strStash, xstrdup(str));
-	    (void) strCacheGetEntry(strStash, str, &ret);
-	}
-    }
-    return ret;
-}
 
 /* 
  * These really ought to use hash tables. I just made the
@@ -198,11 +174,27 @@ const char * rpmugGname(gid_t gid)
     }
 }
 
+static void loadLibs(void)
+{
+    (void) getpwnam("root");
+    endpwent();
+    (void) getgrnam("root");
+    endgrent();
+    (void) gethostbyname("localhost");
+}
+
+int rpmugInit(void)
+{
+    static pthread_once_t libsLoaded = PTHREAD_ONCE_INIT;
+
+    pthread_once(&libsLoaded, loadLibs);
+    return 0;
+}
+
 void rpmugFree(void)
 {
     rpmugUid(NULL, NULL);
     rpmugGid(NULL, NULL);
     rpmugUname(-1);
     rpmugGname(-1);
-    strStash = strCacheFree(strStash);
 }

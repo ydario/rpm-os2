@@ -21,7 +21,8 @@ EXTRA_PROGRAMS =
 
 usrlib_LTLIBRARIES = librpm.la
 librpm_la_SOURCES = \
-	backend/dbconfig.c backend/db3.c backend/dbi.h \
+	backend/db3.c backend/dbi.c backend/dbi.h \
+	backend/dbiset.c backend/dbiset.h \
 	headerutil.c header.c headerfmt.c header_internal.h \
 	rpmdb.c rpmdb_internal.h \
 	fprint.c fprint.h tagname.c rpmtd.c \
@@ -34,20 +35,24 @@ librpm_la_SOURCES = \
 	rpmlead.c rpmlead.h rpmps.c rpmprob.c rpmrc.c \
 	rpmte.c rpmte_internal.h rpmts.c rpmfs.h rpmfs.c \
 	rpmvercmp.c signature.c signature.h transaction.c \
-	verify.c rpmlock.c rpmlock.h misc.h \
-	rpmscript.h rpmscript.c legacy.c merge.c \
+	verify.c rpmlock.c rpmlock.h misc.h relocation.c \
+	rpmscript.h rpmscript.c legacy.c \
 	rpmchroot.c rpmchroot.h \
-	rpmplugins.c rpmplugins.h rpmug.c rpmug.h
+	rpmplugins.c rpmplugins.h rpmplugin.h rpmug.c rpmug.h \
+	rpmtriggers.h rpmtriggers.c
 
-librpm_la_LDFLAGS = -version-info 5:0:2
+librpm_la_LDFLAGS = -version-info $(rpm_version_info)
 
 librpm_la_LIBADD = \
 	$(top_builddir)/rpmio/librpmio.la \
 	@WITH_POPT_LIB@ \
-	@WITH_SELINUX_LIB@ \
 	@WITH_CAP_LIB@ \
 	@WITH_ACL_LIB@ \
 	@LIBINTL@
+
+if WITH_IMAEVM
+librpm_la_SOURCES += rpmsignfiles.c rpmsignfiles.h
+endif
 
 if WITH_LUA
 AM_CPPFLAGS += @LUA_CFLAGS@
@@ -59,6 +64,17 @@ if WITH_INTERNAL_DB
 librpm_la_LIBADD += $(libdb_la)
 else
 librpm_la_LIBADD += @WITH_DB_LIB@
+endif
+
+if NDB
+librpm_la_SOURCES += \
+	backend/ndb/glue.c \
+	backend/ndb/rpmpkg.c \
+	backend/ndb/rpmpkg.h \
+	backend/ndb/rpmidx.c \
+	backend/ndb/rpmidx.h \
+	backend/ndb/rpmxdb.c \
+	backend/ndb/rpmxdb.h
 endif
 
 tagtbl.C: Makefile.am $(srcdir)/rpmtag.h gentagtbl.sh

@@ -29,12 +29,6 @@ static rpmRC checkOwners(const char * urlfn)
 		urlfn, strerror(errno));
 	return RPMRC_FAIL;
     }
-#ifndef __EMX__
-    if (!rpmugUname(sb.st_uid) || !rpmugGname(sb.st_gid)) {
-	rpmlog(RPMLOG_ERR, _("Bad owner/group: %s\n"), urlfn);
-	return RPMRC_FAIL;
-    }
-#endif
 
     return RPMRC_OK;
 }
@@ -64,6 +58,7 @@ static char *doPatch(rpmSpec spec, uint32_t c, int strip, const char *db,
     char *arg_patch_flags = rpmExpand("%{?_default_patch_flags}", NULL);
     struct Source *sp;
     char *patchcmd;
+    rpmCompressedMagic compressed = COMPRESSED_NOT;
 
     for (sp = spec->sources; sp != NULL; sp = sp->next) {
 	if ((sp->flags & RPMBUILD_ISPATCH) && (sp->num == c)) {
@@ -82,7 +77,7 @@ static char *doPatch(rpmSpec spec, uint32_t c, int strip, const char *db,
     fn = rpmGetPath("%{_sourcedir}/", sp->source, NULL);
 
     /* On non-build parse's, file cannot be stat'd or read. */
-    if ((spec->flags & RPMSPEC_FORCE) || checkOwners(fn)) goto exit;
+    if ((spec->flags & RPMSPEC_FORCE) || rpmFileIsCompressed(fn, &compressed) || checkOwners(fn)) goto exit;
 
     if (db) {
 	rasprintf(&arg_backup,
@@ -104,7 +99,13 @@ static char *doPatch(rpmSpec spec, uint32_t c, int strip, const char *db,
 		reverse ? " -R" : "", 
 		removeEmpties ? " -E" : "");
 
-    patchcmd = rpmExpand("%{uncompress: ", fn, "} | %{__patch} ", args, NULL);
+    /* Avoid the extra cost of fork and pipe for uncompressed patches */
+    if (compressed != COMPRESSED_NOT) {
+	patchcmd = rpmExpand("{ %{uncompress: ", fn, "} || echo patch_fail ; } | "
+                             "%{__patch} ", args, NULL);
+    } else {
+	patchcmd = rpmExpand("%{__patch} ", args, " < ", fn, NULL);
+    }
 
     free(arg_fuzz);
     free(arg_dir);
@@ -140,7 +141,7 @@ static char *doUntar(rpmSpec spec, uint32_t c, int quietly)
     char *fn = NULL;
     char *buf = NULL;
     char *tar = NULL;
-    const char *taropts = ((rpmIsVerbose() && !quietly) ? "-xvvf" : "-xf");
+    const char *taropts = ((rpmIsVerbose() && !quietly) ? "-xvvof" : "-xof");
     struct Source *sp;
     rpmCompressedMagic compressed = COMPRESSED_NOT;
 
@@ -247,6 +248,7 @@ static int doSetupMacro(rpmSpec spec, const char *line)
     uint32_t num;
     int leaveDirs = 0, skipDefaultAction = 0;
     int createDir = 0, quietly = 0;
+    int buildInPlace = 0;
     const char * dirName = NULL;
     struct poptOption optionsTable[] = {
 	    { NULL, 'a', POPT_ARG_STRING, NULL, 'a',	NULL, NULL},
@@ -300,7 +302,16 @@ static int doSetupMacro(rpmSpec spec, const char *line)
 		  headerGetString(spec->packages->header, RPMTAG_NAME),
 		  headerGetString(spec->packages->header, RPMTAG_VERSION));
     }
+    /* Mer addition - support --build-in-place */
+    if (rpmExpandNumeric("%{_build_in_place}")) {
+	buildInPlace = 1;
+	spec->buildSubdir = NULL;
+    }
     addMacro(spec->macros, "buildsubdir", NULL, spec->buildSubdir, RMIL_SPEC);
+    if (buildInPlace) {
+	rc = RPMRC_OK;
+	goto exit;
+    }
     
     /* cd to the build dir */
     {	char * buildDir = rpmGenPath(spec->rootDir, "%{_builddir}", "");
@@ -374,8 +385,8 @@ exit:
 /**
  * Parse %patch line.
  * This supports too many crazy syntaxes:
- * - %patchN is equal to %patch -P<N>
- * - -P<N> -P<N+1>... can be used to apply several patch on a single line
+ * - %patchN is equal to %patch -P\<N\>
+ * - -P\<N\> -P\<N+1\>... can be used to apply several patch on a single line
  * - Any trailing arguments are treated as patch numbers
  * - Any combination of the above, except unless at least one -P is specified,
  *   %patch is treated as %patch -P0 so that "%patch 1" is actually
