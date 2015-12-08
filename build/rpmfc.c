@@ -619,6 +619,12 @@ static int rpmfcHelper(rpmfc fc, int ix,
 	const char *err = NULL;
 	rpmsenseFlags Flags = dsContext;
 
+	if ((xx = poptParseArgvString(pav[i], &depac, (const char ***)&depav)))
+	    err = poptStrerror(xx);
+
+	if (!err)
+	    err = parseDep(depav, depac, &N, &EVR, &Flags);
+
 	strcpy( N2, "");
 #ifdef __EMX__
 	// YD need to add @unixroot remapping
@@ -627,9 +633,6 @@ static int rpmfcHelper(rpmfc fc, int ix,
 	}
 #endif
 	strcat( N2, N);
-
-	if (!err)
-	    err = parseDep(depav, depac, &N2, &EVR, &Flags);
 
 	if (!err) {
 	    rpmds ds = rpmdsSingleNS(fc->pool, tagN, namespace, N2, EVR, Flags);

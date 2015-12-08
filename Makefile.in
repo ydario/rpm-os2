@@ -971,6 +971,12 @@ os2deps$(EXEEXT): $(os2deps_OBJECTS) $(os2deps_DEPENDENCIES) $(EXTRA_os2deps_DEP
 rpm$(EXEEXT): $(rpm_OBJECTS) $(rpm_DEPENDENCIES) $(EXTRA_rpm_DEPENDENCIES) 
 	@rm -f rpm$(EXEEXT)
 	$(AM_V_CCLD)$(LINK) $(rpm_OBJECTS) $(rpm_LDADD) $(LIBS)
+	# YD link exe also statically, so we can use it for bootstrap/debug
+	$(CC) $(LDFLAGS) -o rpm_s.exe $(rpm_OBJECTS) \
+		build/.libs/rpmbuild_s.a lib/.libs/rpm_s.a rpmio/.libs/rpmio_s.a \
+		.libs/cliutils.a \
+		-lnss3 -llzma \
+		-lz -lbz2 -ldb -lpopt -lmagic -lssp $(LIBS)
 
 rpm2archive$(EXEEXT): $(rpm2archive_OBJECTS) $(rpm2archive_DEPENDENCIES) $(EXTRA_rpm2archive_DEPENDENCIES) 
 	@rm -f rpm2archive$(EXEEXT)
@@ -983,16 +989,35 @@ rpm2cpio$(EXEEXT): $(rpm2cpio_OBJECTS) $(rpm2cpio_DEPENDENCIES) $(EXTRA_rpm2cpio
 rpmbuild$(EXEEXT): $(rpmbuild_OBJECTS) $(rpmbuild_DEPENDENCIES) $(EXTRA_rpmbuild_DEPENDENCIES) 
 	@rm -f rpmbuild$(EXEEXT)
 	$(AM_V_CCLD)$(LINK) $(rpmbuild_OBJECTS) $(rpmbuild_LDADD) $(LIBS)
+	# YD link exe also statically, so we can use it for bootstrap/debug
+	$(CC) $(LDFLAGS) -o rpmbuild_s.exe $(rpmbuild_OBJECTS) \
+		build/.libs/rpmbuild_s.a lib/.libs/rpm_s.a rpmio/.libs/rpmio_s.a .libs/cliutils.a \
+		-lnss3 -llzma \
+		-lz -lbz2 -ldb -lpopt -lmagic -lssp $(LIBS)
 
 rpmdb$(EXEEXT): $(rpmdb_OBJECTS) $(rpmdb_DEPENDENCIES) $(EXTRA_rpmdb_DEPENDENCIES) 
 	@rm -f rpmdb$(EXEEXT)
 	$(AM_V_CCLD)$(LINK) $(rpmdb_OBJECTS) $(rpmdb_LDADD) $(LIBS)
+	# YD link exe also statically, so we can use it for bootstrap/debug
+	$(CC) $(LDFLAGS) -o rpmdb_s.exe $(rpmdb_OBJECTS) \
+		build/.libs/rpmbuild_s.a lib/.libs/rpm_s.a rpmio/.libs/rpmio_s.a \
+		.libs/cliutils.a \
+		-lnss3 -llzma \
+		-lz -lbz2 -ldb -lpopt -lmagic -lintl_s -lurpo -lmmap -lpthread -lssp
+
 tools/rpmdeps.$(OBJEXT): tools/$(am__dirstamp) \
 	tools/$(DEPDIR)/$(am__dirstamp)
 
 rpmdeps$(EXEEXT): $(rpmdeps_OBJECTS) $(rpmdeps_DEPENDENCIES) $(EXTRA_rpmdeps_DEPENDENCIES) 
 	@rm -f rpmdeps$(EXEEXT)
 	$(AM_V_CCLD)$(LINK) $(rpmdeps_OBJECTS) $(rpmdeps_LDADD) $(LIBS)
+	# YD link exe also statically, so we can use it for bootstrap/debug
+	$(CC) $(LDFLAGS) -o rpmdeps_s.exe $(rpmdeps_OBJECTS) \
+		build/.libs/rpmbuild_s.a lib/.libs/rpm_s.a rpmio/.libs/rpmio_s.a \
+		.libs/cliutils.a \
+		-lnss3 -llzma \
+		-lz -lbz2 -ldb -lpopt -lmagic -lintl_s -lurpo -lmmap -lpthread -lssp
+
 tools/rpmgraph.$(OBJEXT): tools/$(am__dirstamp) \
 	tools/$(DEPDIR)/$(am__dirstamp)
 

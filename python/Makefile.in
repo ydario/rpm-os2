@@ -873,24 +873,24 @@ uninstall-am: uninstall-pkgpyexecDATA uninstall-pkgpyexecLTLIBRARIES
 # Otherwise a system limit (for SysV at least) may be exceeded.
 .NOEXPORT:
 
-_rpmb.dll: _rpmbmodule.la
+_rpmb.dll: _rpmb.la
 	echo "LIBRARY _rpmb INITINSTANCE TERMINSTANCE" > _rpmb.def
 	echo "DATA MULTIPLE" >> _rpmb.def
 	echo "EXPORTS" >> _rpmb.def
-	cd .libs ; emxexp $(subst .lo,.o,$(_rpmbmodule_la_OBJECTS)) >> ../_rpmb.def
-	$(_rpmbmodule_la_LINK) -Zdll _rpmb.def $(am__rpmbmodule_la_rpath) $(_rpmbmodule_la_OBJECTS) $(_rpmbmodule_la_LIBADD) $(LIBS) -lssp
+	cd .libs ; emxexp $(subst .lo,.o,$(_rpmb_la_OBJECTS)) >> ../_rpmb.def
+	$(_rpmb_la_LINK) -Zdll _rpmb.def $(am__rpmb_la_rpath) $(_rpmb_la_OBJECTS) $(_rpmb_la_LIBADD) $(LIBS) -lssp
 
-_rpms.dll: _rpmsmodule.la
+_rpms.dll: _rpms.la
 	echo "LIBRARY _rpms INITINSTANCE TERMINSTANCE" > _rpms.def
 	echo "DATA MULTIPLE" >> _rpms.def
 	echo "EXPORTS" >> _rpms.def
-	cd .libs ; emxexp $(subst .lo,.o,$(_rpmsmodule_la_OBJECTS)) >> ../_rpms.def
-	$(_rpmsmodule_la_LINK) -Zdll _rpms.def $(am__rpmsmodule_la_rpath) $(_rpmsmodule_la_OBJECTS) $(_rpmsmodule_la_LIBADD) $(LIBS) -lssp
+	cd .libs ; emxexp $(subst .lo,.o,$(_rpms_la_OBJECTS)) >> ../_rpms.def
+	$(_rpms_la_LINK) -Zdll _rpms.def $(am__rpms_la_rpath) $(_rpms_la_OBJECTS) $(_rpms_la_LIBADD) $(LIBS) -lssp
 
-_rpm.dll: _rpmmodule.la
+_rpm.dll: _rpm.la
 	echo "LIBRARY _rpm INITINSTANCE TERMINSTANCE" > _rpm.def
 	echo "DATA MULTIPLE" >> _rpm.def
 	echo "EXPORTS" >> _rpm.def
-	cd .libs ; emxexp $(subst .lo,.o,$(_rpmmodule_la_OBJECTS)) >> ../_rpm.def
-	$(_rpmmodule_la_LINK) -Zdll _rpm.def $(am__rpmmodule_la_rpath) $(_rpmmodule_la_OBJECTS) $(_rpmmodule_la_LIBADD) $(LIBS) -lssp
+	cd .libs ; emxexp $(subst .lo,.o,$(_rpm_la_OBJECTS)) >> ../_rpm.def
+	$(_rpm_la_LINK) -Zdll _rpm.def $(am__rpm_la_rpath) $(_rpm_la_OBJECTS) $(_rpm_la_LIBADD) $(LIBS) -lssp
 
