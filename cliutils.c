@@ -14,6 +14,9 @@
 #include "debug.h"
 
 static pid_t pipeChild = 0;
+#ifdef __KLIBC__
+static FILE* pipeFD = NULL;
+#endif
 
 RPM_GNUC_NORETURN
 void argerror(const char * desc)
@@ -49,6 +52,17 @@ int initPipe(void)
 {
     int p[2];
 
+#ifdef __KLIBC__
+
+    char cmdline[16*1024];
+    sprintf( cmdline, "sh -c %s", rpmcliPipeOutput);
+    // start child and redirect its input to us
+    pipeFD = popen( cmdline, "w");
+    // now redirect stdout to input handle
+    dup2( fileno(pipeFD), STDOUT_FILENO);
+
+#else
+
     if (pipe(p) < 0) {
 	fprintf(stderr, _("creating a pipe for --pipe failed: %m\n"));
 	return -1;
@@ -67,12 +81,26 @@ int initPipe(void)
     (void) close(p[0]);
     (void) dup2(p[1], STDOUT_FILENO);
     (void) close(p[1]);
+#endif
+
     return 0;
 }
 
 int finishPipe(void)
 {
     int rc = 0;
+
+#ifdef __KLIBC__
+
+    // close stdout to allow child to end
+    (void) fclose(stdout);
+    // wait child end and query exit code
+    int status = pclose(pipeFD);
+    pipeFD = NULL;
+    if (!WIFEXITED(status) || WEXITSTATUS(status))
+        rc = 1;
+
+#else
     if (pipeChild) {
 	int status;
 	pid_t reaped;
@@ -85,5 +113,7 @@ int finishPipe(void)
 	if (reaped == -1 || !WIFEXITED(status) || WEXITSTATUS(status))
 	    rc = 1;
     }
+#endif
+
     return rc;
 }
