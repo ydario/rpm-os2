@@ -55,9 +55,15 @@ int initPipe(void)
 #ifdef __KLIBC__
 
     char cmdline[16*1024];
-    sprintf( cmdline, "sh -c %s", rpmcliPipeOutput);
+    // place command line inside quotes to allow sh to execute all commands
+    // itself (otherwise also cmd is involved)
+    sprintf( cmdline, "sh -c \"%s\"", rpmcliPipeOutput);
     // start child and redirect its input to us
     pipeFD = popen( cmdline, "w");
+    if (pipeFD == NULL) {
+	fprintf(stderr, "creating a pipe for --pipe failed: %s\n", cmdline);
+	return -1;
+    }
     // now redirect stdout to input handle
     dup2( fileno(pipeFD), STDOUT_FILENO);
 
