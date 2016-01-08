@@ -98,6 +98,7 @@ int finishPipe(void)
 
 #ifdef __KLIBC__
 
+  if (pipeFD) {
     // close stdout to allow child to end
     (void) fclose(stdout);
     // wait child end and query exit code
@@ -105,6 +106,7 @@ int finishPipe(void)
     pipeFD = NULL;
     if (!WIFEXITED(status) || WEXITSTATUS(status))
         rc = 1;
+  }
 
 #else
     if (pipeChild) {
