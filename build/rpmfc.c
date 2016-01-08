@@ -627,8 +627,12 @@ static int rpmfcHelper(rpmfc fc, int ix,
 
 	strcpy( N2, "");
 #ifdef __EMX__
-	// YD need to add @unixroot remapping
-	if (!strncmp( N, "/bin", 4) || !strncmp( N, "/usr/bin", 8)) {
+	// YD need to add /@unixroot/usr remapping
+	if (!strncmp( N, "/bin", 4)) {
+	    strcpy( N2, "/@unixroot/usr");
+	}
+	// YD need to add /@unixroot remapping
+	if (!strncmp( N, "/usr/bin", 8)) {
 	    strcpy( N2, "/@unixroot");
 	}
 #endif
