@@ -278,6 +278,11 @@ static rpmRC runExtScript(rpmPlugins plugins, ARGV_const_t prefixes,
 
     rpmlog(RPMLOG_DEBUG, "%s: scriptlet start\n", sname);
 
+#ifdef __KLIBC__ // ticket#178
+    if (!script)
+	return RPMRC_OK;
+#endif
+
     if (script) {
 	fn = writeScript(*argvp[0], script);
 	if (fn == NULL) {
