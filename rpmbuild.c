@@ -466,7 +466,11 @@ static int buildForTarget(rpmts ts, const char * arg, BTA_t ba)
 	specFile = xstrdup(arg);
     }
 
+#ifdef __KLIBC__
+    if (*specFile != '/' && specFile[1] != ':') {
+#else
     if (*specFile != '/') {
+#endif
 	char *cwd = rpmGetCwd();
 	char *s = NULL;
 	rasprintf(&s, "%s/%s", cwd, specFile);
