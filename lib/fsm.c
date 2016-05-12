@@ -124,7 +124,17 @@ int renameEx( const char *old_name, const char *new_name)
 
     // try replacing the module first
     rc = DosReplaceModule( (PCSZ)NewName, (PCSZ)OldName, NULL);
-    if (rc == NO_ERROR) {
+    // if module is read-only, rename fails
+    if (rc == ERROR_ACCESS_DENIED) {
+      // unlock module
+      rc = DosReplaceModule( (PCSZ)NewName, NULL, NULL);
+      // remove read-only
+      rc = chmod( OldName, S_IREAD|S_IWRITE);
+      rc = chmod( NewName, S_IREAD|S_IWRITE);
+      // retry replacement
+      rc = DosReplaceModule( (PCSZ)NewName, (PCSZ)OldName, NULL);
+    }
+    if (rc == NO_ERROR || rc == ERROR_MODULE_IN_USE) {
       // delete temp file
       rc = unlink( OldName);
       // replacing done, reset error
