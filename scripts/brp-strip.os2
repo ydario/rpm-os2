@@ -3,10 +3,16 @@
 #
 # Strip debug info and compress OS/2 binaries and DLLs using emxomfstrip and lxlite tools.
 #
-# Usage: brp-strip.os2 [--[no-]compress] [--[no-]debuginfo]
+# Usage: brp-strip.os2 RPM_BUILD_SUBDIR [--[no-]compress] [--[no-]debuginfo]
 #            [-n|--names <wildcard1[,wildcard2...]>]
 #            [-i|--include <wildcard1[,wildcard2...]>]
 #            [-x|--exclude <wildcard1[,wildcard2...]>]
+#
+# RPM_BUILD_SUBDIR is a directory where the souce code of the package is
+# unpacked to. A file `debugfiles.list` containing a list of files with debug
+# info is created in this directory when the script is instructed to generate
+# debug info (by default). This file is then used by the %debug_package macro to
+# automatically generate a `debuginfo` sub-package for the given package.
 #
 # The --no-compress and --no-debuginfo flags completely disable lxlite and emxomfstrip
 # invocation, respectively. The -n flag overrides the default list of files that will be
@@ -22,6 +28,12 @@
 # write all resulting file names into a file list which is to be used by the
 # %debug_package macro to generate the debug package.
 #
+
+die()
+{
+  (>&2 echo "$0: ERROR: $1")
+  exit 1
+}
 
 # If using normal root, avoid changing anything.
 if [ -z "$RPM_BUILD_ROOT" -o "$RPM_BUILD_ROOT" = "/" -o "$RPM_BUILD_ROOT" = "/@unixroot" ]; then
@@ -40,8 +52,12 @@ COMPRESS_FILENAMES_EXCLUDE=
 DEBUGINFO_FILENAMES=
 DEBUGINFO_DFILENAMES_EXCLUDE=
 
+RPM_BUILD_SUBDIR="$1"
+[ -n "$RPM_BUILD_SUBDIR" ] || die "RPM_BUILD_SUBDIR is not set."
+shift
+
 dbgext="dbg"
-dbgfilelist=debugfiles.list
+dbgfilelist="$RPM_BUILD_SUBDIR/debugfiles.list"
 
 var="FILENAMES"
 
@@ -146,6 +162,6 @@ else
 fi
 
 [ -z "$NO_DEBUGINFO" ] && \
-    find "$RPM_BUILD_ROOT" -type f -name "*.$dbgext" | sed -e "s|^$RPM_BUILD_ROOT||" > "./$dbgfilelist"
+    find "$RPM_BUILD_ROOT" -type f -name "*.$dbgext" | sed -e "s|^$RPM_BUILD_ROOT||" > "$dbgfilelist"
 
 exit 0
