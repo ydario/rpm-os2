@@ -1293,6 +1293,5 @@ end}
 %{-S:%{expand:%__scm_setup_%{-S*} %{!-v:-q}}}\
 %{!-N:%autopatch %{-v} %{-p:-p%{-p*}}}
 
->>>>>>> .merge-right.r367
 # \endverbatim
 #*/
