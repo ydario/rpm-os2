@@ -200,6 +200,17 @@ package or when debugging this package.\
 %endif\
 %{nil}
 
+# Path to script that installs legacy runtime libraries.
+%__legacy_runtime_install_post \
+   %{_rpmconfigdir}/find-legacy-runtime.sh install "%{_target_cpu}" "%{_builddir}/%{?buildsubdir}"\
+%{nil}
+
+# Template for legacy runtime sub-packages.
+%legacy_runtime_packages \
+%global __legacy_runtime_packages 1\
+%{expand:%(%{_rpmconfigdir}/find-legacy-runtime.sh package "%{name}" "%{_sourcedir}" "%{_target_cpu}" "%{buildroot}")}\
+%{nil}
+
 %_defaultdocdir		%{_datadir}/doc
 %_defaultlicensedir	%{_datadir}/licenses
 
@@ -724,6 +735,7 @@ package or when debugging this package.\
 %{?__debug_package:%{__debug_install_post}}\
 %{__arch_install_post}\
 %{__os_install_post}\
+%{?__legacy_runtime_packages:%{__legacy_runtime_install_post}}\
 %{nil}
 %__spec_install_template	#!%{__spec_install_shell}\
 %{__spec_install_pre}\
