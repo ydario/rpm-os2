@@ -1399,6 +1399,5 @@ unzip -qq "%SOURCE0" -d ..\
 %{expand:%%{?__scm_setup_%{__source_scm}}}\
 %{nil}
 
->>>>>>> .merge-right.r367
 # \endverbatim
 #*/
