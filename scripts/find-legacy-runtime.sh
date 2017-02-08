@@ -90,7 +90,7 @@ for abi in $abi_list ; do
 EOF
     [ -n "$arch" ] && rpm_list="$arch.list"
   fi
-  # get properties
+  # get properties (see rpmbuild-bot.sh)
   IFS='|' read ts rpm name ver < "$rpm_list"
   [ -z "$name" -o -z "$ver" ] && die "Name or version field is missing in $rpm_list."
   # get the file list
@@ -99,13 +99,21 @@ EOF
   [ -f "$fileslist" ] || die "File $fileslist not found."
   # process commands
   if [ "$COMMAND" = "package" ] ; then
+    # Note: we have to store original Version and Release tag values in
+    # %main_version and %main_release for later use since we redefine them
+    # within %package and there is a bug in RPM that makes it permanent, see
+    # https://www.redhat.com/archives/rpm-list/2000-October/msg00218.html)
     echo "
+
+%global main_version %version
+%global main_release %release
+
 %package legacy-$abi
 
 Version: ${ver%%-*}
-Release: ${ver#*-}%{?dist}
+Release: ${ver#*-}
 Provides: $name = $ver
-Obsoletes: $name <= $ver
+Obsoletes: $name < $ver
 
 Summary: Legacy runtime components (ABI version $abi).
 
@@ -118,6 +126,7 @@ It is provided for compatibility with legacy applications.
 `cat "$fileslist"`
 
 "
+#Requires: $name = %{main_version}-%{main_release}%{?dist}
   else # install
     [ -z "$RPM_BUILD_SUBDIR" ] && die "RPM_BUILD_SUBDIR is not set."
     # Copy all listed files to RPM_BUILD_ROOT
