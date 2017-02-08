@@ -126,7 +126,6 @@ It is provided for compatibility with legacy applications.
 `cat "$fileslist"`
 
 "
-#Requires: $name = %{main_version}-%{main_release}%{?dist}
   else # install
     [ -z "$RPM_BUILD_SUBDIR" ] && die "RPM_BUILD_SUBDIR is not set."
     # Copy all listed files to RPM_BUILD_ROOT
