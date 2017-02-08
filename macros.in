@@ -1366,7 +1366,7 @@ BuildRequires: wget zip unzip\
 %{nil}
 
 %__scm_setup_github\
-%{!?__source_rev:%{error:%0: Revision is required for GitHub}}\
+%{!?__source_rev:%{error:%0: Revision in %%scm_source is required for GitHub}exit 1}\
 %global __source_url_github_name %(sh -c 'URL="%{__source_url}" ; echo ${URL##*/}')\
 %global __source_dir_github %{__source_url_github_name}-%{__source_rev}\
 %if %{?__source_rev:%(sh -c 'if test -f "%SOURCE0" ; then echo 1 ; else echo 0 ; fi')}%{!?__source_rev:0}\
@@ -1384,18 +1384,18 @@ unzip -qq "%SOURCE0" -d ..\
 # User-level macros
 
 %scm_source()\
-%{?SOURCE0:%{error:%0: Source tag is already set to '%SOURCE0'}}\
+%{?SOURCE0:%{error:%0: Source tag is already set to '%SOURCE0'}%{quit}}\
 %{?1:%global __source_scm %1}\
 %{?2:%global __source_url %2}\
 %{?3:%global __source_rev %3}\
-%global __source_dir %{?main_name}%{!?main_name:%{name}}-%{?main_version}%{!?main_version:%{version}}\
-%{expand:%%{!?__scm_source_%1:%%{error:%0: SCM type '%{?1}' is invalid}}}\
+%{expand:%%{!?__scm_source_%1:%%{error:%0: Invalid SCM type: %{?1}}%{quit}}}\
 %{expand:%%{?__scm_source_%1}}\
-%{!?__source_url:%{error:%0: URL is required}}\
 %{nil}
 
 %scm_setup(A:)\
-%{!?__source_scm:%{error:%0: %%scm_source is required}}\
+%{!?__source_scm:%{error:%0: Missing %%scm_source specification}exit 1}\
+%{!?__source_url:%{?__source_scm:%{error:%0: Missing URL in %%scm_source}exit 1}}\
+%global __source_dir %{?main_name}%{!?main_name:%{name}}-%{?main_version}%{!?main_version:%{version}}\
 %{expand:%%{?__scm_setup_%{__source_scm}}}\
 %{nil}
 
