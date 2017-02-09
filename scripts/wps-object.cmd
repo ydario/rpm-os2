@@ -52,7 +52,12 @@
  * parenthesis. Note that double parenthesis may not be nested.
  *
  * Author: Dmitry A. Kuminov
+ *
+ * Version: 1.1 - 2017-02-09
+ * - Fix object deletion (wrong hash map indexing).
+ *
  * Version: 1.0 - 2010-11-08
+ * - Inital release.
  */
 
 trace off
@@ -327,7 +332,7 @@ CreateObject: procedure expose (Globals)
     ok = 1
 
     /* check if there is an object with this id for this package */
-    if (symbol('G.PackageObjects.!map.'aID) == 'VAR') then do
+    if (symbol('G.PackageObjects.!map.aID') == 'VAR') then do
         /* update it */
         i = G.PackageObjects.!map.aID
         G.PackageObjects.i = aID':'aSpec
@@ -386,7 +391,7 @@ DeleteObject: procedure expose (Globals)
     parse arg aID
 
     /* check if there is an object with this id for this package */
-    if (symbol('G.PackageObjects.!map.'aID) \== 'VAR') then do
+    if (symbol('G.PackageObjects.!map.aID') \== 'VAR') then do
         /* nothing to do */
         return 0
     end
