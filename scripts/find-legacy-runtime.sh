@@ -111,9 +111,9 @@ EOF
 %package legacy-$abi
 
 Version: ${ver%%-*}
-Release: ${ver#*-}
-Provides: $name = $ver
-Obsoletes: $name < $ver
+Release: ${ver#*-}.L
+Provides: $name = $ver.L
+Obsoletes: $name <= $ver
 
 Summary: Legacy runtime components (ABI version $abi).
 
