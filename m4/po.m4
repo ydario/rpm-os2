@@ -101,7 +101,7 @@ changequote([,])dnl
         test -n "$ac_given_srcdir" || ac_given_srcdir="$srcdir"
         case "$ac_given_srcdir" in
           .)  top_srcdir=`echo $ac_dots|sed 's%/$%%'` ;;
-          /*) top_srcdir="$ac_given_srcdir" ;;
+          [\\/]* | ?:[\\/]*) top_srcdir="$ac_given_srcdir" ;;
           *)  top_srcdir="$ac_dots$ac_given_srcdir" ;;
         esac
         # Treat a directory as a PO directory if and only if it has a
@@ -225,7 +225,7 @@ changequote(,)dnl
   test -n "$ac_given_srcdir" || ac_given_srcdir="$srcdir"
   case "$ac_given_srcdir" in
     .)  top_srcdir=`echo $ac_dots|sed 's%/$%%'` ;;
-    /*) top_srcdir="$ac_given_srcdir" ;;
+    [\\/]* | ?:[\\/]*) top_srcdir="$ac_given_srcdir" ;;
     *)  top_srcdir="$ac_dots$ac_given_srcdir" ;;
   esac
 
