@@ -214,8 +214,8 @@ package or when debugging this package.\
 %_defaultdocdir		%{_datadir}/doc
 %_defaultlicensedir	%{_datadir}/licenses
 
-# Setup _pkgdocdir if not defined already
-%{!?_pkgdocdir:%global _pkgdocdir %{_docdir}/%{name}-%{version}}
+# The default directory for package documentation.
+%_pkgdocdir %{_docdir}/%{name}-%{version}
 
 #	The path to the gzip executable (legacy, use %{__gzip} instead).
 %_gzipbin		%{__gzip}
