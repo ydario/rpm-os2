@@ -2466,8 +2466,7 @@ static int renameTag(const char * prefix,
 	    if (stat(src, &st) < 0)
 		goto exit;
 
-	/* YD use URPO renameForce() to override EACCESS on locked files */
-	if ((xx = renameForce(src, dest)) != 0) {
+	if ((xx = rename(src, dest)) != 0) {
 	    rc = 1;
 	    goto exit;
 	}
