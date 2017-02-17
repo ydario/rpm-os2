@@ -27,7 +27,7 @@ rpmconfig_SCRIPTS = \
 	brp-compress brp-python-bytecompile brp-java-gcjcompile \
 	brp-strip brp-strip-comment-note brp-python-hardlink \
 	brp-strip-shared brp-strip-static-archive \
-	brp-strip.os2 check-files.os2 wps-object.exe warpin-conflicts.exe os2deps.sh \
+	brp-strip.os2 check-files.os2 wps-object.cmd warpin-conflicts.cmd os2deps.sh \
 	find-legacy-runtime.sh \
 	check-files check-prereqs \
 	check-buildroot check-rpaths check-rpaths-worker \
