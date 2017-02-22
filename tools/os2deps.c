@@ -15,9 +15,8 @@
 /**
  * Extract OS/2 LX dependencies.
  * @param fc		file classifier
- * @return		0 on success
  */
-static int processFile(const char *fn, int dtype)
+static void processFile(const char *fn, int dtype)
 {
     char fname[_MAX_FNAME], ext[_MAX_EXT];
     FILE *in;
@@ -25,8 +24,6 @@ static int processFile(const char *fn, int dtype)
     LXheader hdr;
     int i;
     word sign;
-    rpmds *ds;
-    int xx;
 
     in = fopen(fn, "rb");
     if (!in)
@@ -40,7 +37,7 @@ static int processFile(const char *fn, int dtype)
         fclose(in);
         return;
     }
-    
+
     // get LX header
     fseek(in, OffsetToLX, SEEK_SET);
     fread(&beg, sizeof(beg), 1, in);
@@ -51,7 +48,7 @@ static int processFile(const char *fn, int dtype)
         fclose(in);
         return;
     }
-    
+
     // scan header
     fseek(in, beg + hdr.ImportModuleTblOff, SEEK_SET);
     for (i = 0; i < (hdr.ImportProcTblOff - hdr.ImportModuleTblOff); i++) {
@@ -75,7 +72,7 @@ static int processFile(const char *fn, int dtype)
         }
     }
     fclose(in);
-    
+
     // add provides for DLL
     if (dtype == 0) {
         _splitpath( fn, NULL, NULL, fname, ext);
@@ -89,7 +86,7 @@ static int processFile(const char *fn, int dtype)
         }
     }
 
-    return 0;
+    return;
 }
 
 int main(int argc, char *argv[])
@@ -101,10 +98,10 @@ int main(int argc, char *argv[])
     struct poptOption opts[] = {
 	{ "provides", 'P', POPT_ARG_VAL, &provides, -1, NULL, NULL },
 	{ "requires", 'R', POPT_ARG_VAL, &requires, -1, NULL, NULL },
-	POPT_AUTOHELP 
+	POPT_AUTOHELP
 	POPT_TABLEEND
 };
-    
+
     optCon = poptGetContext(argv[0], argc, (const char **) argv, opts, 0);
     if (argc < 2 || poptGetNextOpt(optCon) == 0) {
         poptPrintUsage(optCon, stderr, 0);
