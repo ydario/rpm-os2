@@ -1315,7 +1315,7 @@ end}
 [ -f RPMBUILD_SOURCE ] && mv RPMBUILD_SOURCE RPMBUILD_SOURCE.orig\
 echo "SCM: %{__source_scm}\
 URL: %{__source_url}\
-Rev: %{__source_rev}" >RPMBUILD_SOURCE\
+Rev: %{?__source_rev}" >RPMBUILD_SOURCE\
 %{nil}
 
 # SVN
