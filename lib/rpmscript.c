@@ -271,10 +271,6 @@ static rpmRC runExtScript(rpmPlugins plugins, ARGV_const_t prefixes,
     const char *line;
     char *mline = NULL;
     rpmRC rc = RPMRC_FAIL;
-#ifdef __KLIBC__
-    ARGV_t argvp2;
-    char* cmd;
-#endif
 
     rpmlog(RPMLOG_DEBUG, "%s: scriptlet start\n", sname);
 
@@ -300,40 +296,6 @@ static rpmRC runExtScript(rpmPlugins plugins, ARGV_const_t prefixes,
 	    argvAddNum(argvp, arg2);
 	}
     }
-
-#ifdef __KLIBC__
-
-    argvp2 = argvNew();
-    argvAdd(&argvp2, "sh");
-    argvAdd(&argvp2, "-c");
-    argvAdd(&argvp2, "\"");
-    argvAdd(&argvp2, fn);
-    if (arg1 >= 0) {
-        argvAddNum(&argvp2, arg1);
-    }
-    if (arg2 >= 0) {
-        argvAddNum(&argvp2, arg2);
-    }
-    argvAdd(&argvp2, "\"");
-
-    // create command line, popen does 
-    // not directly execute shell scripts :-(
-    cmd = argvJoin(argvp2, " ");
-    if (0)
-        fprintf(stderr,"command line: '%s'\n", cmd);
-
-    in = popen(cmd, "w");
-    free(cmd);
-
-    if (in == NULL) {
-	rpmlog(lvl, _("%s scriptlet failed, waitpid(%d) rc %d: %s\n"),
-		 sname, pid, reaped, strerror(errno));
-    } else {
-	/* if we get this far we're clear */
-	rc = RPMRC_OK;
-    }
-
-#else
 
     if (pipe(inpipe) < 0) {
 	rpmlog(RPMLOG_ERR,
@@ -409,8 +371,6 @@ static rpmRC runExtScript(rpmPlugins plugins, ARGV_const_t prefixes,
     close(inpipe[0]);
     inpipe[0] = 0;
 
-#endif // __KLIBC__
-
     if (nextFileFunc->func) {
 	while ((line = nextFileFunc->func(nextFileFunc->param)) != NULL) {
 	    size_t size = strlen(line);
@@ -431,23 +391,12 @@ static rpmRC runExtScript(rpmPlugins plugins, ARGV_const_t prefixes,
 	    }
 	}
     }
-
-#ifdef __KLIBC__
-
-    status = pclose( in);
-    in = NULL;
-    reaped = 0;
-
-#else
-
     fclose(in);
     in = NULL;
 
     do {
 	reaped = waitpid(pid, &status, 0);
     } while (reaped == -1 && errno == EINTR);
-
-#endif
 
     rpmlog(RPMLOG_DEBUG, "%s: waitpid(%d) rc %d status %x\n",
 	   sname, (unsigned)pid, (unsigned)reaped, status);
