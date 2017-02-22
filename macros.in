@@ -388,7 +388,7 @@ package or when debugging this package.\
 # Returns list of unpackaged files, i.e. files in $RPM_BUILD_ROOT not packaged.
 #
 # Note: Disable (by commenting out) for legacy compatibility.
-%__check_files         %{_rpmconfigdir}/check-files.os2 %{buildroot}
+%__check_files         %{_rpmconfigdir}/check-files %{buildroot}
 
 #
 # Should unpackaged files in a build root terminate a build?
