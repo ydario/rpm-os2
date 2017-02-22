@@ -1,10 +1,5 @@
 #include "system.h"
 
-#ifdef __EMX__
-#include <process.h>
-#include <stdlib.h>
-#endif
-
 #include <errno.h>
 #include <sys/select.h>
 #include <sys/wait.h>
@@ -20,6 +15,12 @@
 #include <rpm/rpmds.h>
 #include <rpm/rpmfi.h>
 #include <rpm/rpmstrpool.h>
+
+#ifdef __EMX__
+#include <sys/socket.h>
+/* Use socketpair instead of pipe because of select */
+#define pipe(p) socketpair(AF_UNIX, SOCK_STREAM, 0, p)
+#endif
 
 #include "lib/rpmfi_internal.h"		/* rpmfiles stuff for now */
 #include "build/rpmbuild_internal.h"
@@ -205,14 +206,7 @@ static StringBuf getOutputFrom(ARGV_t argv,
     StringBuf readBuff;
     int myerrno = 0;
     int ret = 1; /* assume failure */
-#ifdef __EMX__
-    int i, fd, nbw, nbr;
-	FILE* in;
-	char tmpfile[_MAX_PATH];
-	char buffer[32*1024];
-#endif
 
-#ifndef __EMX__
     if (pipe(toProg) < 0 || pipe(fromProg) < 0) {
 	rpmlog(RPMLOG_ERR, _("Couldn't create pipe for %s: %m\n"), argv[0]);
 	return NULL;
@@ -252,92 +246,7 @@ static StringBuf getOutputFrom(ARGV_t argv,
     close(toProg[0]);
     close(fromProg[1]);
 
-#else
-
-#if 0
-	if (dir && chdir(dir)) {
-	    rpmlog(RPMLOG_ERR, _("Couldn't chdir to %s: %s\n"),
-		    dir, strerror(errno));
-	    _exit(EXIT_FAILURE);
-	}
-#endif
-
-	// write data to file
-	strcpy( tmpfile, "check-files-XXXXXX");
-	if (mktemp( tmpfile) == NULL) {
-		rpmlog(RPMLOG_ERR, _("Couldn't get temp file: %s\n"),
-			strerror(errno));
-		return NULL;
-	}
-	fd = open( tmpfile, O_CREAT|O_TRUNC|O_BINARY|O_WRONLY);
-	if (fd == -1) {
-		unlink(tmpfile);
-		rpmlog(RPMLOG_ERR, _("Couldn't open temp file: %s\n"),
-			strerror(errno));
-		return NULL;
-	}
-	nbw = write( fd, writePtr,writeBytesLeft); 
-	if (nbw != writeBytesLeft) {
-		close(fd);
-		unlink(tmpfile);
-		rpmlog(RPMLOG_ERR, _("Couldn't write temp file: %s\n"),
-			strerror(errno));
-		return NULL;
-	}
-	close(fd);
-	
-	// create command line, popen does 
-	// not directly execute shell scripts :-(
-	// TODO rewrite check-files.sh in rexx
-	strcpy( buffer, "sh -c \"");
-	strcat( buffer, argv[0]);
-	// popen requires backslash!
-	//for( i=0; i<strlen(buffer); i++)
-	//	if (buffer[i] == '/')
-	//		buffer[i] = '\\';
-
-	i = 1;
-	while( argv[i] != NULL) {
-		strcat( buffer, " ");
-		strcat( buffer, argv[i++]); 
-	}
-	// add temp file
-	strcat( buffer, " ");
-	strcat( buffer, tmpfile); 
-	strcat( buffer, "\"");
-	if (0)
-	    fprintf( stderr,"command line: '%s'\n", buffer);
-
-	// execute child and read input pipe
-	in = popen( buffer, "r");
-	if (in == NULL) {
-		unlink(tmpfile);
-		rpmlog(RPMLOG_ERR, _("Couldn't popen: %s\n"),
-			strerror(errno));
-		return NULL;
-	}
-	
 	readBuff = newStringBuf();
-
-	/* Read any data from prog */
-	{   char buf[BUFSIZ+1];
-	    while (!feof(in)) {
-			nbr = fread(buf, 1, sizeof(buf)-1, in);
-			buf[nbr] = '\0';
-			if (0)
-			    fprintf( stderr,"read '%s'\n",buf);
-			appendStringBuf(readBuff, buf);
-	    }
-	}
-	fclose(in);
-
-	// delete temporary
-	unlink(tmpfile);
-
-#endif // __EMX__
-
-#ifndef __EMX__
-    readBuff = newStringBuf();
 
     while (1) {
 	fd_set ibits, obits;
@@ -420,7 +329,6 @@ static StringBuf getOutputFrom(ARGV_t argv,
 		argv[0], strerror(myerrno));
 	goto exit;
     }
-#endif // __EMX__
 
     ret = 0;
 
