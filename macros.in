@@ -461,7 +461,7 @@ package or when debugging this package.\
 %_filter_GLIBC_PRIVATE			0
 
 # Directories whose contents should be considered as documentation.
-%__docdir_path %{_datadir}/doc:%{_datadir}/man:%{_datadir}/info:%{_datadir}/gtk-doc/html:%{?_docdir}:%{?_mandir}:%{?_infodir}:%{?_javadocdir}
+%__docdir_path %{_datadir}/doc:%{_datadir}/man:%{_datadir}/info:%{_datadir}/gtk-doc/html:%{?_docdir}:%{?_mandir}:%{?_infodir}:%{?_javadocdir}:/@unixroot/usr/doc:/@unixroot/usr/man:/@unixroot/usr/info
 
 #
 # Path to scripts to autogenerate package dependencies,
