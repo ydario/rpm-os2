@@ -42,18 +42,18 @@
 #   define __THROW
 #endif
 
-#if defined(hpux)
-# define _D_EXACT_NAMLEN(d) ((d)->d_namlen)
-# define	_INCLUDE_POSIX_SOURCE
+#if !defined(_LARGEFILE64_SOURCE)
 # define	_LARGEFILE64_SOURCE
 #endif
 
-#if defined(sun)
-# define _D_EXACT_NAMLEN(d) ((d)->d_reclen)
+#if !defined(_D_EXACT_NAMLEN)
+# define _D_EXACT_NAMLEN(d) (strlen((d)->d_name))
 #endif
 
-#if defined(__APPLE__)
-# define _D_EXACT_NAMLEN(d) (strlen((d)->d_name))
+#if defined(hpux)
+# if !defined(_INCLUDE_POSIX_SOURCE)
+#  define	_INCLUDE_POSIX_SOURCE
+# endif
 #endif
 
 #endif

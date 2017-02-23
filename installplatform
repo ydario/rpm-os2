@@ -96,6 +96,12 @@ for ARCH in noarch `grep ^arch_canon $RPMRC | cut -d: -f2`; do
 	CANONARCH=${ARCH}
 	CANONCOLOR=0
 	;;
+    armv7h*)
+	ISANAME=armv7hl
+	ISABITS=32
+	CANONARCH=arm
+	CANONCOLOR=0
+	;;
     arm*)
 	ISANAME=`echo ${ARCH} | sed "s/^\([^-]*\)-.*/\1/"`
 	ISABITS=32
@@ -138,11 +144,41 @@ for ARCH in noarch `grep ^arch_canon $RPMRC | cut -d: -f2`; do
 	CANONARCH=mips64el
 	CANONCOLOR=3
 	;;
+    mipsr6)
+	ISANAME=mipsr6
+	ISABITS=32
+	CANONARCH=mipsr6
+	CANONCOLOR=0
+	;;
+    mipsr6el)
+	ISANAME=mipsr6
+	ISABITS=32
+	CANONARCH=mipsr6el
+	CANONCOLOR=0
+	;;
+    mips64r6)
+	ISANAME=mipsr6
+	ISABITS=64
+	CANONARCH=mips64r6
+	CANONCOLOR=3
+	;;
+    mips64r6el)
+	ISANAME=mipsr6
+	ISABITS=64
+	CANONARCH=mips64r6el
+	CANONCOLOR=3
+	;;
     m68k)
 	ISANAME=m68k
 	ISABITS=32
 	CANONARCH=m68k
 	CANONCOLOR=0
+	;;
+    riscv64)
+	ISANAME=riscv
+	ISABITS=64
+	CANONARCH=riscv64
+	CANONCOLOR=3
 	;;
     noarch)
 	CANONARCH=noarch

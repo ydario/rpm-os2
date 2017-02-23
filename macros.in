@@ -180,7 +180,7 @@
 #	the script.  See the script for details.
 #
 %__debug_install_post   \
-   %{_rpmconfigdir}/find-debuginfo.sh %{?_missing_build_ids_terminate_build:--strict-build-id} %{?_find_debuginfo_opts} "%{_builddir}/%{?buildsubdir}"\
+   %{_rpmconfigdir}/find-debuginfo.sh %{?_missing_build_ids_terminate_build:--strict-build-id} %{?_include_minidebuginfo:-m} %{?_find_debuginfo_dwz_opts} %{?_find_debuginfo_opts} "%{_builddir}/%{?buildsubdir}"\
 %{nil}
 
 #	Template for debug information sub-package.
@@ -380,6 +380,7 @@ package or when debugging this package.\
 
 #	Default patch flags
 #%_default_patch_flags	-s
+%_default_patch_flags --no-backup-if-mismatch
 
 #==============================================================================
 # ---- Build configuration macros.
@@ -414,6 +415,9 @@ package or when debugging this package.\
 
 # Should invalid utf8 encoding in package metadata terminate a build?
 %_invalid_encoding_terminates_build 0
+
+# Should invalid version format in requires, provides, ... terminate a build?
+%_wrong_version_format_terminate_build 1
 
 #
 # Should rpm try to download missing sources at build-time?
@@ -451,6 +455,12 @@ package or when debugging this package.\
 # enable.
 #
 #%_missing_build_ids_terminate_build	1
+
+#
+# Include minimal debug information in build binaries.
+# Requires _enable_debug_packages.
+#
+#%_include_minidebuginfo	1
 
 #
 # Use internal dependency generator rather than external helpers?
@@ -620,7 +630,6 @@ package or when debugging this package.\
 %_vsflags_erase		%{__vsflags}
 %_vsflags_install	%{__vsflags}
 %_vsflags_query		%{__vsflags}
-%_vsflags_query_rpmdb	0xf0f00
 %_vsflags_rebuilddb	0xc0c00
 %_vsflags_verify	%{__vsflags}
 
@@ -895,7 +904,7 @@ package or when debugging this package.\
 
 #------------------------------------------------------------------------------
 # The "make" analogue, hiding the _smp_mflags magic from specs
-%make_build %{__make} %{?_smp_mflags}
+%make_build %{__make} -O %{?_smp_mflags}
 
 #------------------------------------------------------------------------------
 # The make install analogue of %configure for modern autotools:
@@ -1031,8 +1040,24 @@ done \
 %arm	armv3l armv4b armv4l armv4tl armv5tel armv5tejl armv6l armv6hl armv7l armv7hl armv7hnl
 
 #------------------------------------------------------------------------------
+# arch macro for 32-bit MIPS processors
+%mips32	mips mipsel mipsr6 mipsr6el
+
+#------------------------------------------------------------------------------
+# arch macro for 64-bit MIPS processors
+%mips64	mips64 mips64el mips64r6 mips64r6el
+
+#------------------------------------------------------------------------------
+# arch macro for big endian MIPS processors
+%mipseb	mips mipsr6 mips64 mips64r6
+
+#------------------------------------------------------------------------------
+# arch macro for little endian MIPS processors
+%mipsel	mipsel mipsr6el mips64el mips64r6el
+
+#------------------------------------------------------------------------------
 # arch macro for all supported MIPS processors
-%mips	mips mipsel mips64 mips64el
+%mips	%{mips32} %{mips64}
 
 #------------------------------------------------------------------------------
 # arch macro for all supported Sparc processors
@@ -1237,7 +1262,7 @@ done \
 # Plain patch (-m is unused)
 %__scm_setup_patch(q) %{nil}
 %__scm_apply_patch(qp:m:)\
-%{__patch} %{-p:-p%{-p*}} %{-q:-s}
+%{__patch} %{-p:-p%{-p*}} %{-q:-s} --fuzz=%{_default_patch_fuzz} %{_default_patch_flags}
 
 # Mercurial (aka hg)
 %__scm_setup_hg(q)\
@@ -1287,7 +1312,15 @@ done \
 
 # Single patch application
 %apply_patch(qp:m:)\
-%{uncompress:%{1}} | %{expand:%__scm_apply_%{__scm} %{-q} %{-p:-p%{-p*}} %{-m:-m%{-m*}}}
+%{lua:\
+local file = rpm.expand("%{1}")\
+if posix.access(file, "r") then\
+    local options = rpm.expand("%{-q} %{-p:-p%{-p*}} %{-m:-m%{-m*}}")\
+    local scm_apply = rpm.expand("%__scm_apply_%{__scm}")\
+    print(rpm.expand("%{uncompress:"..file.."} | "..scm_apply.." "..options.."\\n"))\
+else\
+    print("echo 'Cannot read "..file.."'; exit 1;".."\\n")\
+end}
 
 # Automatically apply all patches
 %autopatch(vp:)\

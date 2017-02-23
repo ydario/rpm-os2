@@ -1,10 +1,11 @@
-<map id="G" name="G">
-<area shape="rect" id="node3" href="$cliutils_8c.html" title="cliutils.c" alt="" coords="5,83,75,112"/>
-<area shape="rect" id="node5" href="$rpm2cpio_8c.html" title="rpm2cpio.c" alt="" coords="99,83,184,112"/>
-<area shape="rect" id="node7" href="$rpmbuild_8c.html" title="rpmbuild.c" alt="" coords="208,83,291,112"/>
-<area shape="rect" id="node9" href="$rpmdb_8c.html" title="rpmdb.c" alt="" coords="315,83,384,112"/>
-<area shape="rect" id="node11" href="$rpmkeys_8c.html" title="rpmkeys.c" alt="" coords="408,83,491,112"/>
-<area shape="rect" id="node13" href="$rpmqv_8c.html" title="rpmqv.c" alt="" coords="515,83,584,112"/>
-<area shape="rect" id="node15" href="$rpmsign_8c.html" title="rpmsign.c" alt="" coords="608,83,685,112"/>
-<area shape="rect" id="node17" href="$rpmspec_8c.html" title="rpmspec.c" alt="" coords="709,83,792,112"/>
+<map id="debug.h" name="debug.h">
+<area shape="rect" id="node2" href="$cliutils_8c.html" title="cliutils.c" alt="" coords="5,80,76,107"/>
+<area shape="rect" id="node3" href="$rpm2archive_8c.html" title="rpm2archive.c" alt="" coords="101,80,205,107"/>
+<area shape="rect" id="node4" href="$rpm2cpio_8c.html" title="rpm2cpio.c" alt="" coords="229,80,316,107"/>
+<area shape="rect" id="node5" href="$rpmbuild_8c.html" title="rpmbuild.c" alt="" coords="341,80,423,107"/>
+<area shape="rect" id="node6" href="$rpmdb_8c.html" title="rpmdb.c" alt="" coords="447,80,517,107"/>
+<area shape="rect" id="node7" href="$rpmkeys_8c.html" title="rpmkeys.c" alt="" coords="541,80,623,107"/>
+<area shape="rect" id="node8" href="$rpmqv_8c.html" title="rpmqv.c" alt="" coords="647,80,717,107"/>
+<area shape="rect" id="node9" href="$rpmsign_8c.html" title="rpmsign.c" alt="" coords="741,80,820,107"/>
+<area shape="rect" id="node10" href="$rpmspec_8c.html" title="rpmspec.c" alt="" coords="845,80,927,107"/>
 </map>

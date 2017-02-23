@@ -62,6 +62,11 @@ optflags: mipsel -O2 -g
 optflags: mips64 -O2 -g
 optflags: mips64el -O2 -g
 
+optflags: mipsr6 -O2 -g
+optflags: mipsr6el -O2 -g
+optflags: mips64r6 -O2 -g
+optflags: mips64r6el -O2 -g
+
 optflags: armv3l -O2 -g -march=armv3
 optflags: armv4b -O2 -g -march=armv4
 optflags: armv4l -O2 -g -march=armv4
@@ -94,6 +99,8 @@ optflags: sh4a -O2 -g -mieee
 
 optflags: aarch64 -O2 -g
 
+optflags: riscv64 -O2 -g
+
 #############################################################
 # Architecture colors
 
@@ -121,6 +128,11 @@ archcolor: mipsel 1
 archcolor: mips64 2
 archcolor: mips64el 2
 
+archcolor: mipsr6 1
+archcolor: mipsr6el 1
+archcolor: mips64r6 2
+archcolor: mips64r6el 2
+
 archcolor: m68k 1
 
 archcolor: m68kmint 1
@@ -136,6 +148,8 @@ archcolor: sh3 1
 archcolor: sh4 1
 
 archcolor: aarch64 2
+
+archcolor: riscv64 2
 
 #############################################################
 # Canonical arch names and numbers
@@ -227,6 +241,14 @@ arch_canon:	sh4: sh4	17
 arch_canon:	sh4a: sh4a	17
 arch_canon:	xtensa: xtensa	18
 arch_canon:	aarch64: aarch64 19
+
+arch_canon:	mipsr6: mipsr6	20
+arch_canon:	mipsr6el: mipsr6el	20
+arch_canon:	mips64r6: mips64r6	21
+arch_canon:	mips64r6el: mips64r6el	21
+
+arch_canon:	riscv: riscv64	22
+arch_canon:	riscv64: riscv64	22
 
 #############################################################
 # Canonical OS names and numbers
@@ -325,6 +347,11 @@ buildarchtranslate: mipsel: mipsel
 buildarchtranslate: mips64: mips64
 buildarchtranslate: mips64el: mips64el
 
+buildarchtranslate: mipsr6: mipsr6
+buildarchtranslate: mipsr6el: mipsr6el
+buildarchtranslate: mips64r6: mips64r6
+buildarchtranslate: mips64r6el: mips64r6el
+
 buildarchtranslate: m68k: m68k
 
 buildarchtranslate: atarist: m68kmint
@@ -349,6 +376,9 @@ buildarchtranslate: sh4: sh4
 buildarchtranslate: sh4a: sh4
 
 buildarchtranslate: aarch64: aarch64
+
+buildarchtranslate: riscv: riscv64
+buildarchtranslate: riscv64: riscv64
 
 #############################################################
 # Architecture compatibility
@@ -406,6 +436,11 @@ arch_compat: mipsel: noarch
 arch_compat: mips64: mips
 arch_compat: mips64el: mipsel
 
+arch_compat: mipsr6: noarch
+arch_compat: mipsr6el: noarch
+arch_compat: mips64r6: mipsr6
+arch_compat: mips64r6el: mipsr6el
+
 arch_compat: hppa2.0: hppa1.2
 arch_compat: hppa1.2: hppa1.1
 arch_compat: hppa1.1: hppa1.0
@@ -450,6 +485,9 @@ arch_compat: sh4a: sh4
 
 arch_compat: aarch64: noarch
 
+arch_compat: riscv: noarch
+arch_compat: riscv64: noarch
+
 os_compat:   IRIX64: IRIX
 os_compat: solaris2.7: solaris2.3 solaris2.4 solaris2.5 solaris2.6
 os_compat: solaris2.6: solaris2.3 solaris2.4 solaris2.5
@@ -482,6 +520,9 @@ os_compat: Darwin: MacOSX
 buildarch_compat: ia64: noarch
 
 buildarch_compat: aarch64: noarch
+
+buildarch_compat: riscv: noarch
+buildarch_compat: riscv64: noarch
 
 buildarch_compat: athlon: i686
 buildarch_compat: geode: i586
@@ -528,6 +569,11 @@ buildarch_compat: mips: noarch
 buildarch_compat: mipsel: noarch
 buildarch_compat: mips64: noarch
 buildarch_compat: mips64el: noarch
+
+buildarch_compat: mipsr6: noarch
+buildarch_compat: mipsr6el: noarch
+buildarch_compat: mips64r6: noarch
+buildarch_compat: mips64r6el: noarch
 
 buildarch_compat: armv4b: noarch
 buildarch_compat: armv7l: armv6l

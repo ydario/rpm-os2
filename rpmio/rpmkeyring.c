@@ -159,9 +159,8 @@ rpmPubkey *rpmGetSubkeys(rpmPubkey mainkey, int *count)
     int pgpsubkeysCount = 0;
     int i;
 
-    if (!pgpPrtParamsSubkeys(mainkey->pkt, mainkey->pktlen, mainkey->pgpkey,
-			    &pgpsubkeys, &pgpsubkeysCount)) {
-
+    if (mainkey && !pgpPrtParamsSubkeys(mainkey->pkt, mainkey->pktlen,
+			mainkey->pgpkey, &pgpsubkeys, &pgpsubkeysCount)) {
 
 	subkeys = xmalloc(pgpsubkeysCount * sizeof(*subkeys));
 
@@ -178,6 +177,7 @@ rpmPubkey *rpmGetSubkeys(rpmPubkey mainkey, int *count)
 	    subkey->nrefs = 1;
 	    pthread_rwlock_init(&subkey->lock, NULL);
 	}
+	free(pgpsubkeys);
     }
     *count = pgpsubkeysCount;
 

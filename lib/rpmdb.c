@@ -315,7 +315,7 @@ int rpmdbCheckTerminate(int terminate)
     sigset_t newMask, oldMask;
     static int terminating = 0;
 
-    if (terminating) return 0;
+    if (terminating) return terminating;
 
     (void) sigfillset(&newMask);		/* block all signals */
     (void) sigprocmask(SIG_BLOCK, &newMask, &oldMask);
@@ -454,6 +454,12 @@ int rpmdbClose(rpmdb db)
     if (db == NULL)
 	goto exit;
 
+    prev = &rpmdbRock;
+    while ((next = *prev) != NULL && next != db)
+	prev = &next->db_next;
+    if (!next)
+	goto exit;
+
     (void) rpmdbUnlink(db);
 
     if (db->nrefs > 0)
@@ -474,9 +480,6 @@ int rpmdbClose(rpmdb db)
     db->db_indexes = _free(db->db_indexes);
     db->db_descr = _free(db->db_descr);
 
-    prev = &rpmdbRock;
-    while ((next = *prev) != NULL && next != db)
-	prev = &next->db_next;
     if (next) {
         *prev = next->db_next;
 	next->db_next = NULL;
@@ -1085,7 +1088,8 @@ rpmdbMatchIterator rpmdbFreeIterator(rpmdbMatchIterator mi)
     if (next) {
 	*prev = next->mi_next;
 	next->mi_next = NULL;
-    }
+    } else
+	return NULL;
 
     pkgdbOpen(mi->mi_db, 0, &dbi);
 
@@ -2085,7 +2089,8 @@ rpmdbIndexIterator rpmdbIndexIteratorFree(rpmdbIndexIterator ii)
     if (next) {
         *prev = next->ii_next;
         next->ii_next = NULL;
-    }
+    } else
+	return NULL;
 
     ii->ii_dbc = dbiCursorFree(ii->ii_dbi, ii->ii_dbc);
     ii->ii_dbi = NULL;
@@ -2178,12 +2183,22 @@ struct updateRichDepData {
     ARGV_t argv;
     int nargv;
     int neg;
+    int level;
+    int *nargv_level;
 };
 
 static rpmRC updateRichDepCB(void *cbdata, rpmrichParseType type,
 		const char *n, int nl, const char *e, int el, rpmsenseFlags sense,
 		rpmrichOp op, char **emsg) {
     struct updateRichDepData *data = cbdata;
+    if (type == RPMRICH_PARSE_ENTER) {
+	data->level++;
+	data->nargv_level = xrealloc(data->nargv_level, data->level * (sizeof(int)));
+	data->nargv_level[data->level - 1] = data->nargv;
+    }
+    if (type == RPMRICH_PARSE_LEAVE) {
+	data->level--;
+    }
     if (type == RPMRICH_PARSE_SIMPLE && nl && !(nl > 7 && !strncmp(n, "rpmlib(", 7))) {
 	char *name = xmalloc(nl + 2);
 	*name = data->neg ? '!' : ' ';
@@ -2192,7 +2207,25 @@ static rpmRC updateRichDepCB(void *cbdata, rpmrichParseType type,
 	argvAdd(&data->argv, name);
 	data->nargv++;
 	_free(name);
-    } else if ((type == RPMRICH_PARSE_OP || RPMRICH_PARSE_LEAVE) && (op == RPMRICHOP_IF || op == RPMRICHOP_ELSE)) {
+    }
+    if (type == RPMRICH_PARSE_OP && op == RPMRICHOP_IF) {
+	/* save nargv in case of ELSE */
+	data->nargv_level[data->level - 1] = data->nargv;
+	data->neg ^= 1;
+    }
+    if (type == RPMRICH_PARSE_OP && op == RPMRICHOP_ELSE) {
+	int i, nargv = data->nargv;
+	/* copy and invert condition block */
+	for (i = data->nargv_level[data->level - 1]; i < nargv; i++) {
+	    char *name = data->argv[i];
+	    *name ^= ' ' ^ '!';
+	    argvAdd(&data->argv, name);
+	    *name ^= ' ' ^ '!';
+	    data->nargv++;
+	}
+	data->neg ^= 1;
+    }
+    if (type == RPMRICH_PARSE_LEAVE && op == RPMRICHOP_IF) {
 	data->neg ^= 1;
     }
     return RPMRC_OK;
@@ -2208,6 +2241,8 @@ static rpmRC updateRichDep(dbiIndex dbi, dbiCursor dbc, const char *str,
     data.argv = argvNew();
     data.neg = 0;
     data.nargv = 0;
+    data.level = 0;
+    data.nargv_level = xcalloc(1, sizeof(int));
     if (rpmrichParse(&str, NULL, updateRichDepCB, &data) == RPMRC_OK) {
 	n = argvCount(data.argv);
 	if (n) {
@@ -2222,6 +2257,7 @@ static rpmRC updateRichDep(dbiIndex dbi, dbiCursor dbc, const char *str,
 	    }
 	}
     }
+    _free(data.nargv_level);
     argvFree(data.argv);
     return rc;
 }
@@ -2311,9 +2347,20 @@ static rpmRC tag2index(dbiIndex dbi, rpmTagVal rpmtag,
 
 	rc += idxupdate(dbi, dbc, key, keylen, &rec);
 
-	if ((rpmtag == RPMTAG_REQUIRENAME || rpmtag == RPMTAG_CONFLICTNAME) && *(char *)key == '(') {
-	    if (rpmtdType(&tagdata) == RPM_STRING_ARRAY_TYPE) {
-		rc += updateRichDep(dbi, dbc, rpmtdGetString(&tagdata), &rec, idxupdate);
+	if (*(char *)key == '(') {
+	    switch (rpmtag) {
+	    case RPMTAG_REQUIRENAME:
+	    case RPMTAG_CONFLICTNAME:
+	    case RPMTAG_SUGGESTNAME:
+	    case RPMTAG_SUPPLEMENTNAME:
+	    case RPMTAG_RECOMMENDNAME:
+	    case RPMTAG_ENHANCENAME:
+		if (rpmtdType(&tagdata) == RPM_STRING_ARRAY_TYPE) {
+		    rc += updateRichDep(dbi, dbc, rpmtdGetString(&tagdata),
+			&rec, idxupdate);
+		}
+	    default:
+		break;
 	    }
 	}
     }

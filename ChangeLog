@@ -1,3 +1,1000 @@
+commit 152beb71c8bfae7bf0fd93be887a58892378140b
+Author: Panu Matilainen <pmatilai@redhat.com>
+Date:   Wed Nov 2 07:44:37 2016 +0200
+
+    Preparing for rpm 4.13.0 final
+
+commit 54d30ac4a344770571e56c60281a9130b61c1788
+Author: Mark Wielaard <mjw@redhat.com>
+Date:   Tue Jun 14 17:07:10 2016 +0200
+
+    Don't use hardcoded paths to tools/scripts in find-debuginfo.sh.
+    
+    This prevents installation and testing in any other location than
+    /usr/lib/rpm.
+    
+    Signed-off-by: Mark Wielaard <mjw@redhat.com>
+    (cherry picked from commit 41c4dcf507e2208585d6dc0952f59686a3a69d69)
+
+commit 7495d179b63a191eadcdb55b8ec3e404e661f510
+Author: Thierry Vignaud <thierry.vignaud@gmail.com>
+Date:   Fri Oct 21 02:18:06 2016 +0200
+
+    Fix testsuite failures in dist tarballs: include missing files
+    
+    These should've been in commits 6b3b435fa644522197003460a96cd11253b1494d
+    and 4ec7c396fb9464a3fcff006408871f8175ab169b where the files were added.
+    
+    (cherry picked from commit 618860e3cc2b74daec1577a685fa714a83c13f78)
+
+commit 9d40362d2379a51346654b52a0037acad2ed9393
+Author: Panu Matilainen <pmatilai@redhat.com>
+Date:   Thu Oct 20 15:22:56 2016 +0300
+
+    Preparing for rpm 4.13.0-rc2
+
+commit 825da787458d3a81d15a0356a6b1097d67534566
+Author: Panu Matilainen <pmatilai@redhat.com>
+Date:   Thu Oct 20 10:11:18 2016 +0300
+
+    Revert "Add macro _vsflags_query_rpmdb"
+    
+    This is too flimsy a mechanism for such a critical item as signature
+    checking: with the innocent- and unrelated looking commit
+    e3e5db7f396bcdbaf04f87ba3b5c8101ee8f07f5 in place,
+    'rpm -q foo.rpm' runs with NO signature checking whereas 'rpm -qp foo.rpm'
+    does signature check. Not sane behavior.
+    
+    Also the commit is buggy to begin with, qva->qva_source is not a bitfield
+    so most queries would run with signature checking enabled still.
+    Revisit some day in a different form, maybe.
+    
+    This reverts commit b30fca9eedd5c3963699ee5382f0ee1e32fbab7c.
+    
+    (cherry picked from commit 1d32a881813335c7737be91077bf59c2bc27048b)
+
+commit 16b06f00aefc8b05b0455802eadfe5d6573ee021
+Author: Panu Matilainen <pmatilai@redhat.com>
+Date:   Wed Oct 19 17:15:42 2016 +0300
+
+    Avoid going past header data area when validating SHA1 header digest
+    
+    A malformed header with no zeros in it could've easily walked off the
+    edge of the world here. That it happens while trying to validate the
+    tag data content is the height of embarrasment of sorts.
+    
+    (cherry picked from commit d8bfe732572e8295015a372348dd13bdecb40f8c)
+
+commit 55fec51202d14918c977fb951469711bc55f9ff7
+Author: Panu Matilainen <pmatilai@redhat.com>
+Date:   Wed Oct 19 14:48:08 2016 +0300
+
+    Verify data is within range and does not overlap in headerVerifyInfo()
+    
+    Checking whether data start offset is within header data area is of no use
+    whatsoever if the entire chunk doesn't fit. Validate the entire data
+    fits within range and that it does not overlap, however with string
+    types we can only check the array size is sane but we cant check the
+    actual content.
+    
+    Adjust the upper limit for region trailer in headerVerifyRegion() so
+    it fits the new rules, but in reality calling headerVerifyInfo() for
+    the region tags is rather pointless since they're so different.
+    
+    Partial fix for RhBug:1373107.
+    
+    (cherry picked from commit 89dce2b91d7d73a1e225461a7392c3d6d7a30a95)
+
+commit 49f06a1d96200f17f09e22e62b3c71221272b3fe
+Author: Panu Matilainen <pmatilai@redhat.com>
+Date:   Tue Oct 18 14:50:20 2016 +0300
+
+    Bring CREDITS to this millenium
+    
+    Merge pre-existing contributions with names from git shortlog (now that
+    we have a reasonable mapping), all names in alphabetical order.
+    
+    (cherry picked from commit ef656ca6a6edb75dd9e9ee5801c7ac3357de9f4d)
+
+commit f3168c06943f56422eddeabef906d71dc03a81d3
+Author: Panu Matilainen <pmatilai@redhat.com>
+Date:   Tue Oct 11 09:43:54 2016 +0300
+
+    Revised fix for CVE-2013-6435
+    
+    In case of hardlinked files, we first create a zero-length file
+    to which all the links are created, the content comes in the last
+    link. When the links have been created with no permissions at all
+    (as per commit 7e26e2bd726f48836be289400c7d82cb8b067dc1), reopening
+    the final file for writing the actual content fails for non-root users.
+    Which breaks installation of hardlinked files for regular users,
+    including our testsuite.
+    
+    Creating the files with write-only permissions solves the issue - we
+    *are* writing to these files afterall so it only makes sense.
+    This doesn't stop root from reading the file but neither does zero
+    permissions so no change there. But if somebody reads a file with
+    write-only permissions and gets garbage, at least we get to tell
+    them "told you so".
+    
+    (cherry picked from commit 6e7c6d1a18aa14fc7a980c43d980a26d82f785c4)
+
+commit becfb764c5c199ce98f2df45287f8696f520f4be
+Author: Florian Festi <ffesti@redhat.com>
+Date:   Mon Oct 10 11:57:14 2016 +0200
+
+    rpm2archive: return 0 on success instead of stop iteration
+    
+    Solves: https://github.com/rpm-software-management/rpm/pull/94/files
+    Thanks to Neal Gompa (ニール・ゴンパ)<ngompa13@gmail.com> for spotting this
+    and proposing a solution!
+    
+    (cherry picked from commit a6e662f6bda2849274592cb223e6baf2dd385bb1)
+
+commit e756795087208f6c9df51608457dfd4db258c472
+Author: Mark Wielaard <mjw@redhat.com>
+Date:   Fri Oct 7 17:00:44 2016 +0200
+
+    find-debuginfo.sh: Don't copy extra sections into .gnu_debugdata.
+    
+    When creating the compressed mini-symtab section in find-debuginfo
+    add_minidebug we explicitly remove .gdb_index and .comment. But there
+    can be other non-empty sections in the debuginfo that shouldn't be
+    copied. For example rust binaries might have a .rustc section.
+    
+    Explicitly remove any non-allocated PROGBITS or NOTE sections.
+    
+    https://bugzilla.redhat.com/show_bug.cgi?id=1382394
+    
+    Signed-off-by: Mark Wielaard <mjw@redhat.com>
+    (cherry picked from commit bd7611151b59dfe2f0feb41e478799b5bc26a391)
+
+commit 881b71b550bf15c1ed09491b06b3df95c26c30ed
+Author: Mark Wielaard <mjw@redhat.com>
+Date:   Fri Oct 7 15:45:47 2016 +0200
+
+    Fix mini-symtab in find-debuginfo.sh for arches with function descriptors.
+    
+    add_minidebug uses nm to select the function symbols to include in the
+    mini-symtab table. But on arches that use function descriptors (like ppc64)
+    nm --format-posix doesn't make it clear which symbols are real functions
+    The symbols point to the (stripped away) function descriptor table).
+    
+    Use --format=sysv style to match the ELF symbol type directly instead of
+    using the somewhat ambiguous symbol type char used in --format=posix style
+    in binutils nm.
+    
+    https://bugzilla.redhat.com/show_bug.cgi?id=1052415
+    
+    Signed-off-by: Mark Wielaard <mjw@redhat.com>
+    (cherry picked from commit 3f9b7bc64e8c8f2d355ce24cf67c69f507e07d5e)
+
+commit 97253efe21ea65f070b25293ac68c79cbd7ad409
+Author: Panu Matilainen <pmatilai@redhat.com>
+Date:   Mon Oct 3 13:55:39 2016 +0300
+
+    Remove leftover include of <selinux/flask.h>
+    
+    Besides unused, this has started spitting warnings in recent selinux versions:
+    In file included from selinux.c:5:0:
+    /usr/include/selinux/flask.h:5:2: warning: #warning "Please remove any #include's of this header in your source code." [-Wcpp]
+     #warning "Please remove any #include's of this header in your source code."
+      ^~~~~~~
+    
+    (cherry picked from commit b1e7ce815392d3f35618b6167c11bee77d23c6da)
+
+commit c5bfb3ce1affd4469e37f7242c9e1065dd3fc18b
+Author: Florian Festi <ffesti@redhat.com>
+Date:   Thu Jul 23 11:56:13 2015 +0200
+
+    Create files with with 000 permissions to avoid leaking yet unchecked data
+    
+    As we are calculating the check sum while writing we only know the file
+    content is correct after it being written comletely. CVE-2013-6435
+    
+    (cherry picked from commit 7e26e2bd726f48836be289400c7d82cb8b067dc1)
+
+commit 51a11569c79b98df3dcfa550008b9ab31a1b2883
+Author: Gleb Fotengauer-Malinovskiy <glebfm@altlinux.org>
+Date:   Mon Sep 19 16:15:39 2016 +0300
+
+    rpmdb.c: (rpmdbCheckTerminate) return non-zero on subsequent runs
+    
+    This function is not necessarily called first by rpmdbCheckSignals, as
+    long as it is a part of API.  Thus, it is important to return the same
+    value on subsequent runs.
+    
+    Signed-off-by: Gleb Fotengauer-Malinovskiy <glebfm@altlinux.org>
+    (cherry picked from commit e5d3b9f682383ee026b5a86a47eb5f288bdf8991)
+
+commit 44352946c3bee1501de52aba011511a378936e79
+Author: Gleb Fotengauer-Malinovskiy <glebfm@altlinux.org>
+Date:   Mon Sep 19 16:15:21 2016 +0300
+
+    rpmdb.c: avoid double free in rpmdbClose, rpmdbMatchIterator, ...
+    
+    ... and rpmdbIndexIterator.
+    This makes functions assume that the object has been freed if it is not
+    on the list.
+    
+    Signed-off-by: Gleb Fotengauer-Malinovskiy <glebfm@altlinux.org>
+    (cherry picked from commit 4c6e51e2c0e3deeb052ae3c47115b6d10cb0d696)
+
+commit 15ce8de817afd241df76ca2031d2d1a4df74db03
+Author: Florian Weimer <fweimer@redhat.com>
+Date:   Mon Sep 5 10:12:29 2016 +0200
+
+    Fix overflow in cpio filename by limiting the allowed length to 4kB
+    
+    This could lead to a stack-based overflow, while parsing a crafted CPIO header in the payload section of an RPM file.
+    
+    Fixes: rhbz#1168715, CVE-2014-8118
+    (cherry picked from commit f255c6bdb27ad1512c043a64195410d46996395a)
+
+commit 30c16cfde9a81923c72a323a550dbe0cc67c411f
+Author: Richard W.M. Jones <rjones@redhat.com>
+Date:   Thu Aug 11 11:38:18 2016 +0100
+
+    rpmrc: Convert uname.machine == "riscv" to "riscv32"/"riscv64"/"riscv128".
+    
+    On RISC-V, the kernel can return uname.machine == "riscv" (for all bit
+    sizes).  I say "can" return, because that is the default, but it is
+    also possible to compile the kernel specially so it returns "riscv64"
+    etc.
+    
+    GNU is using "riscv64".
+    
+    This commit converts the kernel uname machine type "riscv" to a more
+    suitable value.
+    
+    This conversion is supposed to be done by the arch_canon table.
+    However the arch_canon table is not populated until after the
+    defaultMachine function is called for the first time, making it a bit
+    useless.  In any case, arch_canon cannot take into account the bit
+    size of the architecture, but the C code here can.
+    
+    Signed-off-by: Richard W.M. Jones <rjones@redhat.com>
+    (cherry picked from commit cf5679397f36710a942fcb83a63c690eb25d72af)
+
+commit 908263cdb8acda41c11fcd634c705839bf44d651
+Author: Richard W.M. Jones <rjones@redhat.com>
+Date:   Tue Aug 9 18:25:24 2016 +0100
+
+    RISCV 64-bit (riscv64) support.
+    
+    Based on Mark Salter's aarch64 support patch (commit 8e1ca16c58).
+    
+    Signed-off-by: Richard W.M. Jones <rjones@redhat.com>
+    (cherry picked from commit d9d47e01146a5d4411691a71916b1030ac7da193)
+
+commit 3eb469b5ec314d86dee3b206a027a9e25148573e
+Author: Frederic Bonnard <frediz@linux.vnet.ibm.com>
+Date:   Tue Jul 5 10:04:02 2016 +0200
+
+    Fix preun scriptlet failure not aborting rpm erase
+    
+    Since commit f4a49c3d446bb180ca6b30a4337065fb6511e641 ( Unceremoniously
+    eliminate rpmpsmNext() ), when a preun scriptlet is failing, rpm continues to
+    be erased. Handling return code of runInstScript.
+    
+    (cherry picked from commit 1ac507f15f014e69b926a1c2bf9a46a2a4dcaff3)
+
+commit 7e5582de2a2d61f67fd89b5382e7a2cd2244418c
+Author: Mark Wielaard <mjw@redhat.com>
+Date:   Tue Jun 14 17:07:11 2016 +0200
+
+    Add sepdebugcrcfix to fixup old style gnu_debuglink CRC checksum.
+    
+    Some old tools might still use the .gnu_debuglink section to find
+    separate debuginfo files instead of build-id style lookups. When
+    dwz has compresses the .debug files the original CRC in the main
+    ELF file will no longer match. Make sure to run sepdebugcrcfix
+    after dwz to recalculate the CRC.
+    
+    The original fix was created by Jan Kratochvil based on code
+    from GNU binutils BFD. https://bugzilla.redhat.com/show_bug.cgi?id=971119
+    I added a testcase to make sure the CRCs were all correctly
+    updated after dwz has run to compress a debuginfo package.
+    And a change (plus testcase) to make sure implicit suid binaries
+    didn't accidentially got their suid flag bit.
+    
+    Signed-off-by: Mark Wielaard <mjw@redhat.com>
+    (cherry picked from commit 4ec7c396fb9464a3fcff006408871f8175ab169b)
+
+commit d5d5fe169979ed4d6d92bee2cb521ac1a9e822ad
+Author: Mark Wielaard <mjw@redhat.com>
+Date:   Tue Jun 14 17:07:09 2016 +0200
+
+    Add dwz debuginfo compression support.
+    
+    Support for dwz compression has been in Fedora since a couple of years.
+    https://fedoraproject.org/wiki/Features/DwarfCompressor
+    
+    The original find-debuginfo.sh patch was written by Jakub Jelinek.
+    https://bugzilla.redhat.com/show_bug.cgi?id=833311
+    The new testcase using the macros.debug was added by me.
+    
+    Signed-off-by: Mark Wielaard <mjw@redhat.com>
+    (cherry picked from commit 6b3b435fa644522197003460a96cd11253b1494d)
+
+commit 75df2ef01cd672c35a5d4051d633dbf5b244f465
+Author: Mark Wielaard <mjw@redhat.com>
+Date:   Tue Jun 14 17:07:08 2016 +0200
+
+    Add find-debuginfo.sh -m minisymtab support.
+    
+    Support for minisymtab (a minimal function symbol table in a compressed
+    section in the main binary) has been in gdb and elfutils based tools
+    since some years. Fedora has had this as rpm-4.10.0-minidebuginfo.patch
+    since 2012.
+    
+    The patch adjusts macros to pass -m to find-debuginfo.sh when
+    _include_minidebuginfo has been set. find-debuginfo.sh now takes -m
+    as argument to generate the .gnu_debugdata ELF section to be added
+    to the main executable.
+    
+    To support the testcases a new macros.debug is added that is used to
+    generate debuginfo packages in the rpmbuild.at testsuite.
+    
+    The original support was added to Fedora rpm by Alexander Larsson.
+    Lubos Kardos fixed a bug in it when strip -g was used. I added some
+    configuration macros and two testcases to check the basic support works
+    and for the strip -g bug.
+    
+    Signed-off-by: Mark Wielaard <mjw@redhat.com>
+    (cherry picked from commit b33a41da3689c4a803986eb95e5875e0dff36259)
+
+commit 8683332c410e55880393631521f3256a339855a3
+Author: Florian Festi <ffesti@redhat.com>
+Date:   Thu Jun 2 15:54:01 2016 +0200
+
+    Add support for _buildhost macro for setting the build host manually.
+    
+    This is useful for reproducible builds. See rhbz#1309367.
+    
+    (cherry picked from commit 22588250baa1bfa5c00f57d39329d0c144fc8112)
+
+commit ad623bb4754d8af9a2a38b8a1e1473b8a13ae109
+Author: Thierry Vignaud <thierry.vignaud@gmail.com>
+Date:   Wed May 11 22:27:52 2016 +0200
+
+    fix segfault when calling with args==NULL
+    
+    the doc explicitely describe "args" as "signing parameters (or NULL for
+    defaults)"
+    
+    This no more true since commit 6e9eab345a18d01f0c2c35fa8bb842744093364c
+    As such, with rpm-4.13, some callers will segfault (eg: perl-RPM4's
+    testsuite)
+    
+    (cherry picked from commit 1aeddbc2714faa9b26a60a0256d0b9751ab9796b)
+
+commit dacbd11fc804cbbedff245262ba8c68ecf501fd1
+Author: Jonathan Wakely <github@kayari.org>
+Date:   Wed May 25 12:31:19 2016 +0100
+
+    Fix off-by-one error
+    
+    There's an off-by-one error in base64_decode_value which results in undefined behaviour:
+    
+        void* out;
+        size_t len;
+        rpmBase64Decode("\x7b", &out, &len);
+    (cherry picked from commit 0964912b94f9f48a0a812fbfbb2f996dbd93eff0)
+
+commit 5aea1364254779bbe9c4dd36a4e56d2ef38da9e2
+Author: Lubos Kardos <lkardos@redhat.com>
+Date:   Mon May 23 10:19:39 2016 +0200
+
+    Fix signing with non-ASCII uid keys (rhbz:1243963)
+    
+    Removed setting LC_ALL to "C" because since commit [1] the gpg program
+    gets password by yourself from terminal so there is no sense in
+    setting LC_ALL to "C" if the terminal settings is e. g. UTF-8. That was
+    only confusing gpg program and it was not able to properly get and
+    display non-ASCII characters.
+    
+    [1] 0bce5fcf270711a2e077fba0fb7c5979ea007eb5
+    
+    (cherry picked from commit 258e3065687c9e6b53b6f2b6c7fa6c5694508791)
+
+commit 8bc33e2697d9dc203106a89a6c684d5e64f3d3af
+Author: Lubos Kardos <lkardos@redhat.com>
+Date:   Thu May 19 13:01:58 2016 +0200
+
+    Use armv7hl isa for all armhfp (armv7h*l) arches (#1326871)
+    
+    Patch from Dennis Gilmore <dennis@ausil.us>
+    
+    (cherry picked from commit 5d5dd569d01300db833e434ff49beb8b22627310)
+
+commit 9ab257e90218e0ac63c121c106b08be33cae05fa
+Author: Lubos Kardos <lkardos@redhat.com>
+Date:   Thu May 12 16:28:09 2016 +0200
+
+    Filter unversioned deps if corresponding versioned deps exist (rhbz:678605)
+    
+    After automatic dependencies are generated filter out from them
+    unversioned dependencies if versioned dependencies with the same name,
+    type and color already exist.
+    
+    (cherry picked from commit 6ac793b215ac8d9db99d9632cbf71b014c7ffee0)
+
+commit a0b955e480e4e832a381104b0969673d9567303b
+Author: Florian Festi <ffesti@redhat.com>
+Date:   Fri Apr 22 07:58:46 2016 +0200
+
+    Make sure getNEVRA always sets td.data
+    
+    Fixes segfault when reading tampered package without any of the NEVRA tags.
+    
+    (cherry picked from commit b4f0e7ef184f2cdfcee5289108763e46be9438db)
+
+commit 9045b5222c5f8a7f4d98486736af049ebce4e65a
+Author: Lubos Kardos <lkardos@redhat.com>
+Date:   Mon Apr 25 14:38:47 2016 +0200
+
+    Fix sigsegv in stringFormat() (rhbz:1316903)
+    
+    Just skip duping of NULL and return it. Returned NULL is handled in
+    upper layer.
+    
+    (cherry picked from commit cddf43a56f19711866371f02f378dc4095b0fadd)
+
+commit b64f7ceeb8957e180b56f6a583483bd93f26e104
+Author: Lubos Kardos <lkardos@redhat.com>
+Date:   Mon Apr 25 13:31:08 2016 +0200
+
+    Fix reading rpmtd behind its size in formatValue() (rhbz:1316896)
+    
+    When it is read from index higher than size of rpmtd, return "(none)".
+    
+    (cherry picked from commit b722cf86200505b3e3fcbb2095c4ff61f1f5a2ab)
+
+commit 3aec58aa660c9577a61d6d8c73e01c000150d027
+Author: Lubos Kardos <lkardos@redhat.com>
+Date:   Fri Apr 15 10:45:47 2016 +0200
+
+    Enable --no-backup-if-mismatch by default in %patch macro (rhbz:884755)
+    
+    (cherry picked from commit 69ed95eb422c59f9d99f75ccb78f32311a31702d)
+
+commit c34999a7084d793e636fb7443f9efc4cf2b8f1f2
+Author: Lubos Kardos <lkardos@redhat.com>
+Date:   Fri Apr 15 10:47:57 2016 +0200
+
+    Add %{_default_patch_flags} to %__patch which is used in %autosetup
+    
+    %{_default_patch_flags} is used in %patch spec directive and now it is
+    used also in %__patch macro which is used in %autosetup macro. This make
+    consitent using newer %autosetup macro and older %patch directives.
+    
+    (cherry picked from commit 66a6082634687e45b321a5ade9887420d5830162)
+
+commit 5a1da6ff93a69c1c84cc89f6bccee87e979449ef
+Author: Lubos Kardos <lkardos@redhat.com>
+Date:   Thu Apr 14 16:23:35 2016 +0200
+
+    Add enahance dependency forgotten in the recent commit [1]
+    
+    [1] 9c1e995043a999dcac05a74aa8bcf934122d40ba
+    
+    (cherry picked from commit e297b51750598d926d053c1d1645aab78a54c46a)
+
+commit 20fa92267e230e3c3fff8c1ca13f787ee844e74c
+Author: Lubos Kardos <lkardos@redhat.com>
+Date:   Thu Apr 14 13:12:51 2016 +0200
+
+    Make creating index records consistent for rich and rich-weak deps
+    
+    If a package contains a rich require dependency then this rich
+    dependency is parsed and also subdependencies are stored into the
+    require index.  For example for rich dependency "(A and B)" the whole
+    string "(A and B)" is stored into the index Requirename but
+    subdependcies "A" and "B" are stored into index too. Previously this
+    parsing and storing subdependencies was done only for require rich
+    dependencies. Now it is done also for weak rich dependecies (suggests,
+    supplements and recommends).
+    (rhbz:1325982)
+    
+    (cherry picked from commit 9c1e995043a999dcac05a74aa8bcf934122d40ba)
+
+commit fa95c1bd964df8a65a2450dbbb7900ef51388fc1
+Author: Michael Schroeder <mls@suse.de>
+Date:   Mon Apr 11 14:37:27 2016 +0200
+
+    Fix index generation of rich dependencies with an else part
+    
+    As A if B else C is identical to "(A if B) and (C or B)" we
+    need to put both B and !B on the index.
+    
+    (cherry picked from commit 469553385ee766792529235a9e3c07efee14ba72)
+
+commit 72f43faf6225a3544b95dc240861bec413942362
+Author: Boris Egorov <egorov@linux.com>
+Date:   Sun Mar 27 23:55:08 2016 +0600
+
+    Misleading indentation fixes (GCC6)
+    
+    package.c:
+    This one is definitely an error (See commit 57000e976b1e5ed2c3c1e78567cd
+    stating "No functional changes").
+    
+    rpminstall.c:
+    Judging by the code above, we should set eiu->fnp to NULL only on error,
+    but it happens every time we reach function end.
+    
+    Signed-off-by: Boris Egorov <egorov@linux.com>
+    (cherry picked from commit dddc6e7be597e787917009c3d892ebe29c99eff8)
+
+commit 56bab47db13369139ac0102cfbe57556661deeba
+Author: Neal Gompa (ニール・ゴンパ) <ngompa13@gmail.com>
+Date:   Sun Mar 13 09:05:00 2016 -0400
+
+    Use fuzz settings for %autopatch/%autosetup
+    
+    In the %apply_patches that inspired %autopatch, patch application
+    respects the fuzz settings that are used for %patch. %autopatch
+    and %autosetup weren't using this, which led to an inconsistent
+    patch application behavior.
+    
+    (cherry picked from commit 50905f4a599f167622736fab24800fe062551809)
+
+commit dd8388055cabdce02f6b031b60abd4a370e7b71e
+Author: Lubos Kardos <lkardos@redhat.com>
+Date:   Wed Mar 16 17:15:14 2016 +0100
+
+    Fix non-working combination of %lang and %doc directive (rhbz:1254483)
+    
+    (cherry picked from commit 877d5b130cbfdfd93ad39c1f0f1505790eba264e)
+
+commit e45ff73e8525aa87079be0672d5742c4745cf255
+Author: Zbigniew Jędrzejewski-Szmek <zbyszek@in.waw.pl>
+Date:   Fri Mar 4 16:40:30 2016 -0500
+
+    Add posix.redirect2null
+    
+    This is useful to silence output in forked programs:
+    https://bugzilla.redhat.com/show_bug.cgi?id=1287918
+    
+    Tested with the following scriptlet:
+    %post -p <lua>
+    pid = posix.fork()
+    if pid == 0 then
+        assert(posix.exec("/bin/sed"))
+    elseif pid > 0 then
+        posix.wait(pid)
+    end
+    pid = posix.fork()
+    if pid == 0 then
+        posix.redirect2null(2)
+        assert(posix.exec("/bin/awk"))
+    elseif pid > 0 then
+        posix.wait(pid)
+    end
+    
+    As expected, the error message from sed is printed, the error message
+    from awk is not.
+    
+    (cherry picked from commit 19fe0d9ae12644b8af9513aa2a8cf7d16f7caa61)
+
+commit ba24161f774aebde3348f5311913fc380b87c453
+Author: Lubos Kardos <lkardos@redhat.com>
+Date:   Tue Mar 8 14:29:24 2016 +0100
+
+    Fix memory leaks in rpmGetSubkeys() and pgpPrtParamsSubkeys()
+    
+    (cherry picked from commit cc611412453b77bfd7aa33d8bbcfb8dea727c49a)
+
+commit ba720ba28ee42a3a6d18fd5d838dfe5fc7370bcf
+Author: Florian Festi <ffesti@redhat.com>
+Date:   Fri Feb 26 11:15:23 2016 +0100
+
+    Use %_build_cpu instead of noarch when evaluating ExcludeArch and ExclusiveArch
+    
+    Some noarch packages need build tools not available on all architectures.
+    By using %_build_cpu you can restrict the architectures those noarch
+    packages can be build on.
+    
+    (cherry picked from commit d53499d1565dd7ba6d93939e552cc604b26dccd7)
+
+commit 7ab85a1852e2aaf75b1f3f09910d0678a56cd7e6
+Author: Florian Festi <ffesti@redhat.com>
+Date:   Thu Feb 25 16:51:02 2016 +0100
+
+    Use pkg->dpaths during dependency generation instead of buildRoot + filename
+    
+    This passes the filenames with the actual file content to the dependency
+    generators when using RemovePathPostfixes (rhbz#1306559).
+    
+    (cherry picked from commit 21661336c3f163f9603e30b1478ce12ed3d8ebae)
+
+commit 9fcf9a1a200821b49e842333094e6ccd7f0b4a0c
+Author: Michal Toman <mtoman@fedoraproject.org>
+Date:   Fri Feb 19 12:05:05 2016 +0100
+
+    Add support for MIPS release 6 - Add mips32 mips64 mipsel and mipseb macros
+    
+    (cherry picked from commit cd02e0675e7919193b2c2b885dfa099f55c0f281)
+
+commit 9ce6cd8a06cb37c91d23102c1a1bbdb166b79eb3
+Author: Florian Festi <ffesti@redhat.com>
+Date:   Fri Feb 19 09:56:31 2016 +0100
+
+    Also block idle and sleep in the systemd-inhibit plugin
+    
+    We really should not suspend or hibernate during rpm operations. Chances are
+    too high to not wake up properly and damage the system (see rhbz#1297984).
+    
+    (cherry picked from commit 83219d023b5b21826c7482d4aa3f6372f520825d)
+
+commit 750830468f0f2211feb2eb90ae780cc240666790
+Author: Michal Domonkos <mdomonko@redhat.com>
+Date:   Mon Dec 7 17:13:26 2015 +0100
+
+    Add RPMCALLBACK_ELEM_PROGRESS callback type
+    
+    Currently, there's no callback type that would be issued per each
+    transaction element.  RPMCALLBACK_TRANS_PROGRESS is only issued during
+    the prepare phase but not when packages are actually installed or
+    erased.  Likewise, RPMCALLBACK_INST_ST* and RPMCALLBACK_UNINST_ST* won't
+    be issued if an install or erase operation is skipped for some reason (a
+    script or package upgrade failure).
+    
+    Having such a callback would allow the Python API consumers to always
+    know upfront which element is about to be processed, before any other
+    callbacks are issued.  This is important since not every callback type
+    carries enough data about the subject package; while the INST types
+    provide the user object passed to a former addInstall call, the UNINST
+    types only provide the package name (which may not be unique within the
+    transaction set).
+    
+    This commit adds such a callback.
+    
+    (cherry picked from commit 448db68ceb5be3c7171b7ec0ea908d905792dc2f)
+
+commit 2d14608d8a1a6bfb72f1cdcaae7bd49907a7847f
+Author: Lubos Kardos <lkardos@redhat.com>
+Date:   Thu Jan 28 09:06:17 2016 +0100
+
+    Fix memory leak in file triggers
+    
+    (cherry picked from commit 6e23e20263ce093289d81c61233833b9013343c9)
+
+commit fd23f0197c571d95e51aed46bf8227e603ebeaab
+Author: Lubos Kardos <lkardos@redhat.com>
+Date:   Tue Jan 19 14:37:07 2016 +0100
+
+    Fix %autosetup to not cause errors during run of rpmspec tool
+    
+    Firstly %autosetup showed an error during its expansion if some patch
+    wasn't available, that is an error was showed during parsing of a spec
+    file. This caused showing an error during execution of rpmspec
+    tool (rhbz:1293687).
+    
+    Now %autosetup doesn't cause an error during parsing of a spec file but
+    it causes an error during building of specfile if some patch is not
+    available. Also old macro %patch behaves similarly.
+    
+    (cherry picked from commit 231a7213b90a8dfba426737732e2dc6e62acfbad)
+
+commit ceb0ee08f1e83fc2800279d835f7cc554a0250f6
+Author: Lubos Kardos <lkardos@redhat.com>
+Date:   Fri Jan 15 15:41:52 2016 +0100
+
+    Fix recursive calling of rpmdeps tool (rhbz:1297557)
+    
+    (cherry picked from commit 33158b3b009e830036d05c138a6b308c1574effe)
+
+commit 69ca753b171830eb623fd9e4129371a0f9a1d2f3
+Author: Florian Festi <ffesti@redhat.com>
+Date:   Fri Jan 15 14:32:47 2016 +0100
+
+    Add support for %missingok as a standalone file attribute
+    
+    (cherry picked from commit 8efe51e8c24b7739f0bf7680e21083c8964633f5)
+
+commit ed8fee028e5307dcec2cdb26d880ae737bfbdf21
+Author: Lubos Kardos <lkardos@redhat.com>
+Date:   Fri Nov 27 13:40:33 2015 +0100
+
+    Sanity check that there is at least one tag in header region
+    
+    (cherry picked from commit 8e847d52c811e9a57239e18672d40f781e0ec48e)
+
+commit 23d8e811e88555ea7b4e6981bf31ea2b3157dbbe
+Author: Lubos Kardos <lkardos@redhat.com>
+Date:   Thu Nov 26 15:20:05 2015 +0100
+
+    rpmExpandMacros() is modified to be able to return more return codes
+    
+    Now rpmExpandMacros() returns integer as a return value. Negative return
+    value implies failure. Return values can be more utilized in the future.
+    E. g. return value could specify how many macros were expanded in given
+    string.
+    
+    (cherry picked from commit ddf9ec7befe83ba1a12453a56e4e471aa9bcf4d3)
+
+commit eff3134ef5931b6097eee80269a6aa40994d6502
+Author: Tom Hughes <tom@compton.nu>
+Date:   Mon Nov 23 09:38:37 2015 +0000
+
+    Rename expandMacrosU to rpmExpandMacros
+    
+    Address review issues from #32 by renaming the function and
+    cleaning up the comment and parameter list.
+    
+    (cherry picked from commit aee8446eb498fec7bfd7a2848ab97440b7bb7226)
+
+commit 97d7384c20660b873cbb0d04110311208eb7fb84
+Author: Lubos Kardos <lkardos@redhat.com>
+Date:   Wed Nov 25 10:08:29 2015 +0100
+
+    Remove option --priority for file triggers, leave option -P
+    
+    The long option --prority never worked because everything after "--" is
+    considered to be a trigger target. For setting priority of a file trigger
+    the short option "-P" can be used.
+    
+    (cherry picked from commit 5e4c16f39d650ef3d037d44c136e26f04e4f1856)
+
+commit ac908ed8f5ce3425b20cb06e198c05de58f52550
+Author: Lubos Kardos <lkardos@redhat.com>
+Date:   Mon Nov 23 15:05:13 2015 +0100
+
+    Add possibility to disable file triggers.
+    
+    Now options --notriggers, --notriggerin, --notriggerun, --notriggerpostun
+    disable also file triggers and not only normal trigges. Transaction file
+    triggers can be also disabled with --nopretrans and --nopostrans options.
+    
+    Before this patch file triggers weren't disabled when option --test was
+    specified. That caused unwanted multiple execution of file triggers
+    in dnf because dnf executes transaction with flag test before executing
+    transaction for real (rhbz:1282115).
+    
+    (cherry picked from commit a0f2d94c3c258ebd95479a6b11c80c1ecd6d2cab)
+
+commit a79b867a1ac38e76a55fafe3f339dd747e2dd9b2
+Author: Tom Hughes <tom@compton.nu>
+Date:   Tue Nov 17 17:36:16 2015 +0000
+
+    Remove size limit when expanding macros
+    
+    This removes a seemingly undocumented, and not even well defined, limit
+    on the size of a macro expansion when parsing a spec file.
+    
+    [lkardos@redhat.com: created new funtion expandMacrosU() (Unlimited)
+    instead of modifying expandMacros() in order not to change API/ABI]
+    
+    Signed-off-by: Lubos Kardos <lkardos@redhat.com>
+    (cherry picked from commit 61838b0fdacb71a881baac164043b8e40ddfbec5)
+
+commit 12836c50ece1636a49cbc9a01141ef31f46fbeed
+Author: Lubos Kardos <lkardos@redhat.com>
+Date:   Wed Nov 18 15:44:08 2015 +0100
+
+    Fix next_brace_sub() to return NULL if braces don't match.
+    
+    Our implementation of glob() is copied from glibc (2.1 probably) which
+    has buggy implementation of next_brace_sub(). It is fixed in the newer
+    version of glibc. Now next_brace_sub() is modified  according to newer
+    (fixed) version of glic. We didn't reveal this bug sooner because brace
+    expansion was disabled in rpm but we enabled brace expansion in
+    commit d14ecfe587efbe80e5534161dbd3a4f7158b4e2b.
+    
+    (cherry picked from commit 1af568ac883fe06e932a7fc8f8035eb04e621907)
+
+commit 0b881bd61b3a483982819dce5a65095b6455cc2e
+Author: Neal Gompa (ニール・ゴンパ) <ngompa13@gmail.com>
+Date:   Fri Nov 13 08:52:50 2015 -0500
+
+    Fix fstat64 conditional and definition typo
+    
+    So, as it turns out, pretty much all libc implementations
+    except for legacy ones implement it as fstat64(), so we
+    will use fstat64() unless otherwise necessary.
+    
+    Also, fix typo in checking for _D_EXACT_NAMLEN definition.
+    
+    (cherry picked from commit ff3e57c343bbf99e2b7a92a5897551d60f47572a)
+
+commit c768e76aa1cbc64c8da344a6adfdd0ce5999ec2b
+Author: Neal Gompa (ニール・ゴンパ) <ngompa13@gmail.com>
+Date:   Mon Nov 9 01:42:01 2015 -0500
+
+    Set up portable definitions to support μClibc and MUSL
+    
+    The definitions were refactored because musl-libc does
+    not offer a __MUSL__ definition and μClibc tries to
+    identify as glibc, even though it's not quite compatible.
+    
+    A nice side effect of this is that the platform support
+    definitions are somewhat simpler now.
+    
+    (cherry picked from commit 4f7c802ebe26d095e2b623a9bb4acba3fe3ef758)
+
+commit 78e8af9c18e22e954bb75cc78b762b21e41a3b0d
+Author: Lubos Kardos <lkardos@redhat.com>
+Date:   Fri Nov 6 14:49:59 2015 +0100
+
+    Fix crash when parsing corrupted RPM file (rhbz:1273360)
+    
+    (cherry picked from commit 9c36ca411332d2718eca339e867561c39abc256b)
+
+commit e0b5ab34efaad7d1423f62a33e3fc09054c0c83b
+Author: Lubos Kardos <lkardos@redhat.com>
+Date:   Fri Nov 6 12:45:32 2015 +0100
+
+    Fix SIGSEGV in case of old unsupported gpg keys (rhbz:1277464)
+    
+    Regression from: a173d781a631a92524ce5be364c679ba19b3e321
+    Adds also warning that gpg key is not supported.
+    
+    (cherry picked from commit 2dd06933726cf5191e05264901789f8e1da6e51d)
+
+commit df07d7e579371d272826399dbc1d8b595fdc2109
+Author: Lubos Kardos <lkardos@redhat.com>
+Date:   Fri Oct 30 14:42:32 2015 +0100
+
+    Ignore SIGPIPE signals during execucton of scriptlets (rhbz:1264198)
+    
+    (cherry picked from commit 90d8cc16486479441477e89c2e09bd4f9f7604bb)
+
+commit 075470fd12410ad7973d94ddc30615eb5b01c014
+Author: Lubos Kardos <lkardos@redhat.com>
+Date:   Fri Oct 23 14:21:58 2015 +0200
+
+    Make terminating build if version format is wrong configurable
+    
+    (cherry picked from commit 5e94633660d0e2b970bf42f1dc24346ed46cae2e)
+
+commit d1d30adf715540928eede0e1b39e029a80793ccc
+Author: Lubos Kardos <lkardos@redhat.com>
+Date:   Fri Oct 23 12:20:45 2015 +0200
+
+    Warn if epoch is not unsigned integer (rhbz:1251453)
+    
+    (cherry picked from commit f5bab7c054de3607d43dcc5ee8a04c2e3cd46926)
+
+commit 76456f67c32e3a4354351505ac73f76fa95c58ee
+Author: Florian Festi <ffesti@redhat.com>
+Date:   Mon Oct 12 12:47:45 2015 +0200
+
+    Permit scriptlet exec context setting to fail in non-enforcing modes
+    
+    for new code path, too.
+    
+    See also 9c082fb8689efdaa5a595d3043e67ccec4ed930c
+    
+    (cherry picked from commit 0d214a17e412bffa00cfede2d884f02ac78b8434)
+
+commit 3aac162051fbaf2a97e20922298a003fee9f7337
+Author: Thierry Vignaud <thierry.vignaud@gmail.com>
+Date:   Thu Sep 17 04:36:47 2015 -0400
+
+    fix %autopatch when patch do not exist
+    
+    unlike Mageia's %apply_patches which inspired it, %autopatch continues
+    when it fails to apply a patch because it doesn't exists. Eg:
+    
+    + /usr/bin/cat /home/tv/rpmbuild/SOURCES/test.patch2
+    + /usr/bin/patch -p1 -s
+    /usr/bin/cat: /home/tv/rpmbuild/SOURCES/test.patch2: No such file or directory
+    + /usr/bin/cat /home/tv/rpmbuild/SOURCES/test.patch
+    + /usr/bin/patch -p1 -s
+    
+    Let's catch that error
+    
+    Signed-off-by: Lubos Kardos <lkardos@redhat.com>
+    (cherry picked from commit 73ea59e0d53503bb45d5eac9d9792127a6d04c23)
+
+commit d850ed04909503fff7d5ed2e5f1eb3ea02ee5987
+Author: Lubos Kardos <lkardos@redhat.com>
+Date:   Mon Sep 21 14:13:22 2015 +0200
+
+    Add support for various types of dependencies to rpmdeps tool
+    
+    Options added to rpmdeps tool:
+    --recommends
+    --suggests
+    --supplements
+    --enhances
+    --conflicts
+    --obsoletes
+    
+    (cherry picked from commit 7a84b45c62cd25c4c68ad295ac5f360b1daebf6a)
+
+commit d2845ebb6cae6b273b923952f45deebddd6ceb00
+Author: Lubos Kardos <lkardos@redhat.com>
+Date:   Mon Sep 21 11:02:45 2015 +0200
+
+    Fix reading a memory right after the end of an allocated area.
+    
+    The problem evinced itself when somebody tried to use the macro
+    expansion on the string "%!". The problem was revealed by compiling
+    with "--fsanitize=memory" (rhbz:#1260248).
+    
+    (cherry picked from commit 54f24ec5486bdacde9419466a2c27defaddf508e)
+
+commit 114c5c0a92a3bbe5665bedcba845aeae19af252d
+Author: Florian Festi <ffesti@redhat.com>
+Date:   Mon Sep 7 11:39:36 2015 +0200
+
+    Fix rpmrichOpStr to use the new syntax
+    
+    You need to rebuild all packages using rich deps build with previous versions of rpm as the richdeps are converted to the old syntax.
+    
+    (cherry picked from commit d20b7d2b00e349610f3cf08d9ff3723cc7c56e32)
+
+commit 1f1469ef26171b3fffab38fecf0834dce7a9559d
+Author: Florian Festi <ffesti@redhat.com>
+Date:   Mon Aug 29 18:08:29 2016 +0200
+
+    tests: Do not pass real pathnames to fakechroot commands
+    
+    for the remaining tests.
+    Also add a Provides: /bin/sh to one of the specs as the test does no longer
+    works without for some unknown reason.
+    
+    (cherry picked from commit 394cbfb668655f7aa10ff6b178ec92b44a117ea6)
+
+commit 3a392532b0074bb7744c4d682f52834e942f50a2
+Author: Michal Marek <mmarek@suse.com>
+Date:   Fri Aug 12 21:47:16 2016 +0200
+
+    tests: Do not pass real pathnames to fakechroot commands
+    
+    Fakechroot returns -ENOENT for such paths:
+    
+    $ FAKECHROOT_BASE=$PWD/tests/testing fakechroot ls /not_an.rpm
+    /not_an.rpm
+    $ FAKECHROOT_BASE=$PWD/tests/testing fakechroot ls $PWD/not_an.rpm
+    ls: cannot access /home/mmarek/GIT/rpm/not_an.rpm: No such file or directory
+    
+    Signed-off-by: Michal Marek <mmarek@suse.com>
+    (cherry picked from commit 5b8b2bdd328c36d400ea6b73869b447941173a9b)
+
+commit 29f2dae9eb61bbb1aeb0784ce8571952028c9290
+Author: Mark Wielaard <mjw@redhat.com>
+Date:   Fri Mar 18 16:16:50 2016 +0100
+
+    Fix rpmi.at testcase by checking actual datadir and docdir used.
+    
+    The testcase for rpm -i with/without --excludedocs had hardcoded paths
+    checking if files were installed or not. This meant that depending on
+    the configure --prefix used the test might fail because the datadir
+    and/or docdir were different from expected. Fixed by checking the
+    actual datadir and (default)docdir to test against.
+    
+    (cherry picked from commit 18bf1aa6d975abc2f5c63cc599b0fbef1ba691e7)
+
+commit 3c5cff1e435e80626820b096f7b00b4c3bf6e562
+Author: Lubos Kardos <lkardos@redhat.com>
+Date:   Thu Jan 14 13:35:28 2016 +0100
+
+    Fix not chrooting transaction file triggers
+    
+    previously those filetriggers would call tools out of the chroot, which
+    breaks installers such as DrakX or Anaconda.
+    
+    See https://bugs.mageia.org/show_bug.cgi?id=17217
+    
+    Thanks Thierry Vignaud for finding and helping to solve this.
+
+commit 8503d6516ed2540665441c651b78e173dbdfb55c
+Author: Neal Gompa (ニール・ゴンパ) <ngompa13@gmail.com>
+Date:   Wed Oct 21 13:47:20 2015 -0400
+
+    Add "-O" to %make_build
+    
+    In order to preserve our sanity when reading logs of
+    %make_build output, adding "-O" to %make_build keeps the output
+    of each thread contiguous, making the resultant build log
+    readable and useful. See GNU Make manual for details on the switch.
+    
+    Signed-off-by: Lubos Kardos <lkardos@redhat.com>
+
 commit ea9c4bf2e3f21ed435cd01055506aa3169acd90f
 Author: Florian Festi <ffesti@redhat.com>
 Date:   Wed Sep 2 13:53:33 2015 +0200

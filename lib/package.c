@@ -127,9 +127,10 @@ static int stashKeyid(unsigned int keyid)
 
     if (keyids != NULL)
     for (i = 0; i < nkeyids; i++) {
-	if (keyid == keyids[i])
+	if (keyid == keyids[i]) {
 	    seen = 1;
 	    goto exit;
+        }
     }
 
     if (nkeyids < nkeyids_max) {
@@ -179,10 +180,11 @@ static rpmRC headerSigVerify(rpmKeyring keyring, rpmVSFlags vsflags,
 	switch (einfo.tag) {
 	case RPMTAG_SHA1HEADER: {
 	    size_t blen = 0;
-	    unsigned const char * b;
+	    unsigned const char * b = dataStart + einfo.offset;
+	    unsigned const char * e = dataStart + dl;
 	    if (vsflags & RPMVSF_NOSHA1HEADER)
 		break;
-	    for (b = dataStart + einfo.offset; *b != '\0'; b++) {
+	    for (; b < e && *b != '\0'; b++) {
 		if (strchr("0123456789abcdefABCDEF", *b) == NULL)
 		    break;
 		blen++;
@@ -269,6 +271,12 @@ rpmRC headerVerifyRegion(rpmTagVal regionTag,
     int32_t ril = 0;
     int32_t rdl = 0;
 
+    /* Check that we have at least on tag */
+    if (il < 1) {
+	rasprintf(buf, _("region: no tags"));
+	goto exit;
+    }
+
     memset(entry, 0, sizeof(*entry));
 
     /* Check (and convert) the 1st tag element. */
@@ -311,7 +319,7 @@ rpmRC headerVerifyRegion(rpmTagVal regionTag,
     regionEnd += REGION_TAG_COUNT;
     rdl = regionEnd - dataStart;
 
-    if (headerVerifyInfo(1, il * sizeof(*pe), &info, &entry->info, 1) != -1 ||
+    if (headerVerifyInfo(1, il * sizeof(*pe) + REGION_TAG_COUNT, &info, &entry->info, 1) != -1 ||
 	!(entry->info.tag == regionTag
        && entry->info.type == REGION_TAG_TYPE
        && entry->info.count == REGION_TAG_COUNT))

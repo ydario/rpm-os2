@@ -993,7 +993,7 @@ expandMacro(MacroBuf mb, const char *src, size_t slen)
 	chkexist = 0;
 	switch ((c = *s)) {
 	default:		/* %name substitution */
-		while (strchr("!?", *s) != NULL) {
+		while (*s != '\0' && strchr("!?", *s) != NULL) {
 			switch(*s++) {
 			case '!':
 				negate = ((negate + 1) % 2);
@@ -1469,6 +1469,24 @@ int expandMacros(void * spec, rpmMacroContext mc, char * sbuf, size_t slen)
     rstrlcpy(sbuf, target, slen);
     free(target);
     return rc;
+}
+
+int rpmExpandMacros(rpmMacroContext mc, const char * sbuf, char ** obuf, int flags)
+{
+    char *target = NULL;
+    int rc;
+
+    mc = rpmmctxAcquire(mc);
+    rc = doExpandMacros(mc, sbuf, &target);
+    rpmmctxRelease(mc);
+
+    if (rc) {
+	free(target);
+	return -1;
+    } else {
+	*obuf = target;
+	return 1;
+    }
 }
 
 void

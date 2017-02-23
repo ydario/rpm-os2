@@ -2,8 +2,10 @@
 #find-debuginfo.sh - automagically generate debug info and file list
 #for inclusion in an rpm spec file.
 #
-# Usage: find-debuginfo.sh [--strict-build-id] [-g] [-r]
+# Usage: find-debuginfo.sh [--strict-build-id] [-g] [-r] [-m]
 #	 		   [-o debugfiles.list]
+#			   [--run-dwz] [--dwz-low-mem-die-limit N]
+#			   [--dwz-max-die-limit N]
 #			   [[-l filelist]... [-p 'pattern'] -o debuginfo.list]
 #			   [builddir]
 #
@@ -20,8 +22,15 @@
 # The -p argument is an grep -E -style regexp matching the a file name,
 # and must not use anchors (^ or $).
 #
+# The --run-dwz flag instructs find-debuginfo.sh to run the dwz utility
+# if available, and --dwz-low-mem-die-limit and --dwz-max-die-limit
+# provide detailed limits.  See dwz(1) -l and -L option for details.
+#
 # All file names in switches are relative to builddir (. if not given).
 #
+
+# Figure out where we are installed so we can call other helper scripts.
+lib_rpm_dir="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
 # With -g arg, pass it to strip on libraries or executables.
 strip_g=false
@@ -29,8 +38,16 @@ strip_g=false
 # with -r arg, pass --reloc-debug-sections to eu-strip.
 strip_r=false
 
+# with -m arg, add minimal debuginfo to binary.
+include_minidebug=false
+
 # Barf on missing build IDs.
 strict=false
+
+# DWZ parameters.
+run_dwz=false
+dwz_low_mem_die_limit=
+dwz_max_die_limit=
 
 BUILDDIR=.
 out=debugfiles.list
@@ -40,8 +57,22 @@ while [ $# -gt 0 ]; do
   --strict-build-id)
     strict=true
     ;;
+  --run-dwz)
+    run_dwz=true
+    ;;
+  --dwz-low-mem-die-limit)
+    dwz_low_mem_die_limit=$2
+    shift
+    ;;
+  --dwz-max-die-limit)
+    dwz_max_die_limit=$2
+    shift
+    ;;
   -g)
     strip_g=true
+    ;;
+  -m)
+    include_minidebug=true
     ;;
   -o)
     if [ -z "${lists[$nout]}" -a -z "${ptns[$nout]}" ]; then
@@ -86,10 +117,12 @@ done
 LISTFILE="$BUILDDIR/$out"
 SOURCEFILE="$BUILDDIR/debugsources.list"
 LINKSFILE="$BUILDDIR/debuglinks.list"
+ELFBINSFILE="$BUILDDIR/elfbins.list"
 
 > "$SOURCEFILE"
 > "$LISTFILE"
 > "$LINKSFILE"
+> "$ELFBINSFILE"
 
 debugdir="${RPM_BUILD_ROOT}/usr/lib/debug"
 
@@ -104,6 +137,43 @@ strip_to_debug()
   esac
   eu-strip --remove-comment $r $g -f "$1" "$2" || exit
   chmod 444 "$1" || exit
+}
+
+add_minidebug()
+{
+  local debuginfo="$1"
+  local binary="$2"
+
+  local dynsyms=`mktemp`
+  local funcsyms=`mktemp`
+  local keep_symbols=`mktemp`
+  local mini_debuginfo=`mktemp`
+
+  # In the minisymtab we don't need the .debug_ sections (already removed
+  # by -S) but also not any other non-allocated PROGBITS or NOTE sections.
+  # List and remove them explicitly. We do want to keep the allocated,
+  # symbol and NOBITS sections so cannot use --keep-only because that is
+  # too agressive. Field $2 is the section name, $3 is the section type
+  # and $8 are the section flags.
+  local remove_sections=`readelf -W -S "$debuginfo" | awk '{ if (index($2,".debug_") != 1 && ($3 == "PROGBITS" || $3 == "NOTE") && index($8,"A") == 0) printf "--remove-section "$2" " }'`
+
+  # Extract the dynamic symbols from the main binary, there is no need to also have these
+  # in the normal symbol table
+  nm -D "$binary" --format=posix --defined-only | awk '{ print $1 }' | sort > "$dynsyms"
+  # Extract all the text (i.e. function) symbols from the debuginfo
+  # Use format sysv to make sure we can match against the actual ELF FUNC
+  # symbol type. The binutils nm posix format symbol type chars are
+  # ambigous for architectures that might use function descriptors.
+  nm "$debuginfo" --format=sysv --defined-only | awk -F \| '{ if ($4 ~ "FUNC") print $1 }' | sort > "$funcsyms"
+  # Keep all the function symbols not already in the dynamic symbol table
+  comm -13 "$dynsyms" "$funcsyms" > "$keep_symbols"
+  # Copy the full debuginfo, keeping only a minumal set of symbols and removing some unnecessary sections
+  objcopy -S $remove_sections --keep-symbols="$keep_symbols" "$debuginfo" "$mini_debuginfo" &> /dev/null
+  #Inject the compressed data into the .gnu_debugdata section of the original binary
+  xz "$mini_debuginfo"
+  mini_debuginfo="${mini_debuginfo}.xz"
+  objcopy --add-section .gnu_debugdata="$mini_debuginfo" "$binary"
+  rm -f "$dynsyms" "$funcsyms" "$keep_symbols" "$mini_debuginfo"
 }
 
 # Make a relative symlink to $1 called $3$2
@@ -232,7 +302,7 @@ while read nlinks inum f; do
   fi
 
   echo "extracting debug info from $f"
-  id=$(/usr/lib/rpm/debugedit -b "$RPM_BUILD_DIR" -d /usr/src/debug \
+  id=$(${lib_rpm_dir}/debugedit -b "$RPM_BUILD_DIR" -d /usr/src/debug \
 			      -i -l "$SOURCEFILE" "$f") || exit
   if [ $nlinks -gt 1 ]; then
     eval linkedid_$inum=\$id
@@ -242,7 +312,7 @@ while read nlinks inum f; do
     $strict && exit 2
   fi
 
-  [ -x /usr/bin/gdb-add-index ] && /usr/bin/gdb-add-index "$f" > /dev/null 2>&1
+  [ type gdb-add-index >/dev/null 2>&1 && gdb-add-index "$f" > /dev/null 2>&1
 
   # A binary already copied into /usr/lib/debug doesn't get stripped,
   # just has its file names collected and adjusted.
@@ -261,11 +331,52 @@ while read nlinks inum f; do
     chmod u-w "$f"
   fi
 
+  # strip -g implies we have full symtab, don't add mini symtab in that case.
+  $strip_g || ($include_minidebug && add_minidebug "${debugfn}" "$f")
+
+  echo "./${f#$RPM_BUILD_ROOT}" >> "$ELFBINSFILE"
+
   if [ -n "$id" ]; then
     make_id_link "$id" "$dn/$(basename $f)"
     make_id_link "$id" "/usr/lib/debug$dn/$bn" .debug
   fi
 done || exit
+
+# Invoke the DWARF Compressor utility.
+if $run_dwz && type dwz >/dev/null 2>&1 \
+   && [ -d "${RPM_BUILD_ROOT}/usr/lib/debug" ]; then
+  dwz_files="`cd "${RPM_BUILD_ROOT}/usr/lib/debug"; find -type f -name \*.debug`"
+  if [ -n "${dwz_files}" ]; then
+    dwz_multifile_name="${RPM_PACKAGE_NAME}-${RPM_PACKAGE_VERSION}-${RPM_PACKAGE_RELEASE}.${RPM_ARCH}"
+    dwz_multifile_suffix=
+    dwz_multifile_idx=0
+    while [ -f "${RPM_BUILD_ROOT}/usr/lib/debug/.dwz/${dwz_multifile_name}${dwz_multifile_suffix}" ]; do
+      let ++dwz_multifile_idx
+      dwz_multifile_suffix=".${dwz_multifile_idx}"
+    done
+    dwz_multfile_name="${dwz_multifile_name}${dwz_multifile_suffix}"
+    dwz_opts="-h -q -r -m .dwz/${dwz_multifile_name}"
+    mkdir -p "${RPM_BUILD_ROOT}/usr/lib/debug/.dwz"
+    [ -n "${dwz_low_mem_die_limit}" ] \
+      && dwz_opts="${dwz_opts} -l ${dwz_low_mem_die_limit}"
+    [ -n "${dwz_max_die_limit}" ] \
+      && dwz_opts="${dwz_opts} -L ${dwz_max_die_limit}"
+    ( cd "${RPM_BUILD_ROOT}/usr/lib/debug" && dwz $dwz_opts $dwz_files )
+    # Remove .dwz directory if empty
+    rmdir "${RPM_BUILD_ROOT}/usr/lib/debug/.dwz" 2>/dev/null
+    if [ -f "${RPM_BUILD_ROOT}/usr/lib/debug/.dwz/${dwz_multifile_name}" ]; then
+      id="`readelf -Wn "${RPM_BUILD_ROOT}/usr/lib/debug/.dwz/${dwz_multifile_name}" \
+	     2>/dev/null | sed -n 's/^    Build ID: \([0-9a-f]\+\)/\1/p'`"
+      [ -n "$id" ] \
+	&& make_id_link "$id" "/usr/lib/debug/.dwz/${dwz_multifile_name}" .debug
+    fi
+
+    # dwz invalidates .gnu_debuglink CRC32 in the main files.
+    cat "$ELFBINSFILE" |
+    (cd "$RPM_BUILD_ROOT"; \
+     xargs -d '\n' ${lib_rpm_dir}/sepdebugcrcfix usr/lib/debug)
+  fi
+fi
 
 # For each symlink whose target has a .debug file,
 # make a .debug symlink to that file.

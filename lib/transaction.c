@@ -1345,12 +1345,16 @@ exit:
 static int rpmtsProcess(rpmts ts)
 {
     rpmtsi pi;	rpmte p;
+    tsMembers tsmem = rpmtsMembers(ts);
     int rc = 0;
+    int i = 0;
 
     pi = rpmtsiInit(ts);
     while ((p = rpmtsiNext(pi, 0)) != NULL) {
 	int failed;
 
+	rpmtsNotify(ts, NULL, RPMCALLBACK_ELEM_PROGRESS, i++,
+		tsmem->orderCount);
 	rpmlog(RPMLOG_DEBUG, "========== +++ %s %s-%s 0x%x\n",
 		rpmteNEVR(p), rpmteA(p), rpmteO(p), rpmteColor(p));
 
@@ -1488,7 +1492,9 @@ int rpmtsRun(rpmts ts, rpmps okProbs, rpmprobFilterFlags ignoreSet)
 	goto exit;
     }
 
-    if (!rpmpsNumProblems(tsprobs)) {
+    if (!(rpmtsFlags(ts) & (RPMTRANS_FLAG_BUILD_PROBS|RPMTRANS_FLAG_NOPRETRANS|
+	RPMTRANS_FLAG_NOTRIGGERUN) || rpmpsNumProblems(tsprobs))) {
+
 	/* Run file triggers in this package other package(s) set off. */
 	runFileTriggers(ts, NULL, RPMSENSE_TRIGGERUN,
 			RPMSCRIPT_TRANSFILETRIGGER, 0);
@@ -1541,11 +1547,17 @@ int rpmtsRun(rpmts ts, rpmps okProbs, rpmprobFilterFlags ignoreSet)
     }
 
     /* Run file triggers in other package(s) this package sets off. */
-    runFileTriggers(ts, NULL, RPMSENSE_TRIGGERIN, RPMSCRIPT_TRANSFILETRIGGER, 0);
-    runPostUnTransFileTrigs(ts);
+    if (!(rpmtsFlags(ts) & (RPMTRANS_FLAG_NOPOSTTRANS|RPMTRANS_FLAG_NOTRIGGERIN))) {
+	runFileTriggers(ts, NULL, RPMSENSE_TRIGGERIN, RPMSCRIPT_TRANSFILETRIGGER, 0);
+    }
+    if (!(rpmtsFlags(ts) & (RPMTRANS_FLAG_NOPOSTTRANS|RPMTRANS_FLAG_NOTRIGGERPOSTUN))) {
+	runPostUnTransFileTrigs(ts);
+    }
 
     /* Run file triggers in this package other package(s) set off. */
-    runTransScripts(ts, PKG_TRANSFILETRIGGERIN);
+    if (!(rpmtsFlags(ts) & (RPMTRANS_FLAG_NOPOSTTRANS|RPMTRANS_FLAG_NOTRIGGERIN))) {
+	runTransScripts(ts, PKG_TRANSFILETRIGGERIN);
+    }
 exit:
     /* Run post transaction hook for all plugins */
     if (TsmPreDone) /* If TsmPre hook has been called, call the TsmPost hook */

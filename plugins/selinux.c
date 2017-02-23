@@ -2,7 +2,6 @@
 
 #include <selinux/selinux.h>
 #include <selinux/context.h>
-#include <selinux/flask.h>
 #include <selinux/label.h>
 #include <selinux/avc.h>
 #include <rpm/rpmlog.h>
@@ -134,9 +133,6 @@ exit:
     freecon(fcon);
     freecon(mycon);
 
-    /* If selinux is not enforcing, we don't care either */
-    if (rc && security_getenforce() < 1)
-	rc = RPMRC_OK;
 #else
     if (sehandle == NULL)
 	return RPMRC_OK;
@@ -149,6 +145,9 @@ exit:
 	       path, (xx < 0 ? strerror(errno) : ""));
     }
 #endif
+    /* If selinux is not enforcing, we don't care either */
+    if (rc && security_getenforce() < 1)
+	rc = RPMRC_OK;
 
     return rc;
 }

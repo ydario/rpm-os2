@@ -95,7 +95,7 @@ runroot rpmbuild \
 
 runroot rpm -qp --qf \
   "\n[%{filemodes:perms} %-8{fileusername} %-8{filegroupname} %{filenames}\n]"\
-  "${TOPDIR}"/RPMS/noarch/attrtest-1.0-1.noarch.rpm
+  /build/RPMS/noarch/attrtest-1.0-1.noarch.rpm
 ]],
 [0],
 [
@@ -135,7 +135,7 @@ rm -rf ${TOPDIR}
 runroot rpmbuild \
   -bb --quiet /data/SPECS/hlinktest.spec
 
-runroot rpm -i "${TOPDIR}"/RPMS/noarch/hlinktest-1.0-1.noarch.rpm
+runroot rpm -i /build/RPMS/noarch/hlinktest-1.0-1.noarch.rpm
 
 runroot rpm -q --qf "[[%{filenlinks} %{filenames}\n]]%{longsize}\n" hlinktest
 runroot rpm -V --nouser --nogroup hlinktest
@@ -166,7 +166,7 @@ rm -rf ${TOPDIR}
 runroot rpmbuild -bb --quiet /data/SPECS/globtest.spec
 runroot rpm -qp \
 	--qf "[[%{filemodes:perms} %{filenames}\n]]" \
-	"${TOPDIR}"/RPMS/noarch/globtest-1.0-1.noarch.rpm
+	/build/RPMS/noarch/globtest-1.0-1.noarch.rpm
 ],
 [0],
 [-rw-r--r-- /opt/globtest/baf
@@ -199,7 +199,7 @@ runroot rpmbuild -bb --quiet \
 	/data/SPECS/prefixtest.spec
 runroot rpm -qp \
 	--qf "[[%{filemodes:perms} %{filenames}\n]]" \
-	"${TOPDIR}"/RPMS/noarch/prefixtest-1.0-1.noarch.rpm
+	/build/RPMS/noarch/prefixtest-1.0-1.noarch.rpm
 ],
 [0],
 [-rw-r--r-- /opt/prefixtest/ba
@@ -298,9 +298,237 @@ runroot rpmbuild \
   -bb --quiet /data/SPECS/attrtest.spec
 
 runroot rpm2cpio \
-  "${TOPDIR}"/RPMS/noarch/attrtest-1.0-1.noarch.rpm > /tmp/attrtest.cpio
+  /build/RPMS/noarch/attrtest-1.0-1.noarch.rpm > /tmp/attrtest.cpio
 ],
 [0],
 [],
 [])
+AT_CLEANUP
+
+# ------------------------------
+# Check if rpmbuild creates the minisymtab section in the main hello binary
+AT_SETUP([rpmbuild debuginfo minisymtab])
+AT_KEYWORDS([build] [debuginfo])
+AT_CHECK([
+rm -rf ${TOPDIR}
+
+# Use macros.debug to generate a debuginfo package.
+export CFLAGS="-g"
+run rpmbuild --quiet \
+  --macros=${abs_top_builddir}/macros:${top_srcdir}/macros.debug \
+  --rcfile=${abs_top_builddir}/rpmrc \
+  --rebuild "${abs_srcdir}"/data/SRPMS/hello-1.0-1.src.rpm
+
+# Extract the main package and inspect the hello binary
+# It should contain .gnu_debugdata, but not the full .symtab
+rpm2cpio ${abs_builddir}/testing/build/RPMS/*/hello-1.0-1.*.rpm | cpio -diu
+test -f ./usr/local/bin/hello || exit 1
+readelf -S ./usr/local/bin/hello |\
+   grep -q .gnu_debugdata; test $? == 0 || exit 1
+readelf -S ./usr/local/bin/hello \
+  | grep -q .symtab; test $? == 1 || exit 1
+
+# And the opposite for the debuginfo package
+rpm2cpio ${abs_builddir}/testing/build/RPMS/*/hello-debuginfo-1.0-1.*.rpm \
+  | cpio -diu
+test -f ./usr/lib/debug/usr/local/bin/hello*.debug || exit 1
+readelf -S ./usr/lib/debug/usr/local/bin/hello*.debug \
+  | grep -q .gnu_debugdata; test $? == 1 || exit 1
+readelf -S ./usr/lib/debug/usr/local/bin/hello*.debug \
+  | grep -q .symtab; test $? == 0 || exit 1
+],
+[0],
+[],
+[ignore])
+AT_CLEANUP
+
+# ------------------------------
+# Check if rpmbuild doesn't create the minisymtab section if we keep symtab
+# Some package might want to use strip -g to keep the symbol table and only
+# but the debug symbols/info in the debuginfo package.
+AT_SETUP([rpmbuild debuginfo minisymtab strip -g])
+AT_KEYWORDS([build] [debuginfo])
+AT_CHECK([
+rm -rf ${TOPDIR}
+
+# Use macros.debug to generate a debuginfo package.
+export CFLAGS="-g"
+run rpmbuild --quiet \
+  --macros=${abs_top_builddir}/macros:${top_srcdir}/macros.debug \
+  --rcfile=${abs_top_builddir}/rpmrc \
+  --define="_find_debuginfo_opts -g" \
+  --rebuild "${abs_srcdir}"/data/SRPMS/hello-1.0-1.src.rpm
+
+# Extract the main package and inspect the hello binary
+# It should contain .symtab (because of strip -g), so doesn't .gnu_debugdata.
+rpm2cpio ${abs_builddir}/testing/build/RPMS/*/hello-1.0-1.*.rpm | cpio -diu
+test -f ./usr/local/bin/hello || exit 1
+readelf -S ./usr/local/bin/hello \
+  | grep -q .gnu_debugdata; test $? == 1 || exit 1
+readelf -S ./usr/local/bin/hello \
+  | grep -q .symtab; test $? == 0 || exit 1
+
+# The debuginfo package should contain neither. The .symtab is NOBITS.
+rpm2cpio ${abs_builddir}/testing/build/RPMS/*/hello-debuginfo-1.0-1.*.rpm \
+  | cpio -diu
+test -f ./usr/lib/debug/usr/local/bin/hello*.debug || exit 1
+readelf -S ./usr/lib/debug/usr/local/bin/hello*.debug \
+  | grep -q .gnu_debugdata; test $? == 1 || exit 1
+readelf -S ./usr/lib/debug/usr/local/bin/hello*.debug \
+  | grep .symtab | grep -q NOBITS; test $? == 0 || exit 1
+],
+[0],
+[],
+[ignore])
+AT_CLEANUP
+
+# ------------------------------
+# Check if rpmbuild runs dwz and generates a multi file that with shared
+# debuginfo. This is simply the hello example with one binary build twice
+# so dwz has enough slightly similar debug data.
+AT_SETUP([rpmbuild debuginfo dwz])
+AT_KEYWORDS([build] [debuginfo])
+AT_CHECK([
+rm -rf ${TOPDIR}
+AS_MKDIR_P(${TOPDIR}/SOURCES)
+
+cp "${abs_srcdir}"/data/SOURCES/hello-1.0.tar.gz "${abs_srcdir}"/data/SOURCES/hello-1.0-modernize.patch ${TOPDIR}/SOURCES
+
+run rpmbuild --quiet \
+  --macros=${abs_top_builddir}/macros:${abs_top_builddir}/tests/testing/usr/local/lib/rpm/platform/%{_target_cpu}-%{_target_os}/macros:${top_srcdir}/macros.debug \
+  --rcfile=${abs_top_builddir}/rpmrc \
+  -ba "${abs_srcdir}"/data/SPECS/hello2.spec
+
+# The debuginfo package should contain a .debug file for each binary
+# and a dwz multi file that contains the shared debuginfo between them.
+rpm2cpio ${abs_builddir}/testing/build/RPMS/*/hello2-debuginfo-1.0-1.*.rpm \
+  | cpio -diu
+test -f ./usr/lib/debug/usr/local/bin/hello.debug || exit 1
+test -f ./usr/lib/debug/usr/local/bin/hello2.debug || exit 1
+test -f ./usr/lib/debug/.dwz/hello2-1.0-1.* || exit 1
+
+# Make sure the main package binaries contain the correct build-ids
+# linking them to the debug packages.
+rpm2cpio ${abs_builddir}/testing/build/RPMS/*/hello2-1.0-1.*.rpm \
+  | cpio -diu
+id1=$(file ./usr/local/bin/hello | sed 's/.*, BuildID[.*]=\(.*\),.*/\1/')
+id2=$(file ./usr/local/bin/hello2 | sed 's/.*, BuildID[.*]=\(.*\),.*/\1/')
+id1debug=$(file ./usr/lib/debug/usr/local/bin/hello.debug \
+  | sed 's/.*, BuildID[.*]=\(.*\),.*/\1/')
+id2debug=$(file ./usr/lib/debug/usr/local/bin/hello2.debug \
+  | sed 's/.*, BuildID[.*]=\(.*\),.*/\1/')
+idmulti=$(file ./usr/lib/debug/.dwz/hello2-1.0-1.* \
+  | sed 's/.*, BuildID[.*]=\(.*\),.*/\1/')
+
+test "$id1" = "$id1debug" || exit 1
+test "$id2" = "$id2debug" || exit 1
+
+# The build-id files should link to the .debug files.
+id1file="./usr/lib/debug/.build-id/${id1:0:2}/${id1:2}"
+canonid1file=$(readlink -f ${id1file})
+canonfile1=$(readlink -f ./usr/local/bin/hello)
+canonid1debug=$(readlink -f ${id1file}.debug)
+canondebug1=$(readlink -f ./usr/lib/debug/usr/local/bin/hello.debug)
+
+test "$canonid1file" = "$canonfile1" || exit 1
+test "$canonid1debug" = "$canondebug1" || exit 1
+
+id2file="./usr/lib/debug/.build-id/${id2:0:2}/${id2:2}"
+canonid2file=$(readlink -f ${id1file})
+canonfile2=$(readlink -f ./usr/local/bin/hello)
+canonid2debug=$(readlink -f ${id1file}.debug)
+canondebug2=$(readlink -f ./usr/lib/debug/usr/local/bin/hello.debug)
+
+test "$canonid2file" = "$canonfile2" || exit 1
+test "$canonid2debug" = "$canondebug2" || exit 1
+
+# Both .debug files should point to the dwz multi file.
+# It would be nice to also test that they contain the correct dwz build-id
+# but that is a bit hard to grep out of the section data.
+multiref1=$(readelf --string-dump=.gnu_debugaltlink ./usr/lib/debug/usr/local/bin/hello.debug | grep '[     0]' | cut -c13-)
+multiref2=$(readelf --string-dump=.gnu_debugaltlink ./usr/lib/debug/usr/local/bin/hello2.debug | grep '[     0]' | cut -c13-)
+
+test "$multiref1" = "$multiref2" || exit 1
+
+canonmultiref=$(readlink -f $(dirname $canondebug1)/$multiref1)
+canonmultifile=$(readlink -f ./usr/lib/debug/.dwz/hello2-1.0-1.*)
+
+test "$canonmultiref" = "$canonmultifile" || exit 1
+],
+[0],
+[],
+[ignore])
+AT_CLEANUP
+
+# ------------------------------
+# Check that old style gnu_debuglink CRC checksums are correct even after
+# using dwz to compress the debuginfo files.
+AT_SETUP([rpmbuild debuginfo dwz gnu_debuglink crc])
+AT_KEYWORDS([build] [debuginfo])
+AT_CHECK([
+rm -rf ${TOPDIR}
+AS_MKDIR_P(${TOPDIR}/SOURCES)
+
+# Build a package that
+cp "${abs_srcdir}"/data/SOURCES/hello-1.0.tar.gz "${abs_srcdir}"/data/SOURCES/hello-1.0-modernize.patch ${TOPDIR}/SOURCES
+
+run rpmbuild --quiet \
+  --macros=${abs_top_builddir}/macros:${abs_top_builddir}/tests/testing/usr/local/lib/rpm/platform/%{_target_cpu}-%{_target_os}/macros:${top_srcdir}/macros.debug \
+  --rcfile=${abs_top_builddir}/rpmrc \
+  -ba "${abs_srcdir}"/data/SPECS/hello2.spec
+
+# Unpack the main and debuginfo rpms so we can check binaries and .debug files.
+rpm2cpio ${abs_builddir}/testing/build/RPMS/*/hello2-debuginfo-1.0-1.*.rpm \
+  | cpio -diu
+rpm2cpio ${abs_builddir}/testing/build/RPMS/*/hello2-1.0-1.*.rpm \
+  | cpio -diu
+
+# Check that dwz has ran and a multi file has been produced
+test -f ./usr/lib/debug/.dwz/hello2-1.0-1.* || exit 1
+
+# Run sepdbugcrcfix on the binaries, both should have correct CRC already.
+${abs_top_builddir}/sepdebugcrcfix ./usr/lib/debug \
+  ./usr/local/bin/hello ./usr/local/bin/hello2 | grep CRC32 | cut -f2 -d:
+],
+[0],
+[ Updated 0 CRC32s, 2 CRC32s did match.
+],
+[ignore])
+AT_CLEANUP
+
+# ------------------------------
+# Check that an implicit suid binary get included with the suid bit set.
+# We explicitly build with all debug.macros to test those helpers.
+AT_SETUP([rpmbuild implicit suid binary])
+AT_KEYWORDS([build] [debuginfo] [dwz] [suid])
+AT_CHECK([
+rm -rf ${TOPDIR}
+AS_MKDIR_P(${TOPDIR}/SOURCES)
+
+# Build a package that has some debuginfo
+cp "${abs_srcdir}"/data/SOURCES/hello-1.0.tar.gz "${abs_srcdir}"/data/SOURCES/hello-1.0-modernize.patch ${TOPDIR}/SOURCES
+
+run rpmbuild --quiet \
+  --rcfile=${abs_top_builddir}/rpmrc \
+  --macros=${abs_top_builddir}/macros:${abs_top_builddir}/tests/testing/usr/local/lib/rpm/platform/%{_target_cpu}-%{_target_os}/macros:${top_srcdir}/macros.debug \
+  -ba "${abs_srcdir}"/data/SPECS/hello2-suid.spec
+
+# Unpack rpm so we can check the included binaries.
+rpm2cpio ${abs_builddir}/testing/build/RPMS/*/hello2-1.0-1.*.rpm \
+  | cpio -diu --quiet
+
+# List all binaries with suid bit set (should be one, hello).
+echo "suid:"
+find usr -executable -type f -perm /4000
+# List all binaries without suid bit set (should also be one, hello2).
+echo "no-suid:"
+find usr -executable -type f \! -perm /4000
+],
+[0],
+[suid:
+usr/local/bin/hello
+no-suid:
+usr/local/bin/hello2
+],
+[ignore])
 AT_CLEANUP

@@ -166,6 +166,10 @@ rpmlibexec_PROGRAMS +=	elfdeps
 elfdeps_SOURCES =	tools/elfdeps.c
 elfdeps_LDADD =		rpmio/librpmio.la
 elfdeps_LDADD +=	@WITH_LIBELF_LIB@ @WITH_POPT_LIB@
+
+rpmlibexec_PROGRAMS +=	sepdebugcrcfix
+sepdebugcrcfix_SOURCES = tools/sepdebugcrcfix.c
+sepdebugcrcfix_LDADD =	@WITH_LIBELF_LIB@
 endif
 endif
 
@@ -197,6 +201,9 @@ macros: $(top_srcdir)/macros.in
 	  ( cd $(top_builddir) && ./config.status --file=${subdir}/macros:${subdir}/macros.in )
 CLEANFILES += macros
 EXTRA_DIST += macros.in
+
+# Used for the testsuite to test creating debuginfo packages
+EXTRA_DIST += macros.debug
 
 noinst_DATA += platform
 platform: $(top_srcdir)/platform.in

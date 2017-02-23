@@ -31,6 +31,13 @@
 static char sccsid[] = "@(#)fts.c	8.6 (Berkeley) 8/14/94";
 #endif /* LIBC_SCCS and not lint */
 
+/* Conditional to set up proper fstat64 implementation */
+#if defined(hpux) || defined(sun)
+#   define FTS_FSTAT64(_fd, _sbp)   fstat((_fd), (_sbp))
+#else
+#   define FTS_FSTAT64(_fd, _sbp)   fstat64((_fd), (_sbp))
+#endif
+
 #if defined(_LIBC)
 #include <sys/param.h>
 #include <include/sys/stat.h>
@@ -42,24 +49,20 @@ static char sccsid[] = "@(#)fts.c	8.6 (Berkeley) 8/14/94";
 #include <string.h>
 #include <unistd.h>
 #else
+
+/* Conditionals for working around non-GNU environments */
 #if defined(hpux)
-# define        _INCLUDE_POSIX_SOURCE
+#   define        _INCLUDE_POSIX_SOURCE
 #   define __errno_location() 	(&errno)
 #   define dirfd(dirp)		-1
 #   define stat64		stat
-#   define _STAT_VER		0
-#   define __fxstat64(_stat_ver, _fd, _sbp)	fstat((_fd), (_sbp))
 #endif
 #if defined(sun)
 #   define __errno_location()	(&errno)
 #   define dirfd(dirp)		-1
-#   define _STAT_VER		0
-#   define __fxstat64(_stat_ver, _fd, _sbp)	fstat((_fd), (_sbp))
 #endif
 #if defined(__APPLE__)
 #   define __errno_location()	(__error())
-#   define _STAT_VER		0
-#   define __fxstat64(_stat_ver, _fd, _sbp) fstat64((_fd), (_sbp))
 #endif
 #if defined(__KLIBC__)
 #   define __errno_location()	(&errno)
@@ -68,6 +71,7 @@ static char sccsid[] = "@(#)fts.c	8.6 (Berkeley) 8/14/94";
 #   define _STAT_VER		0
 #   define __fxstat64(_stat_ver, _fd, _sbp)	fstat((_fd), (_sbp))
 #endif
+
 #include "system.h"
 #include <stdlib.h>
 #include <string.h>
@@ -1125,7 +1129,7 @@ fts_safe_changedir(FTS * sp, FTSENT * p, int fd, const char * path)
 		return (0);
 	if (fd < 0 && (newfd = __open(path, O_RDONLY, 0)) < 0)
 		return (-1);
-	if (__fxstat64(_STAT_VER, newfd, &sb)) {
+	if (FTS_FSTAT64(newfd, &sb)) {
 		ret = -1;
 		goto bail;
 	}

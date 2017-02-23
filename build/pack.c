@@ -135,11 +135,13 @@ static rpmRC addFileToTag(rpmSpec spec, const char * file,
     }
 
     while (fgets(buf, sizeof(buf), f)) {
-	if (expandMacros(spec, spec->macros, buf, sizeof(buf))) {
+	char *expanded;
+	if(rpmExpandMacros(spec->macros, buf, &expanded, 0) < 0) {
 	    rpmlog(RPMLOG_ERR, _("%s: line: %s\n"), fn, buf);
 	    goto exit;
 	}
-	appendStringBuf(sb, buf);
+	appendStringBuf(sb, expanded);
+	free(expanded);
     }
     headerPutString(h, tag, getStringBuf(sb));
     rc = RPMRC_OK;
@@ -166,16 +168,25 @@ static const char * buildHost(void)
     static char hostname[1024];
     static int oneshot = 0;
     struct hostent *hbn;
+    char *bhMacro;
 
     if (! oneshot) {
-        (void) gethostname(hostname, sizeof(hostname));
-	hbn = gethostbyname(hostname);
-	if (hbn)
-	    strcpy(hostname, hbn->h_name);
-	else
-	    rpmlog(RPMLOG_WARNING,
-			_("Could not canonicalize hostname: %s\n"), hostname);
-	oneshot = 1;
+        bhMacro = rpmExpand("%{?_buildhost}", NULL);
+        if (strcmp(bhMacro, "") != 0 && strlen(bhMacro) < 1024) {
+            strcpy(hostname, bhMacro);
+        } else {
+            if (strcmp(bhMacro, "") != 0)
+                rpmlog(RPMLOG_WARNING, _("The _buildhost macro is too long\n"));
+            (void) gethostname(hostname, sizeof(hostname));
+            hbn = gethostbyname(hostname);
+            if (hbn)
+                strcpy(hostname, hbn->h_name);
+            else
+                rpmlog(RPMLOG_WARNING,
+                        _("Could not canonicalize hostname: %s\n"), hostname);
+        }
+        free(bhMacro);
+        oneshot = 1;
     }
     return(hostname);
 }
