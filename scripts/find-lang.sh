@@ -156,31 +156,31 @@ s<%lang(C) <<
 /^$/d' >> $MO_NAME
 
 find $TOP_DIR -type d|sed '
-s:'"$TOP_DIR"'::
-'"$NO_ALL_NAME$MATE"'s:\(.*/mate/help/'"$NAME"'$\):%dir \1:
-'"$NO_ALL_NAME$MATE"'s:\(.*/mate/help/'"$NAME"'/[a-zA-Z0-9.\_\-]/.\+\)::
-'"$NO_ALL_NAME$MATE"'s:\(.*/mate/help/'"$NAME"'\/\)\([^/_]\+\):%lang(\2) \1\2:
-'"$ALL_NAME$MATE"'s:\(.*/mate/help/[a-zA-Z0-9.\_\-]\+$\):%dir \1:
-'"$ALL_NAME$MATE"'s:\(.*/mate/help/[a-zA-Z0-9.\_\-]\+/[a-zA-Z0-9.\_\-]/.\+\)::
-'"$ALL_NAME$GNOME"'s:\(.*/mate/help/[a-zA-Z0-9.\_\-]\+\/\)\([^/_]\+\):%lang(\2) \1\2:
-s:%lang(.*) .*/mate/help/[a-zA-Z0-9.\_\-]\+/[a-zA-Z0-9.\_\-]\+/.*::
-s:^\([^%].*\)::
-s:%lang(C) ::
+s<'"$TOP_DIR"'<<
+'"$NO_ALL_NAME$MATE"'s<\(.*/mate/help/'"$NAME"'$\)<%dir \1<
+'"$NO_ALL_NAME$MATE"'s<\(.*/mate/help/'"$NAME"'/[a-zA-Z0-9.\_\-]/.\+\)<<
+'"$NO_ALL_NAME$MATE"'s<\(.*/mate/help/'"$NAME"'\/\)\([^/_]\+\)<%lang(\2) \1\2<
+'"$ALL_NAME$MATE"'s<\(.*/mate/help/[a-zA-Z0-9.\_\-]\+$\)<%dir \1<
+'"$ALL_NAME$MATE"'s<\(.*/mate/help/[a-zA-Z0-9.\_\-]\+/[a-zA-Z0-9.\_\-]/.\+\)<<
+'"$ALL_NAME$GNOME"'s<\(.*/mate/help/[a-zA-Z0-9.\_\-]\+\/\)\([^/_]\+\)<%lang(\2) \1\2<
+s<%lang(.*) .*/mate/help/[a-zA-Z0-9.\_\-]\+/[a-zA-Z0-9.\_\-]\+/.*<<
+s<^\([^%].*\)<<
+s<%lang(C) <<
 /^$/d' >> $MO_NAME
 
 find "$TOP_DIR" -type d|sed '
-s:'"$TOP_DIR"'::
-'"$NO_ALL_NAME$MATE"'s:\(.*/omf/'"$NAME"'$\):%dir \1:
-'"$ALL_NAME$MATE"'s:\(.*/omf/[a-zA-Z0-9.\_\-]\+$\):%dir \1:
-s:^\([^%].*\)::
+s<'"$TOP_DIR"'<<
+'"$NO_ALL_NAME$MATE"'s<\(.*/omf/'"$NAME"'$\)<%dir \1<
+'"$ALL_NAME$MATE"'s<\(.*/omf/[a-zA-Z0-9.\_\-]\+$\)<%dir \1<
+s<^\([^%].*\)<<
 /^$/d' >> $MO_NAME
 
 find "$TOP_DIR" -type f|sed '
-s:'"$TOP_DIR"'::
-'"$NO_ALL_NAME$MATE"'s:\(.*/omf/'"$NAME"'/'"$NAME"'-\([^/.]\+\)\.omf\):%lang(\2) \1:
-'"$ALL_NAME$MATE"'s:\(.*/omf/[a-zA-Z0-9.\_\-]\+/[a-zA-Z0-9.\_\-]\+-\([^/.]\+\)\.omf\):%lang(\2) \1:
-s:^[^%].*::
-s:%lang(C) ::
+s<'"$TOP_DIR"'<<
+'"$NO_ALL_NAME$MATE"'s<\(.*/omf/'"$NAME"'/'"$NAME"'-\([^/.]\+\)\.omf\)<%lang(\2) \1<
+'"$ALL_NAME$MATE"'s<\(.*/omf/[a-zA-Z0-9.\_\-]\+/[a-zA-Z0-9.\_\-]\+-\([^/.]\+\)\.omf\)<%lang(\2) \1<
+s<^[^%].*<<
+s<%lang(C) <<
 /^$/d' >> $MO_NAME
 
 #KDE3_HTML=`kde-config --expandvars --install html 2>/dev/null`
@@ -210,13 +210,13 @@ s<%lang(C) <<
 fi
 
 find "$TOP_DIR" -type d|sed '
-s:'"$TOP_DIR"'::
-'"$NO_ALL_NAME$HTML"'s:\(.*/doc/HTML/\)\([^/_]\+\)\(.*/'"$NAME"'/\)::
-'"$NO_ALL_NAME$HTML"'s:\(.*/doc/HTML/\)\([^/_]\+\)\(.*/'"$NAME"'\)$:%lang(\2) \1\2\3:
-'"$ALL_NAME$HTML"'s:\(.*/doc/HTML/\)\([^/_]\+\)\(.*/[a-zA-Z0-9.\_\-]\+/\)::
-'"$ALL_NAME$HTML"'s:\(.*/doc/HTML/\)\([^/_]\+\)\(.*/[a-zA-Z0-9.\_\-]\+$\):%lang(\2) \1\2\3:
-s:^\([^%].*\)::
-s:%lang(C) ::
+s<'"$TOP_DIR"'<<
+'"$NO_ALL_NAME$HTML"'s<\(.*/doc/HTML/\)\([^/_]\+\)\(.*/'"$NAME"'/\)<<
+'"$NO_ALL_NAME$HTML"'s<\(.*/doc/HTML/\)\([^/_]\+\)\(.*/'"$NAME"'\)$<%lang(\2) \1\2\3<
+'"$ALL_NAME$HTML"'s<\(.*/doc/HTML/\)\([^/_]\+\)\(.*/[a-zA-Z0-9.\_\-]\+/\)<<
+'"$ALL_NAME$HTML"'s<\(.*/doc/HTML/\)\([^/_]\+\)\(.*/[a-zA-Z0-9.\_\-]\+$\)<%lang(\2) \1\2\3<
+s<^\([^%].*\)<<
+s<%lang(C) <<
 /^$/d' >> $MO_NAME
 
 find "$TOP_DIR" -type f -o -type l|sed '
