@@ -32,7 +32,7 @@ static char sccsid[] = "@(#)fts.c	8.6 (Berkeley) 8/14/94";
 #endif /* LIBC_SCCS and not lint */
 
 /* Conditional to set up proper fstat64 implementation */
-#if defined(hpux) || defined(sun)
+#if defined(hpux) || defined(sun) || defined(__OS2__)
 #   define FTS_FSTAT64(_fd, _sbp)   fstat((_fd), (_sbp))
 #else
 #   define FTS_FSTAT64(_fd, _sbp)   fstat64((_fd), (_sbp))
@@ -64,12 +64,10 @@ static char sccsid[] = "@(#)fts.c	8.6 (Berkeley) 8/14/94";
 #if defined(__APPLE__)
 #   define __errno_location()	(__error())
 #endif
-#if defined(__KLIBC__)
+#if defined(__OS2__)
 #   define __errno_location()	(&errno)
 #   define dirfd(dirp)		-1
 #   define stat64		stat
-#   define _STAT_VER		0
-#   define __fxstat64(_stat_ver, _fd, _sbp)	fstat((_fd), (_sbp))
 #endif
 
 #include "system.h"

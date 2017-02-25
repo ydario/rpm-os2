@@ -163,7 +163,7 @@ static void doScriptExec(ARGV_const_t argv, ARGV_const_t prefixes,
 {
     int flag;
     int fdno;
-    int xx;
+    int xx = 0;
     int open_max;
 
     (void) signal(SIGPIPE, SIG_DFL);
