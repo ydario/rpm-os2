@@ -380,54 +380,46 @@ int rpmFileIsCompressed(const char * file, rpmCompressedMagic * compressed)
     return rc;
 }
 
+#ifdef __EMX__
+#define AT_UNIXROOT "/@unixroot"
+#define AT_UNIXROOT_LEN (sizeof(AT_UNIXROOT) - 1)
+#endif
+
 /* @todo "../sbin/./../bin/" not correct. */
+/*
+ * @todo In general, this function recognizes ':' as path separators but it e.g.
+ * doesn't trim trailing slashes within ':'. Also, ':' clashes with drive letter
+ * separators on platforms like OS/2.
+ */
 char *rpmCleanPath(char * path)
 {
-#ifdef __EMX__
-    #define AT_UNIXROOT "/@unixroot"
-    const int AT_UNIXROOT_LEN = strlen(AT_UNIXROOT);
-#endif
     const char *s;
-    char *se, *t, *te;
+    char *se, *t, *te, *tb;
     int begin = 1;
 
     if (path == NULL)
 	return NULL;
 
 /*fprintf(stderr, "*** RCP %s ->\n", path); */
-    s = t = te = path;
-
-#ifdef __EMX__
-    // clean '//X:/...' or '/X:/...'
-    if (s[3] == ':')
-	s++;
-    if (s[2] == ':')
-	s++;
-    // clean '/@unixroot///@unixroot/...'
-    if (strncmp( s, AT_UNIXROOT "//" AT_UNIXROOT, AT_UNIXROOT_LEN*2) == 0)
-       s += (AT_UNIXROOT_LEN+2);
-    // clean '/@unixroot//@unixroot/...'
-    if (strncmp( s, AT_UNIXROOT "/" AT_UNIXROOT, AT_UNIXROOT_LEN*2) == 0)
-       s += (AT_UNIXROOT_LEN);
-    // clean '/@unixroot/@unixroot/...'
-    if (strncmp( s, AT_UNIXROOT AT_UNIXROOT, AT_UNIXROOT_LEN*2) == 0)
-       s += (AT_UNIXROOT_LEN);
-    // clean '/@unixroot/X:/...'
-    if (strncmp( s, AT_UNIXROOT, AT_UNIXROOT_LEN) == 0
-        && s[AT_UNIXROOT_LEN+2] == ':')
-       s += (AT_UNIXROOT_LEN+1);
-#endif
+    s = t = te = tb = path;
 
     while (*s != '\0') {
 /*fprintf(stderr, "*** got \"%.*s\"\trest \"%s\"\n", (t-path), path, s); */
 	switch(*s) {
 	case ':':			/* handle url's */
 	    if (s[1] == '/' && s[2] == '/') {
-		*t++ = *s++;
-		*t++ = *s++;
-		break;
+		se = tb;
+		while (risalpha(*se) && se < t)
+		    se++;
+		if (se == t) {
+		    *t++ = *s++;
+		    *t++ = *s++;
+		    break;
+		}
 	    }
 	    begin=1;
+	    /* Save the new beginning */
+	    tb = t + 1;
 	    break;
 	case '/':
 	    /* Move parent dir forward */
@@ -439,6 +431,17 @@ char *rpmCleanPath(char * path)
 	    }
 	    while (s[1] == '/')
 		s++;
+#ifdef __EMX__
+	    /*
+	     * On OS/2 under kLIBC root is often "/@unixroot" and it may be
+	     * concatenated several times, drop duplicates.
+	     */
+	    if ((t-tb) == AT_UNIXROOT_LEN &&
+		!strncmp(tb, AT_UNIXROOT, AT_UNIXROOT_LEN) && !strncmp(s, AT_UNIXROOT, AT_UNIXROOT_LEN) && (s[AT_UNIXROOT_LEN] == '/' || !s[AT_UNIXROOT_LEN])) {
+		s += AT_UNIXROOT_LEN;
+/*fprintf(stderr, "*** dropping repetitive \"%.*s\"\n", AT_UNIXROOT_LEN, AT_UNIXROOT); */
+	    }
+#endif
 	    while (t > path && t[-1] == '/')
 		t--;
 	    break;
@@ -484,12 +487,25 @@ char *rpmCleanPath(char * path)
 		continue;
 	    }
 	    break;
-#ifdef __EMX__
+#ifdef __OS2__
 	case '\\':
-	    *t = '/';
-	    break;
+	    *t++ = '/';
+	    s++;
+	    continue;
 #endif
 	default:
+#ifdef __OS2__
+	    /*
+	     * If we encounter an absolute path starting with a drive letter
+	     * (a result of concatenation of some root dir and this path), it
+	     * should supersede any leading path components to become valid.
+	     */
+	    if (tb != s && (begin || s[-1] == '/') && risalpha(*s) && s[1] == ':' && (s[2] == '/' || s[2] == '\\')) {
+/*fprintf(stderr, "*** superseding \"%.*s\" with absolute path\n", (t-tb), tb); */
+		memmove(tb, s, strlen(s) + 1);
+		s = t = te = tb + 1;
+	    }
+#endif
 	    begin = 0;
 	    break;
 	}
