@@ -500,9 +500,10 @@ char *rpmCleanPath(char * path)
 	     * (a result of concatenation of some root dir and this path), it
 	     * should supersede any leading path components to become valid.
 	     */
-	    if (tb != s && (begin || s[-1] == '/') && risalpha(*s) && s[1] == ':' && (s[2] == '/' || s[2] == '\\')) {
+	    if ((begin || s[-1] == '/') && risalpha(*s) && s[1] == ':' && (s[2] == '/' || s[2] == '\\')) {
 /*fprintf(stderr, "*** superseding \"%.*s\" with absolute path\n", (t-tb), tb); */
-		memmove(tb, s, strlen(s) + 1);
+		if (tb != s)
+		    memmove(tb, s, strlen(s) + 1);
 		s = t = te = tb + 1;
 	    }
 #endif
