@@ -254,16 +254,12 @@ enum modes {
     MODE_TARBUILD	= (1 << 11),
 };
 
-static int quiet;
-
 /* the structure describing the options we take and the defaults */
 static struct poptOption optionsTable[] = {
 
  { NULL, '\0', POPT_ARG_INCLUDE_TABLE, rpmBuildPoptTable, 0,
 	N_("Build options with [ <specfile> | <tarball> | <source package> ]:"),
 	NULL },
-
- { "quiet", '\0', POPT_ARGFLAG_DOC_HIDDEN, &quiet, 0, NULL, NULL},
 
  { NULL, '\0', POPT_ARG_INCLUDE_TABLE, rpmcliAllPoptTable, 0,
 	N_("Common options for all rpm modes and executables:"),
@@ -620,7 +616,8 @@ int main(int argc, char *argv[])
     }
 
     /* rpmbuild is rather chatty by default */
-    rpmSetVerbosity(quiet ? RPMLOG_WARNING : RPMLOG_INFO);
+    if (rpmlogSetMask(0) == RPMLOG_UPTO(RPMLOG_NOTICE))
+	rpmSetVerbosity(RPMLOG_INFO);
 
     if (rpmcliPipeOutput && initPipe())
 	exit(EXIT_FAILURE);
