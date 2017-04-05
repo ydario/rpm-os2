@@ -11,8 +11,11 @@ cd "$RPM_BUILD_ROOT"
 COMPRESS=${COMPRESS:-gzip -9 -n}
 COMPRESS_EXT=${COMPRESS_EXT:-.gz}
 
-ROOT_PREFIX=.
-[ "$RPM_OS" = "os2-emx" ] && ROOT_PREFIX="./@unixroot"
+ROOT_PREFIX=${1:-.}
+if [ "${ROOT_PREFIX%%/*}" != "." ]; then
+    echo "$0: Prefix $ROOT_PREFIX must start with ./"
+    exit 1
+fi
 
 for d in ${ROOT_PREFIX}/usr/man/man* ${ROOT_PREFIX}/usr/man/*/man* ${ROOT_PREFIX}/usr/info \
 	${ROOT_PREFIX}/usr/share/man/man* ${ROOT_PREFIX}/usr/share/man/*/man* ${ROOT_PREFIX}/usr/share/info \
