@@ -2,10 +2,20 @@
 
 # TODO fix this script to accept $2 instead of stdin
 # re-read file to stdin...
-exec 0<$2
+[ -n "$2" ] && exec 0<$2
 
-pkgconfig=/usr/bin/pkg-config
-test -x $pkgconfig || {
+case `uname -a` in
+OS/2*)
+    pkgconfig=/@unixroot/usr/bin/pkg-config.exe
+    pathsep="\;"
+    ;;
+*)
+    pkgconfig=/usr/bin/pkg-config
+    pathsep=":"
+    ;;
+esac
+
+test -x "$pkgconfig" || {
     cat > /dev/null
     exit 0
 }
@@ -27,7 +37,7 @@ case $1 in
     *.pc)
 	# Query the dependencies of the package.
 	DIR="`dirname ${filename}`"
-	export PKG_CONFIG_PATH="$DIR:$DIR/../../share/pkgconfig"
+	export PKG_CONFIG_PATH="$DIR$pathsep$DIR/../../share/pkgconfig"
 	$pkgconfig --print-provides "$filename" 2> /dev/null | while read n r v ; do
 	    [ -n "$n" ] || continue
 	    # We have a dependency.  Make a note that we need the pkgconfig
@@ -47,7 +57,7 @@ case $1 in
 	i="`expr $i + 1`"
 	[ $i -eq 1 ] && echo "$pkgconfig"
 	DIR="`dirname ${filename}`"
-	export PKG_CONFIG_PATH="$DIR:$DIR/../../share/pkgconfig"
+	export PKG_CONFIG_PATH="$DIR$pathsep$DIR/../../share/pkgconfig"
 	$pkgconfig --print-requires --print-requires-private "$filename" 2> /dev/null | while read n r v ; do
 	    [ -n "$n" ] || continue
 	    echo -n "pkgconfig($n) "
