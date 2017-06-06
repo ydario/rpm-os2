@@ -1087,6 +1087,14 @@ done \
 %__transaction_ima		%{__plugindir}/ima.so
 
 #------------------------------------------------------------------------
+# OS/2 file unlocking mode (used for unlocking loaded DLLs etc):
+#   0 - automatic handling (default)
+#   1 - use config.sys driver only
+#   2 - do nothing, report error
+#
+%_os2_unlock_mode       0
+
+#------------------------------------------------------------------------
 # Macros to handle creation/deletion of WPS objects from %post* sections.
 # There are four single macros:
 #
@@ -1218,6 +1226,12 @@ done \
 
 %warpin_conflicts_end EOF\
 \} || exit $?
+
+#------------------------------------------------------------------------
+# OS/2 boot drive and unixroot directory macros
+#
+%os2_boot_drive			%{_os2_boot_drive}
+%os2_unixroot_drive		%{_os2_unixroot_drive}
 
 #------------------------------------------------------------------------------
 # Macros for further automated spec %setup and patch application
