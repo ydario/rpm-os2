@@ -1087,14 +1087,6 @@ done \
 %__transaction_ima		%{__plugindir}/ima.so
 
 #------------------------------------------------------------------------
-# handle file unlocking, options:
-#   0 - automatic handling (default)
-#   1 - use config.sys driver only
-#   2 - do nothing, report error
-#
-%_os2_unlock_mode       0
-
-#------------------------------------------------------------------------
 # Macros to handle creation/deletion of WPS objects from %post* sections.
 # There are four single macros:
 #
@@ -1227,16 +1219,6 @@ done \
 %warpin_conflicts_end EOF\
 \} || exit $?
 
-#------------------------------------------------------------------------
-# OS/2 macros to handle config.sys changes (using cube script)
-#
-%os2_boot_drive			%{_os2_boot_drive}
-%os2_unixroot_drive		%{_os2_unixroot_drive}
-%os2_config_sys			%{os2_boot_drive}\\config.sys
-%cube() 			cmd /c '%UNIXROOT%\\usr\\bin\\cube.exe %{*}'\
-%{nil}
-
-=======
 #------------------------------------------------------------------------------
 # Macros for further automated spec %setup and patch application
 
