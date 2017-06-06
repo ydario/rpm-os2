@@ -27,7 +27,7 @@ rpmconfig_SCRIPTS = \
 	brp-compress brp-python-bytecompile brp-java-gcjcompile \
 	brp-strip brp-strip-comment-note brp-python-hardlink \
 	brp-strip-shared brp-strip-static-archive \
-	wps-object.cmd warpin-conflicts.cmd os2deps.sh \
+	os2deps.sh \
 	check-files check-prereqs \
 	check-buildroot check-rpaths check-rpaths-worker \
 	find-lang.sh find-requires find-provides \
