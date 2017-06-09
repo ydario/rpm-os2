@@ -1094,12 +1094,6 @@ done \
 #
 %_os2_unlock_mode       0
 
-#------------------------------------------------------------------------
-# OS/2 boot drive and unixroot directory macros
-#
-%os2_boot_drive			%{_os2_boot_drive}
-%os2_unixroot_drive		%{_os2_unixroot_drive}
-
 #------------------------------------------------------------------------------
 # Macros for further automated spec %setup and patch application
 

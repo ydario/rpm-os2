@@ -1294,20 +1294,6 @@ static void defaultMachine(rpmrcCtx ctx, const char ** arch, const char ** os)
 			   ctx->tables[RPM_MACHTABLE_INSTOS].canonsLength);
 	if (canon)
 	    rstrlcpy(un.sysname, canon->short_name, sizeof(un.sysname));
-	  
-#ifdef __KLIBC__
-	{
-		char macro[64];
-		ULONG   aulDrive;
-		DosQuerySysInfo(QSV_BOOT_DRIVE, QSV_BOOT_DRIVE, (PVOID)&aulDrive, sizeof(ULONG));
-		sprintf( macro, "_os2_boot_drive %c:", '@'+aulDrive);
-		rpmDefineMacro(NULL, macro, -1);
-		if (getenv("UNIXROOT")) {
-			sprintf( macro, "_os2_unixroot_drive %s", getenv("UNIXROOT"));
-			rpmDefineMacro(NULL, macro, -1);
-		}
-	}
-#endif
 
 	ctx->machDefaults = 1;
 	break;
